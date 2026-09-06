@@ -54,8 +54,8 @@ Masalah sekarang: posisi/portfolio/ledger hilang saat refresh; hash chain client
 - [ ] **3.1** BE: simpan di **SQLite** (better-sqlite3): orders, fills, positions, portfolio snapshots, audit ledger, agent decisions (prompt+response+latency)
 - [ ] **3.2** BE: audit entry di-generate & di-sign SERVER (HMAC pakai secret asli dari env), prevHash chaining antar baris DB, endpoint `GET /api/ledger` (pagination) + `GET /api/ledger/verify` (recompute chain, laporkan tamper)
 - [ ] **3.3** Hapus SEMUA seed data palsu (`INITIAL_POSITIONS`, `INITIAL_CLOSED_TRADES`, fake balance `9973.5` di broker.ts) — akun paper mulai kosong & jujur; seed hanya untuk "demo mode" via env terpisah
-- [ ] [FE] **3.4** **Audit Ledger Modal v2**: baca dari `/api/ledger` (persisten), ada tombol **Verify Chain** → hasil verifikasi server ditampilkan (valid/suspect per blok), filter per decision/order/exit
-- [ ] [FE] **3.5** **Trade Journal + Equity Curve** historis dari DB (bukan in-memory): win rate, avg R, profit factor, drawdown, slippage terukur per order
+- [x] [FE] **3.4** **Audit Ledger Modal v2**: baca dari `/api/ledger` (persisten), ada tombol **Verify Chain** → hasil verifikasi server ditampilkan (valid/suspect per blok), filter per decision/order/exit
+- [x] [FE] **3.5** **Trade Journal + Equity Curve** historis dari DB (bukan in-memory): win rate, avg R, profit factor, drawdown, slippage terukur per order
 - [ ] **3.6** FE: reset `usePaperTrading` jadi reader dari BE state (portfolio sync via polling/WS), hapus mark-to-market ganda di client
 
 **Acceptance Phase 3:** restart server & refresh browser → semua posisi, ledger, dan jurnal tetap ada dan cocok dengan DB.
