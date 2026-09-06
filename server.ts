@@ -14,11 +14,27 @@ import {
   saveBrokerCredentials,
   testBrokerConnection,
 } from "./broker";
+import {
+  PaperOrderError,
+  closePaperPosition,
+  getBookFilePath,
+  getLatestEventSeq,
+  getPaperAccount,
+  getPaperBalance,
+  getPaperEvents,
+  getPaperOrder,
+  getPaperPositions,
+  initPaperBook,
+  openPaperPosition,
+  refreshPaperMarks,
+  startBracketMonitor,
+  updatePaperPosition,
+} from "./paperBook";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || "3000", 10);
 
 app.use(express.json({ limit: "5mb" }));
 
@@ -561,11 +577,19 @@ app.get("/api/broker/klines", async (req, res) => {
   }
 });
 
-// Balance (paper: saldo contoh; live: saldo exchange asli)
+// Balance (paper: saldo akun paper book; live: saldo exchange asli)
 app.get("/api/broker/balance", async (_req, res) => {
   try {
-    const balances = await fetchBrokerBalance();
-    res.json({ success: true, mode: getBrokerStatus().mode, balances });
+    if (getBrokerStatus().mode === "live") {
+      const balances = await fetchBrokerBalance();
+      return res.json({ success: true, mode: "live", balances });
+    }
+    res.json({
+      success: true,
+      mode: "paper",
+      balances: getPaperBalance(),
+      account: getPaperAccount(),
+    });
   } catch (err: any) {
     res.status(403).json({ success: false, message: err?.message || "Balance fetch gagal." });
   }
@@ -602,14 +626,156 @@ app.post("/api/broker/test", async (_req, res) => {
   }
 });
 
-// Order (paper: simulasi realistis di atas harga ccxt; live: order exchange asli)
+// Order (paper: buku posisi paper dengan fill terukur; live: order exchange asli)
 app.post("/api/broker/order", async (req, res) => {
   try {
-    const result = await placeBrokerOrder(req.body || {});
+    const body = req.body || {};
+
+    // ---------- PAPER MODE ----------
+    if (getBrokerStatus().mode !== "live") {
+      // Closing order: { closePositionId }
+      if (body.closePositionId) {
+        try {
+          const result = await closePaperPosition(String(body.closePositionId), "MANUAL");
+          return res.json({ success: true, mode: "paper", closed: true, ...result });
+        } catch (err: any) {
+          if (err instanceof PaperOrderError) {
+            return res.status(400).json({ success: false, status: "REJECTED", reason: err.code, message: err.message });
+          }
+          return res.status(400).json({ success: false, status: "REJECTED", reason: "CLOSE_FAILED", message: err?.message || "Gagal menutup posisi." });
+        }
+      }
+
+      // Opening order
+      try {
+        const result = await openPaperPosition({
+          symbol: body.symbol,
+          side: String(body.side || "buy").toLowerCase() === "sell" ? "sell" : "buy",
+          qty: Number(body.amount),
+          leverage: body.leverage,
+          stopLoss: body.stopLoss,
+          takeProfit: body.takeProfit,
+          meta: body.meta,
+        });
+        const { position, order } = result;
+        return res.json({
+          success: true,
+          mode: "paper",
+          order: {
+            id: order.id,
+            status: order.status,
+            fillPrice: order.fillPrice,
+            slippageBps: order.slippageBps,
+            feeUSD: order.feeUSD,
+            qty: order.qty,
+            notional: order.notional,
+            leverage: order.leverage,
+            marginRequired: order.marginRequired,
+            executionLatencyMs: order.executionLatencyMs,
+            timestamp: order.timestamp,
+            signature: order.signature,
+            payloadHash: order.payloadHash,
+          },
+          position,
+        });
+      } catch (err: any) {
+        if (err instanceof PaperOrderError) {
+          return res.status(400).json({ success: false, status: "REJECTED", reason: err.code, message: err.message });
+        }
+        return res.status(400).json({ success: false, status: "REJECTED", reason: "ORDER_FAILED", message: err?.message || "Order paper gagal." });
+      }
+    }
+
+    // ---------- LIVE MODE (pass-through, guarded) ----------
+    const result = await placeBrokerOrder(body);
     res.json({ success: true, ...result });
   } catch (err: any) {
     res.status(400).json({ success: false, message: err?.message || "Order gagal." });
   }
+});
+
+// Positions (paper: buku posisi paper dengan mark terbaru; live: belum disimpan, passthrough)
+app.get("/api/broker/positions", async (_req, res) => {
+  if (getBrokerStatus().mode === "live") {
+    return res.json({
+      success: true,
+      mode: "live",
+      positions: [],
+      account: null,
+      note: "Live positions are pass-through only and not stored yet (roadmap Phase 2+).",
+    });
+  }
+  try {
+    await refreshPaperMarks();
+  } catch (err: any) {
+    console.warn(`Mark refresh gagal (getPositions): ${err?.message}`);
+  }
+  res.json({
+    success: true,
+    mode: "paper",
+    positions: getPaperPositions(),
+    account: getPaperAccount(),
+  });
+});
+
+// Close posisi (paper: market close via paper book)
+app.post("/api/broker/close", async (req, res) => {
+  try {
+    if (getBrokerStatus().mode === "live") {
+      return res.status(400).json({ success: false, message: "Live close via /api/broker/close belum diimplementasikan (roadmap Phase 2+)." });
+    }
+    const positionId = String((req.body || {}).positionId || "");
+    if (!positionId) {
+      return res.status(400).json({ success: false, status: "REJECTED", reason: "MISSING_POSITION_ID", message: "positionId wajib diisi." });
+    }
+    const result = await closePaperPosition(positionId, "MANUAL");
+    res.json({ success: true, mode: "paper", closed: true, ...result });
+  } catch (err: any) {
+    if (err instanceof PaperOrderError) {
+      const status = err.code === "POSITION_NOT_FOUND" ? 404 : 400;
+      return res.status(status).json({ success: false, status: "REJECTED", reason: err.code, message: err.message });
+    }
+    res.status(400).json({ success: false, message: err?.message || "Close gagal." });
+  }
+});
+
+// Update SL/TP posisi (manual SL edit / move-to-break-even)
+app.post("/api/broker/position/update", (req, res) => {
+  try {
+    const body = req.body || {};
+    const positionId = String(body.positionId || "");
+    if (!positionId) {
+      return res.status(400).json({ success: false, reason: "MISSING_POSITION_ID", message: "positionId wajib diisi." });
+    }
+    const updated = updatePaperPosition(positionId, {
+      stopLoss: body.stopLoss !== undefined ? Number(body.stopLoss) : undefined,
+      takeProfit: body.takeProfit !== undefined ? Number(body.takeProfit) : undefined,
+      breakEven: Boolean(body.breakEven),
+    });
+    res.json({ success: true, mode: "paper", position: updated });
+  } catch (err: any) {
+    if (err instanceof PaperOrderError) {
+      const status = err.code === "POSITION_NOT_FOUND" ? 404 : 400;
+      return res.status(status).json({ success: false, reason: err.code, message: err.message });
+    }
+    res.status(400).json({ success: false, message: err?.message || "Update posisi gagal." });
+  }
+});
+
+// Order status: receipt order paper yang tersimpan (600 status lifecycle ada; NEW->FILLED sinkron)
+app.get("/api/broker/order-status/:orderId", (req, res) => {
+  const order = getPaperOrder(String(req.params.orderId || ""));
+  if (!order) {
+    return res.status(404).json({ success: false, message: `Order ${req.params.orderId} tidak ditemukan.` });
+  }
+  res.json({ success: true, mode: "paper", order });
+});
+
+// Event log paper book (ring buffer) dengan sinceSeq
+app.get("/api/broker/events", (req, res) => {
+  const sinceSeq = Math.max(0, parseInt(String(req.query.sinceSeq || "0"), 10) || 0);
+  const events = getPaperEvents(sinceSeq);
+  res.json({ success: true, mode: "paper", events, latestSeq: getLatestEventSeq() });
 });
 
 // --- Server & Vite Startup ---
@@ -630,7 +796,14 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[AI Trading Agent] Server listening on http://0.0.0.0:${PORT}`);
+    // Paper book adalah sumber kebenaran posisi paper; monitor bracket aktif
+    // hanya di mode selain live.
+    if (getBrokerStatus().mode !== "live") {
+      console.log(`[AI Trading Agent] Paper mode aktif; buku posisi: ${getBookFilePath()}`);
+      startBracketMonitor(3000);
+    }
   });
 }
 
+initPaperBook();
 startServer();
