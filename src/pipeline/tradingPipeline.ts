@@ -133,10 +133,19 @@ export async function runTradingPipelineCycle(
       slippageBps = brokerRes.slippageBps;
       signature = brokerRes.signature;
       payloadHash = brokerRes.payloadHash;
-      newPosition = brokerRes.position || null;
 
-      // Update cash balance
-      updatedPortfolio.cash = Math.max(0, updatedPortfolio.cash - allocatedUsd);
+      if (brokerRes.status === "REJECTED") {
+        // Server menolak order (alasan eksplisit). Tidak ada posisi, tidak ada
+        // pengurangan cash.
+        status = "REJECTED";
+        newPosition = null;
+      } else {
+        status = "FILLED";
+        newPosition = brokerRes.position || null;
+        // Update cash balance (margin dipotong server dari akun paper; sisi
+        // client mempertahankan cash simetris untuk UI lokal).
+        updatedPortfolio.cash = Math.max(0, updatedPortfolio.cash - allocatedUsd);
+      }
     }
   } else if (!riskResult.approved && decision.action !== "HOLD") {
     status = "REJECTED";
