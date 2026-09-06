@@ -36,14 +36,14 @@ Masalah sekarang: `src/pipeline/brokerService.ts` = simulator pura-pura (slippag
 Masalah sekarang: risk gate & kill-switch cuma di client; server bind 0.0.0.0 tanpa auth; siapa di LAN bisa place order / inject API key.
 
 - [x] **2.1** Bind default `127.0.0.1` (env `HOST` untuk override) + `helmet` + `cors` allowlist
-- [ ] [FE] **2.2** **Auth Gate UI**: layar unlock (passphrase/login lokal) → token sesi di-send sebagai `Authorization: Bearer` ke semua rute broker; server validasi token di SEMUA endpoint non-public
+- [x] [FE] **2.2** **Auth Gate UI**: layar unlock (passphrase/login lokal) → token sesi di-send sebagai `Authorization: Bearer` ke semua rute broker; server validasi token di SEMUA endpoint non-public
 - [x] **2.3** **Server-side risk enforcement** di `placeBrokerOrder`: kill-switch flag, max daily loss, max open positions, max margin per posisi, cooldown antar order — order ditolak server dengan alasan eksplisit
-- [ ] [FE] **2.4** **Guardrails Panel**: tampilkan config risk yang aktif di server + status tiap guard (arm/disarm, daily PnL vs limit, jumlah posisi vs cap, remaining cooldown). Kill-switch button = API call ke server (bukan toggle UI saja), dengan confirm dialog
+- [x] [FE] **2.4** **Guardrails Panel**: tampilkan config risk yang aktif di server + status tiap guard (arm/disarm, daily PnL vs limit, jumlah posisi vs cap, remaining cooldown). Kill-switch button = API call ke server (bukan toggle UI saja), dengan confirm dialog
 - [x] **2.5** Rate limit (express-rate-limit) di semua /api
 - [x] **2.6** Vault credential: enkripsi at-rest beneran (DPAPI via machine key / AES dengan key turunan passphrase), catatan: `mode: 0o600` di Windows TIDAK berfungsi; tambah `GET /api/broker/credentials/status` (mask key, tampilkan 4 char terakhir + exchange + testnet)
-- [ ] [FE] **2.7** KeyVaultModal redesign: tampilkan source credential (env vs vault), fingerprint key, testnet badge, tombol revoke yang memanggil `/credentials/clear` + konfirmasi
+- [x] [FE] **2.7** KeyVaultModal redesign: tampilkan source credential (env vs vault), fingerprint key, testnet badge, tombol revoke yang memanggil `/credentials/clear` + konfirmasi
 - [x] **2.8** Live-mode double-lock: order live hanya jalan jika `TRADING_MODE=live` **DAN** vault punya flag `liveArmed: true` yang di-set lewat UI dengan konfirmasi ketik manual (anti one-click money loss)
-- [ ] [FE] **2.9** Banner merah permanen `LIVE TRADING ARMED` + equity real vs paper di header saat mode live
+- [x] [FE] **2.9** Banner merah permanen `LIVE TRADING ARMED` + equity real vs paper di header saat mode live
 
 **Acceptance Phase 2:** semua penolakan order berasal dari server dengan reason code; UI tidak bisa lagi jadi satu-satunya penjaga risiko.
 
