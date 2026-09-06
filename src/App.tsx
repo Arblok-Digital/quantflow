@@ -24,14 +24,14 @@ import { fetchOnChainMetrics } from "./data/onchainData";
 import { fetchMacroCalendar } from "./data/macroData";
 import { refreshOnChainRealData } from "./data/blockchainRealData";
 
-import { useAuditLedger } from "./hooks/useAuditLedger";
 import { usePaperTrading } from "./hooks/usePaperTrading";
 import { useMarketData } from "./hooks/useMarketData";
 import { useTradingPipeline } from "./hooks/useTradingPipeline";
-import { useAuth } from "./hooks/useAuth";
+import { useAuth, authFetch } from "./hooks/useAuth";
 import { LoginGate } from "./components/LoginGate";
 import { GuardrailsPanel } from "./components/GuardrailsPanel";
 import { useLiveMode } from "./hooks/useLiveMode";
+import { TradeJournalPanel } from "./components/TradeJournalPanel";
 
 type ModuleTab = "overview" | "paper" | "stream1s" | "onchain" | "macro";
 
@@ -63,8 +63,44 @@ export default function App() {
   const [onChainMetrics, setOnChainMetrics] = useState<OnChainMetrics>(() => fetchOnChainMetrics(symbol, 64250));
   const [macroSummary, setMacroSummary] = useState<MacroSummary>(() => fetchMacroCalendar());
 
-  // --- Shared Audit Ledger (hash chain client-side) ---
-  const { auditLogs, prependAudit, avgSlippage, latestBlockHash } = useAuditLedger();
+  // Server ledger stats baseline for avgSlippage (Phase 3.4 requires server truth, not client avg)
+  const [serverAvgSlippage, setServerAvgSlippage] = useState<number | null>(null);
+  const [serverBlockTail, setServerBlockTail] = useState<string | null>(null);
+  useEffect(() => {
+    if (!auth.isAuthenticated) return;
+    let alive = true;
+    const loadLedgerBadge = async () => {
+      try {
+        const statsRes = await authFetch("/api/ledger/stats").then((r) => r.json().catch(() => null));
+        if (!alive) return;
+        if (statsRes && typeof statsRes.avgSlippageBps === "number") {
+          setServerAvgSlippage(Number(statsRes.avgSlippageBps));
+        } else {
+          setServerAvgSlippage(null);
+        }
+      } catch {
+        if (alive) setServerAvgSlippage(null);
+      }
+      try {
+        const ledgerRes = await authFetch("/api/ledger?limit=1").then((r) => r.json().catch(() => null));
+        if (!alive) return;
+        const first = ledgerRes?.entries?.[0];
+        if (first && first.hash) setServerBlockTail(String(first.hash));
+        else setServerBlockTail(null);
+      } catch {
+        if (alive) setServerBlockTail(null);
+      }
+    };
+    loadLedgerBadge();
+    const iv = setInterval(loadLedgerBadge, 6000);
+    const onVis = () => { if (!document.hidden) loadLedgerBadge(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { alive = false; clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, [auth.isAuthenticated]);
+  const avgSlippageDisplay: number | string = serverAvgSlippage != null && isFinite(serverAvgSlippage) ? serverAvgSlippage : "–";
+  // prependAudit retained as no-op compat for pipeline (ledger now server-side)
+  const prependAudit = useCallback((_entry: any) => {}, []);
+  const latestBlockHash = serverBlockTail ?? "GENESIS_ROOT_AI_TRADING";
 
   // Refresh on-chain/makro ke harga feed live terbaru (dipanggil tiap sinkronisasi).
   // Snapshot real blockchain.com di-refresh lebih dulu -> simulasi di-anchor data asli.
@@ -89,7 +125,6 @@ export default function App() {
   const paper = usePaperTrading({
     symbol,
     currentPrice: market.currentPrice,
-    prependAudit,
   });
 
   const pipeline = useTradingPipeline({
@@ -397,6 +432,8 @@ export default function App() {
               onResetPaperAccount={paper.resetPaperAccount}
               onSimulateTradeEntry={paper.simulateTradeEntry}
             />
+
+            <TradeJournalPanel />
           </>
         )}
 
@@ -470,8 +507,10 @@ export default function App() {
               positions={paper.positions}
               latestLatency={pipeline.latestLatency}
               onClosePosition={paper.closePosition}
-              averageSlippageBps={avgSlippage}
+              averageSlippageBps={typeof avgSlippageDisplay === "number" ? avgSlippageDisplay : 0}
             />
+
+            <TradeJournalPanel />
           </>
         )}
 
@@ -535,7 +574,6 @@ export default function App() {
       <AuditLedgerModal
         isOpen={isAuditLedgerOpen}
         onClose={() => setIsAuditLedgerOpen(false)}
-        logs={auditLogs}
       />
 
       <KeyVaultModal
