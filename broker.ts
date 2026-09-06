@@ -297,7 +297,7 @@ function makeExchange(): ccxt.Exchange {
     apiKey: cfg.apiKey || undefined,
     secret: cfg.apiSecret || undefined,
     enableRateLimit: true,
-    timeout: 8000,
+    timeout: Number(process.env.CCXT_TIMEOUT_MS) || 60000,
   });
   if (cfg.testnet && typeof (exchange as any).setSandboxMode === "function") {
     (exchange as any).setSandboxMode(true);
@@ -545,9 +545,16 @@ interface NormalizedBalance {
 
 export async function fetchBrokerBalance(): Promise<NormalizedBalance[]> {
   if (process.env.TRADING_MODE !== "live") {
+    // Honest paper accounting — derive from paperBook SQLite state, not hardcoded
+    const { getPaperAccount } = await import("./paperBook.js");
+    const acct = getPaperAccount();
     return [
-      { currency: "USDT", free: 9973.5, used: 26.5, total: 10000 },
-      { currency: "BTC", free: 0.0032, used: 0, total: 0.0032 },
+      {
+        currency: "USDT",
+        free: acct.cash,
+        used: acct.marginLocked,
+        total: Number((acct.cash + acct.marginLocked).toFixed(2)),
+      },
     ];
   }
   assertLiveAllowed();

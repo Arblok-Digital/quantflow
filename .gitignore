@@ -10,3 +10,8 @@ coverage/
 .broker-vault-key
 .guardrails.json
 .paper-book.json
+*.db
+*.db-shm
+*.db-wal
+trading.db
+.audit-signing-key

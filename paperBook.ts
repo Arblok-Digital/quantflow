@@ -1,24 +1,31 @@
-import fs from "node:fs";
-import path from "node:path";
 import { createHmac, createHash } from "node:crypto";
 import { getExchange, ensureMarketsLoaded } from "./broker";
+import {
+  initDb,
+  getDb,
+  savePositionDb,
+  saveOrderDb,
+  saveFillDb,
+  saveSnapshotDb,
+  loadOpenPositionsDb,
+  loadAllOrdersDb,
+  getLatestSnapshotDb,
+  getDbFilePath,
+  appendAudit,
+} from "./db";
 
 // ================= PAPER POSITION BOOK =================
-// Source of truth for PAPER trading. Persisted to .paper-book.json in cwd so
-// server restarts rehydrate the book (positions, order receipts, account,
-// event log). All fills are measured against real ccxt market data — no
-// Math.random anywhere in this module.
+// Source of truth for PAPER trading. Persisted to SQLite (trading.db) via db.ts.
+// Init rehydrates OPEN positions from DB. All fills measured against real ccxt data.
 
-export const TAKER_FEE_RATE = 0.0004; // 0.04% per side (taker)
+export const TAKER_FEE_RATE = 0.0004;
 export const INITIAL_PAPER_CASH = 10000;
-export const MAINTENANCE_MARGIN_RATE = 0.005; // used in liquidation price estimate
+export const MAINTENANCE_MARGIN_RATE = 0.005;
 export const MAX_LEVERAGE = 50;
 export const ORDERBOOK_LEVELS = 20;
 export const EVENT_RING_SIZE = 200;
-export const MARK_TTL_MS = 3000; // mark prices older than this are refreshed on demand
-export const ERROR_LOG_THROTTLE_MS = 30000; // do not flood the event log with duplicate errors
-
-const BOOK_FILE = path.join(process.cwd(), ".paper-book.json");
+export const MARK_TTL_MS = 3000;
+export const ERROR_LOG_THROTTLE_MS = 30000;
 
 export type PaperSide = "LONG" | "SHORT";
 export type PaperPositionStatus = "OPEN" | "CLOSED";
@@ -32,13 +39,13 @@ export type PaperEventType =
 
 export interface PaperPosition {
   id: string;
-  symbol: string; // normalized CCXT "BASE/QUOTE"
+  symbol: string;
   side: PaperSide;
   qty: number;
   entryPrice: number;
   notionalUSD: number;
   leverage: number;
-  marginUSD: number; // notional / leverage
+  marginUSD: number;
   stopLoss: number;
   takeProfit: number;
   liquidationPrice: number;
@@ -56,7 +63,7 @@ export interface PaperPosition {
   exitPrice?: number;
   exitReason?: ExitReason;
   realizedPnlUSD?: number;
-  feesPaidUSD: number; // accumulated entry + exit fees
+  feesPaidUSD: number;
 }
 
 export interface PaperOrderReceipt {
@@ -109,8 +116,8 @@ interface PaperBookState {
   positions: PaperPosition[];
   orders: PaperOrderReceipt[];
   events: PaperEvent[];
-  seq: number; // event sequence counter (persisted so sinceSeq survives restarts)
-  idSeq: number; // deterministic id counter (no Math.random)
+  seq: number;
+  idSeq: number;
   cash: number;
   realizedPnl: number;
 }
@@ -124,22 +131,15 @@ export class PaperOrderError extends Error {
   }
 }
 
-// ------------------------------------------------------------------
-// Number helpers (deterministic rounding only)
-// ------------------------------------------------------------------
 function roundTo(n: number, digits: number): number {
   const f = Math.pow(10, digits);
   return Math.round((n + Number.EPSILON) * f) / f;
 }
-
 const r2 = (n: number) => roundTo(Number(n), 2);
 const r3 = (n: number) => roundTo(Number(n), 3);
 const r4 = (n: number) => roundTo(Number(n), 4);
 const r6 = (n: number) => roundTo(Number(n), 6);
 
-// ------------------------------------------------------------------
-// State + persistence
-// ------------------------------------------------------------------
 let state: PaperBookState = {
   positions: [],
   orders: [],
@@ -163,38 +163,225 @@ function freshState(): PaperBookState {
   };
 }
 
-function persist(): void {
+// ------------------------------------------------------------------
+// DB helpers
+// ------------------------------------------------------------------
+function persistSnapshot(): void {
   try {
-    fs.writeFileSync(BOOK_FILE, JSON.stringify(state, null, 2), "utf-8");
+    const open = state.positions.filter((p) => p.status === "OPEN");
+    const marginLocked = open.reduce((sum, p) => sum + p.marginUSD, 0);
+    const unrealized = open.reduce((sum, p) => sum + unrealizedPnlFor(p), 0);
+    const equity = state.cash + marginLocked + unrealized;
+    saveSnapshotDb({
+      ts: Date.now(),
+      cash: r2(state.cash),
+      margin_used: r2(marginLocked),
+      equity: r2(equity),
+      unrealized_pnl: r2(unrealized),
+    });
   } catch (err) {
-    console.warn(`[paperBook] Gagal persist .paper-book.json: ${(err as Error).message}`);
+    console.warn(`[paperBook] Gagal persist snapshot: ${(err as Error).message}`);
   }
+}
+
+function dbSavePosition(pos: PaperPosition): void {
+  try {
+    savePositionDb({
+      id: pos.id,
+      symbol: pos.symbol,
+      side: pos.side,
+      entry_price: pos.entryPrice,
+      amount: pos.qty,
+      leverage: pos.leverage,
+      stop_loss: pos.stopLoss ?? null,
+      take_profit: pos.takeProfit ?? null,
+      liq_price: pos.liquidationPrice ?? null,
+      status: pos.status,
+      opened_at: pos.openedAt,
+      closed_at: pos.closedAt ?? null,
+      close_price: pos.exitPrice ?? null,
+      realized_pnl_usd: pos.realizedPnlUSD ?? null,
+      fees_usd: pos.feesPaidUSD ?? null,
+    });
+  } catch (err) {
+    console.warn(`[paperBook] Gagal save position ${pos.id}: ${(err as Error).message}`);
+  }
+}
+
+function dbSaveOrder(order: PaperOrderReceipt): void {
+  try {
+    // price = fillPrice, stop_loss/take_profit not directly in receipt — try to find linked position
+    let sl: number | null = null;
+    let tp: number | null = null;
+    if (order.positionId) {
+      const linked = state.positions.find((p) => p.id === order.positionId);
+      if (linked) {
+        sl = linked.stopLoss ?? null;
+        tp = linked.takeProfit ?? null;
+      }
+    }
+    saveOrderDb({
+      id: order.id,
+      symbol: order.symbol,
+      side: order.side,
+      type: order.type,
+      status: order.status,
+      amount: order.amount,
+      price: order.fillPrice ?? null,
+      stop_loss: sl,
+      take_profit: tp,
+      leverage: order.leverage ?? null,
+      slippage_bps: order.slippageBps ?? null,
+      mode: order.mode ?? null,
+      created_at: order.timestamp,
+      closed_at: null,
+      realized_pnl_usd: null,
+    });
+    // also save fills row
+    if (order.fillPrice != null) {
+      const fillId = `fill-${order.id}`;
+      saveFillDb({
+        id: fillId,
+        order_id: order.id,
+        symbol: order.symbol,
+        side: order.side,
+        price: order.fillPrice,
+        amount: order.amount,
+        fee_usd: order.feeUSD,
+        created_at: order.timestamp,
+      });
+    }
+  } catch (err) {
+    console.warn(`[paperBook] Gagal save order ${order.id}: ${(err as Error).message}`);
+  }
+}
+
+function deriveIdSeqFromRows(): number {
+  let max = 0;
+  const extract = (id: string) => {
+    const parts = id.split("-");
+    const last = parts[parts.length - 1];
+    const n = parseInt(last, 10);
+    if (isFinite(n) && n > max) max = n;
+  };
+  for (const p of state.positions) extract(p.id);
+  for (const o of state.orders) extract(o.id);
+  return max;
 }
 
 export function initPaperBook(): void {
   if (bookInitialized) return;
   bookInitialized = true;
-  if (fs.existsSync(BOOK_FILE)) {
+  initDb();
+  try {
+    const db = getDb();
+    // Load OPEN positions
+    const openRows = loadOpenPositionsDb();
+    const latestSnap = getLatestSnapshotDb();
+
+    // Load orders (for getPaperOrder)
+    const orderRows = loadAllOrdersDb();
+
+    // Reconstruct orders -> PaperOrderReceipt (minimal)
+    const orders: PaperOrderReceipt[] = orderRows.map((r: any) => ({
+      id: String(r.id),
+      mode: (r.mode as "paper") || "paper",
+      symbol: String(r.symbol),
+      side: (String(r.side).toLowerCase() === "sell" ? "sell" : "buy") as "buy" | "sell",
+      type: String(r.type),
+      amount: Number(r.amount),
+      fillPrice: r.price != null ? Number(r.price) : undefined,
+      slippageBps: r.slippage_bps != null ? Number(r.slippage_bps) : undefined,
+      feeUSD: 0, // fee stored in fills, fallback 0; try to fetch from fills
+      qty: Number(r.amount),
+      notional: r.price != null ? r2(Number(r.price) * Number(r.amount)) : undefined,
+      leverage: r.leverage != null ? Number(r.leverage) : undefined,
+      marginRequired: undefined,
+      executionLatencyMs: undefined,
+      timestamp: Number(r.created_at),
+      status: (String(r.status).toUpperCase() === "REJECTED" ? "REJECTED" : "FILLED") as "FILLED" | "REJECTED",
+      positionId: undefined,
+      signature: "",
+      payloadHash: "",
+    }));
+    // Enrich feeUSD from fills table if available
     try {
-      const parsed = JSON.parse(fs.readFileSync(BOOK_FILE, "utf-8")) as Partial<PaperBookState>;
-      state = {
-        positions: Array.isArray(parsed.positions) ? parsed.positions : [],
-        orders: Array.isArray(parsed.orders) ? parsed.orders : [],
-        events: Array.isArray(parsed.events) ? parsed.events.slice(-EVENT_RING_SIZE) : [],
-        seq: Number(parsed.seq) || 0,
-        idSeq: Number(parsed.idSeq) || 0,
-        cash: Number(parsed.cash) || INITIAL_PAPER_CASH,
-        realizedPnl: Number(parsed.realizedPnl) || 0,
+      const fills = db.prepare("SELECT order_id, fee_usd FROM fills").all() as any[];
+      const fillMap = new Map<string, number>();
+      for (const f of fills) fillMap.set(String(f.order_id), Number(f.fee_usd));
+      for (const o of orders) {
+        const fee = fillMap.get(o.id);
+        if (fee != null) (o as any).feeUSD = fee;
+      }
+    } catch {}
+
+    // Reconstruct positions
+    const positions: PaperPosition[] = openRows.map((r: any) => {
+      const entryPrice = Number(r.entry_price);
+      const qty = Number(r.amount);
+      const leverage = Number(r.leverage);
+      const notional = entryPrice * qty;
+      const marginUSD = notional / (leverage || 1);
+      return {
+        id: String(r.id),
+        symbol: String(r.symbol),
+        side: String(r.side) as PaperSide,
+        qty,
+        entryPrice,
+        notionalUSD: r2(notional),
+        leverage: r2(leverage),
+        marginUSD: r2(marginUSD),
+        stopLoss: r.stop_loss != null ? Number(r.stop_loss) : 0,
+        takeProfit: r.take_profit != null ? Number(r.take_profit) : 0,
+        liquidationPrice: r.liq_price != null ? Number(r.liq_price) : liquidationPrice(entryPrice, leverage, String(r.side) as PaperSide),
+        openedAt: Number(r.opened_at),
+        status: String(r.status) as PaperPositionStatus,
+        sourceOrderId: String(r.id),
+        lastMark: entryPrice,
+        lastMarkUpdatedAt: Date.now(),
+        feesPaidUSD: r.fees_usd != null ? Number(r.fees_usd) : r4(entryPrice * qty * TAKER_FEE_RATE),
       };
-      console.log(`[paperBook] Rehydrated ${state.positions.length} positions, ${state.orders.length} orders, ${state.events.length} events from ${BOOK_FILE}`);
-    } catch (err) {
-      console.warn(`[paperBook] Gagal membaca ${BOOK_FILE}, mulai dari state kosong: ${(err as Error).message}`);
-      state = freshState();
+    });
+
+    // Derive cash & realizedPnl
+    let cash: number;
+    let realizedPnl = 0;
+    if (latestSnap) {
+      cash = Number(latestSnap.cash);
+    } else {
+      // No snapshot yet: cash = initial - locked margin
+      const locked = positions.reduce((s, p) => s + p.marginUSD, 0);
+      cash = r2(INITIAL_PAPER_CASH - locked);
     }
-  } else {
+    // Realized PnL = sum of closed positions
+    try {
+      const closedSum = db.prepare("SELECT SUM(realized_pnl_usd) as sumReal FROM positions WHERE status='CLOSED'").get() as any;
+      if (closedSum?.sumReal != null) realizedPnl = r2(Number(closedSum.sumReal));
+    } catch {}
+
+    state = {
+      positions,
+      orders,
+      events: [],
+      seq: 0,
+      idSeq: 0,
+      cash,
+      realizedPnl,
+    };
+    state.idSeq = deriveIdSeqFromRows();
+    // seq for events: start from 0 (volatile); could also set to max audit seq for continuity but not required
+    try {
+      const auditMax = db.prepare("SELECT MAX(seq) as m FROM audit_ledger").get() as any;
+      if (auditMax?.m != null) state.seq = Number(auditMax.m) || 0;
+    } catch {}
+
+    console.log(`[paperBook] Rehydrated ${state.positions.length} OPEN positions, ${state.orders.length} orders dari SQLite (cash ${state.cash}, realized ${state.realizedPnl})`);
+    // Ensure at least one snapshot exists for stats
+    if (!latestSnap) persistSnapshot();
+  } catch (err) {
+    console.warn(`[paperBook] Gagal rehydrate dari DB, mulai dari state kosong: ${(err as Error).message}`);
     state = freshState();
-    persist();
-    console.log(`[paperBook] Initiated fresh paper book at ${BOOK_FILE} (cash ${INITIAL_PAPER_CASH})`);
+    persistSnapshot();
   }
 }
 
@@ -264,7 +451,7 @@ export function getPaperBalance(): PaperBalanceEntry[] {
 }
 
 // ------------------------------------------------------------------
-// Symbol normalization -> CCXT "BASE/QUOTE"
+// Symbol normalization
 // ------------------------------------------------------------------
 const KNOWN_QUOTES = ["USDT", "USDC", "BUSD", "FDUSD", "BTC", "ETH", "EUR", "USD"];
 
@@ -283,10 +470,6 @@ export function normalizeSymbol(rawSymbol: string): string {
   throw new PaperOrderError("INVALID_SYMBOL", `Format symbol tidak dikenal: ${s} (harap pakai BASE/QUOTE).`);
 }
 
-// ------------------------------------------------------------------
-// Signature / hash (server-side, node:crypto). BROKER_EVENT_SECRET is the
-// production secret; 'paper-dev-secret' is a dev-only fallback.
-// ------------------------------------------------------------------
 export function signPayload(payload: string): { signature: string; payloadHash: string } {
   const secret = process.env.BROKER_EVENT_SECRET || "paper-dev-secret";
   const payloadHash = createHash("sha256").update(payload, "utf-8").digest("hex");
@@ -295,7 +478,7 @@ export function signPayload(payload: string): { signature: string; payloadHash: 
 }
 
 // ------------------------------------------------------------------
-// Realistic fill engine (VWAP through the order book ladder)
+// Fill engine
 // ------------------------------------------------------------------
 interface FillResult {
   fillPrice: number;
@@ -305,15 +488,6 @@ interface FillResult {
   latencyMs: number;
 }
 
-/**
- * Walk the order book:
- *  - BUY: consume the ask ladder (ascending) until the qty is filled.
- *  - SELL: consume the bid ladder (descending) until the qty is filled.
- * VWAP = fill price. slippageBps = measured deviation from the mid price.
- * bracketMode/triggerPrice apply the adverse-or-at-trigger rule used by the
- * bracket monitor (never assume a better fill than the trigger).
- * Falls back to ticker bid/ask when the order book is unavailable.
- */
 async function marketFill(
   symbol: string,
   side: "buy" | "sell",
@@ -350,8 +524,6 @@ async function marketFill(
       }
       let fillPrice = weightedSum / qty;
       if (bracketMode !== "none" && triggerPrice !== undefined && triggerPrice > 0) {
-        // Adverse-or-at-trigger: buying side takes max(trigger, market),
-        // selling side takes min(trigger, market).
         fillPrice = side === "buy" ? Math.max(triggerPrice, fillPrice) : Math.min(triggerPrice, fillPrice);
       }
       const slippageBps = (Math.abs(fillPrice - mid) / mid) * 10000;
@@ -363,9 +535,7 @@ async function marketFill(
         latencyMs: Date.now() - t0,
       };
     }
-  } catch (err) {
-    // fall through to ticker
-  }
+  } catch {}
 
   try {
     const ticker = await exchange.fetchTicker(symbol);
@@ -393,9 +563,6 @@ async function marketFill(
   }
 }
 
-// ------------------------------------------------------------------
-// Liquidation price (CCXT-style estimate incl. maintenance margin)
-// ------------------------------------------------------------------
 export function liquidationPrice(entryPrice: number, leverage: number, side: PaperSide): number {
   const lev = leverage > 0 ? leverage : 1;
   if (side === "LONG") {
@@ -446,7 +613,6 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     throw new PaperOrderError("MISSING_STOP", "stopLoss dan takeProfit wajib diisi untuk posisi baru.");
   }
 
-  // Explicit rule: one OPEN position per symbol+direction; duplicate direction is rejected.
   const duplicate = state.positions.find((p) => p.symbol === symbol && p.side === side && p.status === "OPEN");
   if (duplicate) {
     throw new PaperOrderError(
@@ -458,7 +624,6 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
   const fill = await marketFill(symbol, direction, qty);
   const entryPrice = fill.fillPrice;
 
-  // Direction sanity against the actual fill price.
   if (side === "LONG" && !(stopLoss < entryPrice && entryPrice < takeProfit)) {
     throw new PaperOrderError("INVALID_STOP", "Untuk LONG: stopLoss harus < entryPrice < takeProfit.");
   }
@@ -469,10 +634,7 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
   const notional = entryPrice * qty;
   const marginUSD = notional / leverage;
   if (marginUSD > state.cash) {
-    throw new PaperOrderError(
-      "INSUFFICIENT_CASH",
-      `Margin ${r2(marginUSD)} melebihi cash paper ${r2(state.cash)}.`
-    );
+    throw new PaperOrderError("INSUFFICIENT_CASH", `Margin ${r2(marginUSD)} melebihi cash paper ${r2(state.cash)}.`);
   }
 
   const positionId = newId("pos");
@@ -560,7 +722,10 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     signature: signed.signature,
     payloadHash: signed.payloadHash,
   });
-  persist();
+
+  dbSavePosition(position);
+  dbSaveOrder(order);
+  persistSnapshot();
 
   return { position: { ...position }, order: { ...order }, account: getPaperAccount() };
 }
@@ -603,8 +768,6 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
   let effectiveExitPrice = exitPrice;
   let effectiveExitReason = exitReason;
 
-  // Margin cannot go below zero: if the loss would exceed the margin, the
-  // position is liquidated at the liquidation price (STOP_LOSS).
   if (realizedPnl <= -pos.marginUSD) {
     effectiveExitPrice = pos.liquidationPrice;
     effectiveExitReason = "STOP_LOSS";
@@ -686,7 +849,11 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
     fillMethod: fill.method,
     cashAfter: result.cashAfter,
   });
-  persist();
+
+  dbSavePosition(pos);
+  dbSaveOrder(result.order);
+  // also need to update the open position row's status already via dbSavePosition, and ensure fill for exit
+  persistSnapshot();
 
   result.position = { ...pos };
   return result;
@@ -726,12 +893,13 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
     takeProfit: pos.takeProfit,
     breakEven: input.breakEven === true,
   });
-  persist();
+  dbSavePosition(pos);
+  persistSnapshot();
   return { ...pos };
 }
 
 // ------------------------------------------------------------------
-// Mark price refresh (on-demand) and bracket monitor
+// Mark price refresh and bracket monitor
 // ------------------------------------------------------------------
 async function fetchMarkTicker(symbol: string): Promise<{ mark: number; ok: boolean; error?: string; latencyMs: number }> {
   const t0 = Date.now();
@@ -749,10 +917,6 @@ async function fetchMarkTicker(symbol: string): Promise<{ mark: number; ok: bool
   }
 }
 
-/**
- * Refresh lastMark for every OPEN position whose mark is older than MARK_TTL_MS.
- * Tickers are fetched once per symbol (Promise.all, deduplicated).
- */
 export async function refreshPaperMarks(force = false): Promise<void> {
   const open = state.positions.filter((p) => p.status === "OPEN");
   if (open.length === 0) return;
@@ -774,10 +938,9 @@ export async function refreshPaperMarks(force = false): Promise<void> {
       changed = true;
     }
   }
-  if (changed) persist();
+  if (changed) persistSnapshot();
 }
 
-// Throttle duplicate ERROR events per symbol so a dead exchange does not flood the ring buffer.
 const lastErrorLoggedAt = new Map<string, number>();
 
 function logThrottledError(symbol: string, message: string): void {
@@ -793,19 +956,13 @@ function logThrottledError(symbol: string, message: string): void {
 let monitorTimer: ReturnType<typeof setInterval> | null = null;
 let monitorPassRunning = false;
 
-/**
- * Bracket monitor: every intervalMs, poll fresh marks for all OPEN positions
- * and auto-close on stop-loss / take-profit. Conservative rule: if a single
- * poll crosses BOTH levels, assume stop-loss was hit first.
- */
 export async function runBracketMonitorPass(): Promise<void> {
   if (monitorPassRunning) return;
   monitorPassRunning = true;
   try {
     const open = state.positions.filter((p) => p.status === "OPEN");
-    if (open.length === 0) return; // nothing to poll
+    if (open.length === 0) return;
 
-    const now = Date.now();
     const symbols = [...new Set(open.map((p) => p.symbol))];
     const results = await Promise.all(symbols.map(async (symbol) => ({ symbol, ...(await fetchMarkTicker(symbol)) })));
     const marks = new Map(results.map((r) => [r.symbol, r]));
@@ -824,7 +981,7 @@ export async function runBracketMonitorPass(): Promise<void> {
       const hitStop = pos.side === "LONG" ? entry.mark <= pos.stopLoss : entry.mark >= pos.stopLoss;
       const hitProfit = pos.side === "LONG" ? entry.mark >= pos.takeProfit : entry.mark <= pos.takeProfit;
       let triggered: ExitReason | null = null;
-      if (hitStop && hitProfit) triggered = "STOP_LOSS"; // conservative: stop first
+      if (hitStop && hitProfit) triggered = "STOP_LOSS";
       else if (hitStop) triggered = "STOP_LOSS";
       else if (hitProfit) triggered = "TAKE_PROFIT";
 
@@ -838,16 +995,25 @@ export async function runBracketMonitorPass(): Promise<void> {
         });
         try {
           const result = await closePaperPosition(pos.id, triggered);
-          console.log(
-            `[paperBook] Bracket monitor closed ${pos.id} (${pos.symbol} ${triggered}) @ ${result.exitFillPrice}, realized ${result.realizedPnlUSD}`
-          );
+          console.log(`[paperBook] Bracket monitor closed ${pos.id} (${pos.symbol} ${triggered}) @ ${result.exitFillPrice}, realized ${result.realizedPnlUSD}`);
+          try {
+            appendAudit("exit", {
+              positionId: pos.id,
+              symbol: pos.symbol,
+              side: pos.side,
+              exitReason: triggered,
+              exitPrice: result.exitFillPrice,
+              realizedPnlUSD: result.realizedPnlUSD,
+              source: "bracket-monitor",
+            });
+          } catch {}
         } catch (err) {
           console.warn(`[paperBook] Bracket monitor gagal menutup ${pos.id}: ${(err as Error).message}`);
           appendEvent("ERROR", { positionId: pos.id, symbol: pos.symbol, message: (err as Error).message, source: "bracket-monitor-close" });
         }
       }
     }
-    if (persisted) persist();
+    if (persisted) persistSnapshot();
   } finally {
     monitorPassRunning = false;
   }
@@ -872,5 +1038,9 @@ export function stopBracketMonitor(): void {
 }
 
 export function getBookFilePath(): string {
-  return BOOK_FILE;
+  try {
+    return getDbFilePath();
+  } catch {
+    return "trading.db";
+  }
 }

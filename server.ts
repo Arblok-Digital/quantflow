@@ -35,6 +35,15 @@ import {
   updatePaperPosition,
 } from "./paperBook";
 import {
+  appendAudit,
+  getLedgerEntries,
+  verifyLedger,
+  getLedgerStats,
+  saveAgentDecisionDb,
+  initDb,
+  warnIfDefaultAuditSecret,
+} from "./db";
+import {
   createSession,
   getAuthPasscode,
   getSessionFromAuthHeader,
@@ -129,6 +138,7 @@ function getGeminiClient(): GoogleGenAI | null {
 
 // ================= AUTH ROUTES =================
 warnIfDefaultPasscode();
+warnIfDefaultAuditSecret();
 
 app.post("/api/auth/login", loginLimiter, (req, res) => {
   const passcode = String((req.body || {}).passcode || "");
@@ -566,7 +576,7 @@ Indikator Teknikal Pendukung:
 - Order Book Imbalance: ${technicals?.orderBookImbalance?.toFixed(2) ?? "1.0"}
 
 Portfolio & Risk Context:
-- Total Equity: $${portfolioEquity ?? 10000}
+- Total Equity: $${(() => { try { const a = getPaperAccount(); return `${a.equity} (real — cash ${a.cash} + margin ${a.marginLocked} + uPnL ${a.unrealizedPnl})`; } catch { return portfolioEquity != null ? `${portfolioEquity} (client-supplied)` : "equity tidak tersedia"; } })()}
 - Active Position: ${JSON.stringify(activePositions || [])}
 - Max Risk Per Trade: ${riskParams?.maxRiskPerTradePercent ?? 2}%
 
@@ -613,6 +623,36 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
       const parsedDecision = JSON.parse(responseText);
 
       const inferenceLatency = Date.now() - startTime;
+      // Persist decision audit (server-measured latency, modelId)
+      try {
+        const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const promptSummary = prompt.slice(0, 800);
+        const responseStr = JSON.stringify(parsedDecision).slice(0, 2000);
+        saveAgentDecisionDb({
+          id: decisionId,
+          created_at: Date.now(),
+          symbol: String(symbol || "BTC/USDT"),
+          action: String(parsedDecision.action || "HOLD"),
+          confidence: Number(parsedDecision.confidence ?? 0),
+          model_id: "gemini-3.8-flash",
+          latency_ms: inferenceLatency,
+          prompt: promptSummary,
+          response: responseStr,
+          source_tags: null,
+        });
+        appendAudit("decision", {
+          decisionId,
+          symbol: String(symbol || "BTC/USDT"),
+          action: parsedDecision.action,
+          confidence: parsedDecision.confidence,
+          latencyMs: inferenceLatency,
+          modelId: "gemini-3.8-flash",
+          prompt: promptSummary.slice(0, 200),
+          response: responseStr.slice(0, 500),
+        });
+      } catch (e) {
+        console.warn(`[audit] Gagal simpan decision: ${(e as Error).message}`);
+      }
       return res.json({
         ...parsedDecision,
         source: "gemini-3.8-flash",
@@ -628,7 +668,49 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     }
   }
 
-  // Tanpa Gemini: serahkan sepenuhnya ke decision engine client-side.
+  // Tanpa Gemini: tetap audit (latency nyata) lalu fallback client-side
+  try {
+    const latencyMs = Date.now() - startTime;
+    const fallbackDecision: any = {
+      action: "HOLD",
+      confidence: 50,
+      targetPrice: currentPrice ?? 0,
+      stopLoss: 0,
+      takeProfit: 0,
+      positionSizePercent: 0,
+      reasoning: "GEMINI_API_KEY tidak dikonfigurasi — fallback client-side; audit HOLD tercatat.",
+    };
+    const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const promptSummary = `policy=fallback symbol=${String(symbol || "BTC/USDT")} price=${currentPrice}`.slice(0, 800);
+    const responseStr = JSON.stringify(fallbackDecision).slice(0, 2000);
+    try {
+      saveAgentDecisionDb({
+        id: decisionId,
+        created_at: Date.now(),
+        symbol: String(symbol || "BTC/USDT"),
+        action: "HOLD",
+        confidence: 50,
+        model_id: "fallback-hold",
+        latency_ms: latencyMs,
+        prompt: promptSummary,
+        response: responseStr,
+        source_tags: "fallback",
+      });
+    } catch (e) {
+      console.warn(`[audit] Gagal simpan fallback decision: ${(e as Error).message}`);
+    }
+    try {
+      appendAudit("decision", {
+        decisionId,
+        symbol: String(symbol || "BTC/USDT"),
+        action: "HOLD",
+        confidence: 50,
+        latencyMs,
+        modelId: "fallback-hold",
+        source: "fallback",
+      });
+    } catch {}
+  } catch {}
   return res.status(503).json({
     success: false,
     source: "unavailable",
@@ -789,6 +871,17 @@ app.post("/api/broker/order", requireAuth, async (req, res) => {
       if (body.closePositionId) {
         try {
           const result = await closePaperPosition(String(body.closePositionId), "MANUAL");
+          try {
+            appendAudit("exit", {
+              positionId: result.position.id,
+              symbol: result.position.symbol,
+              side: result.position.side,
+              exitReason: "MANUAL",
+              exitPrice: result.exitFillPrice,
+              realizedPnlUSD: result.realizedPnlUSD,
+              orderId: result.order.id,
+            });
+          } catch {}
           return res.json({ success: true, mode: "paper", closed: true, ...result });
         } catch (err: any) {
           if (err instanceof PaperOrderError) {
@@ -818,6 +911,19 @@ app.post("/api/broker/order", requireAuth, async (req, res) => {
           meta: body.meta,
         });
         recordOrderPlaced();
+        try {
+          appendAudit("order", {
+            orderId: result.order.id,
+            positionId: result.position.id,
+            symbol: result.position.symbol,
+            side: result.order.side,
+            amount: result.order.amount,
+            fillPrice: result.order.fillPrice,
+            leverage: result.order.leverage,
+            stopLoss: body.stopLoss,
+            takeProfit: body.takeProfit,
+          });
+        } catch {}
         const { position, order } = result;
         return res.json({
           success: true,
@@ -917,6 +1023,17 @@ app.post("/api/broker/close", requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, status: "REJECTED", reason: "MISSING_POSITION_ID", message: "positionId wajib diisi." });
     }
     const result = await closePaperPosition(positionId, "MANUAL");
+    try {
+      appendAudit("exit", {
+        positionId: result.position.id,
+        symbol: result.position.symbol,
+        side: result.position.side,
+        exitReason: "MANUAL",
+        exitPrice: result.exitFillPrice,
+        realizedPnlUSD: result.realizedPnlUSD,
+        orderId: result.order.id,
+      });
+    } catch {}
     res.json({ success: true, mode: "paper", closed: true, ...result });
   } catch (err: any) {
     if (err instanceof PaperOrderError) {
@@ -964,6 +1081,33 @@ app.get("/api/broker/events", requireAuth, (req, res) => {
   const sinceSeq = Math.max(0, parseInt(String(req.query.sinceSeq || "0"), 10) || 0);
   const events = getPaperEvents(sinceSeq);
   res.json({ success: true, mode: "paper", events, latestSeq: getLatestEventSeq() });
+});
+
+// ================= AUDIT LEDGER (HMAC chain) — PROTECTED =================
+app.get("/api/ledger", requireAuth, (req, res) => {
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"), 10) || 50));
+  const cursorRaw = req.query.cursor != null ? String(req.query.cursor) : undefined;
+  const cursor = cursorRaw ? parseInt(cursorRaw, 10) : undefined;
+  const { entries, nextCursor } = getLedgerEntries({ limit, cursor: cursor && isFinite(cursor) ? cursor : undefined });
+  const mapped = entries.map((e) => ({
+    seq: e.seq,
+    kind: e.kind,
+    payload: e.payload,
+    createdAt: e.createdAt,
+    prevHash: e.prevHash,
+    hash: e.hash,
+  }));
+  res.json({ success: true, entries: mapped, nextCursor });
+});
+
+app.get("/api/ledger/verify", requireAuth, (_req, res) => {
+  const result = verifyLedger();
+  res.json({ success: true, ...result });
+});
+
+app.get("/api/ledger/stats", requireAuth, (_req, res) => {
+  const stats = getLedgerStats();
+  res.json({ success: true, ...stats });
 });
 
 // --- Server & Vite Startup ---
