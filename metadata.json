@@ -1,6 +1,0 @@
-{
-  "name": "AI Trading Agent Engine",
-  "description": "Engine trading otomatis berbasis AI dengan integrasi multi-timeframe exchange chart (1s hingga 1W), stream data 1-detik untuk integrasi ML, anchor eksekusi AI 15m, Paper Trading & Cashflow PnL tracker lengkap dengan target TP/CL, serta analisa On-Chain Whale & Makroekonomi.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
