@@ -14,6 +14,8 @@ import { BrokerModal } from "./components/BrokerModal";
 
 import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
 import { PaperTradingPanel } from "./components/PaperTradingPanel";
+import { ExecutionConsole } from "./components/ExecutionConsole";
+import { PositionsPanel } from "./components/PositionsPanel";
 
 import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig } from "./types";
 import { generateCandlesForTimeframe } from "./logic/indicators";
@@ -177,6 +179,16 @@ export default function App() {
   const floatingPnl = paper.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   const openPositionsCount = paper.positions.length;
 
+  // Server paper book is the single source of truth: whenever PositionsPanel
+  // polls /api/broker/positions, prune client-side rows ("pos-...") that are no
+  // longer OPEN on the server (closed by bracket monitor or the panel itself).
+  const handleServerPositions = useCallback(
+    (openServerIds: string[]) => {
+      paper.pruneServerPositions(openServerIds);
+    },
+    [paper]
+  );
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-amber-500 selection:text-zinc-950">
       {/* Top Bento Header with MarketType and Timeframe Controls */}
@@ -316,19 +328,34 @@ export default function App() {
 
         {/* Dynamic Views according to Active Tab */}
         {activeTab === "paper" && (
-          <PaperTradingPanel
-            portfolio={paper.portfolio}
-            positions={paper.positions}
-            closedTrades={paper.closedTrades}
-            currentPrice={market.currentPrice}
-            symbol={symbol}
-            mtfLiquidity={market.mtfLiquidity}
-            latestDecision={pipeline.latestDecision}
-            onClosePosition={paper.closePosition}
-            onMoveToBreakEven={paper.moveToBreakEven}
-            onResetPaperAccount={paper.resetPaperAccount}
-            onSimulateTradeEntry={paper.simulateTradeEntry}
-          />
+          <>
+            {/* Server-backed execution & positions (roadmap 1.7-1.9) */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs font-mono uppercase tracking-wider text-amber-400 font-semibold">
+                Server-Backed Execution &amp; Positions
+              </h3>
+              <span className="text-[10px] font-mono text-zinc-500">
+                data dari server broker &mdash; sumber kebenaran (polling /api/broker/events + /api/broker/positions)
+              </span>
+            </div>
+
+            <ExecutionConsole />
+            <PositionsPanel onServerPositions={handleServerPositions} />
+
+            <PaperTradingPanel
+              portfolio={paper.portfolio}
+              positions={paper.positions}
+              closedTrades={paper.closedTrades}
+              currentPrice={market.currentPrice}
+              symbol={symbol}
+              mtfLiquidity={market.mtfLiquidity}
+              latestDecision={pipeline.latestDecision}
+              onClosePosition={paper.closePosition}
+              onMoveToBreakEven={paper.moveToBreakEven}
+              onResetPaperAccount={paper.resetPaperAccount}
+              onSimulateTradeEntry={paper.simulateTradeEntry}
+            />
+          </>
         )}
 
         {activeTab === "stream1s" && (

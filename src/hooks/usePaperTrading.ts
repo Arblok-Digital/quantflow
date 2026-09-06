@@ -51,6 +51,20 @@ const INITIAL_POSITIONS: Position[] = [
   },
 ];
 
+// Position id vocabulary:
+//  - "pos_sim_*"  = client-side simulated entry (simulateTradeEntry), owned by
+//                   the client (auto-close on TP/CL is allowed here only).
+//  - "pos-*"      = server paper book ids (paperBook.newId("pos")), owned by
+//                   the server: bracket monitor + /api/broker/close own exits.
+//  - other        = legacy seed rows ("pos_active_1"), client-only display.
+function isSimPositionId(id?: string): boolean {
+  return typeof id === "string" && id.startsWith("pos_sim_");
+}
+
+function isServerBackedId(id?: string): boolean {
+  return typeof id === "string" && id.startsWith("pos-");
+}
+
 const INITIAL_CLOSED_TRADES: ClosedTrade[] = [
   {
     id: "closed_trade_sample_1",
@@ -106,6 +120,21 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
         const priceDiff = pos.side === "LONG" ? price - pos.entryPrice : pos.entryPrice - price;
         const pnl = priceDiff * pos.qty;
         const pnlPercent = (priceDiff / pos.entryPrice) * 100;
+
+        // Single-source-of-truth rule: the paper book + server-side bracket
+        // monitor own every exit for server-backed positions ("pos-...", and
+        // anything that arrived via addPosition from the pipeline). The client
+        // ONLY auto-closes positions it created itself ("pos_sim_*"). This
+        // prevents DOUBLE-CLOSING against the server's bracket monitor.
+        if (!isSimPositionId(pos.id)) {
+          survivors.push({
+            ...pos,
+            currentPrice: price,
+            unrealizedPnl: Number(pnl.toFixed(2)),
+            unrealizedPnlPercent: Number(pnlPercent.toFixed(2)),
+          });
+          continue;
+        }
 
         const isTakeProfitHit =
           (pos.side === "LONG" && price >= pos.takeProfit) ||
@@ -216,14 +245,58 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
     setPortfolio(next);
   }, []);
 
-  const moveToBreakEven = useCallback((sym: string) => {
-    setPositions((prev) =>
-      prev.map((p) =>
-        p.symbol === sym
-          ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 }
-          : p
-      )
-    );
+  const moveToBreakEven = useCallback(async (sym: string) => {
+    const targetPos = positionsRef.current.find((p) => p.symbol === sym);
+    if (!targetPos) return;
+
+    // Client-owned simulated positions update locally.
+    if (isSimPositionId(targetPos.id)) {
+      setPositions((prev) =>
+        prev.map((p) =>
+          p.symbol === sym
+            ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 }
+            : p
+        )
+      );
+      return;
+    }
+
+    // Server-backed positions: the server owns the SL. Move-to-BE must go
+    // through /api/broker/position/update so the bracket monitor sees it.
+    try {
+      const res = await fetch("/api/broker/position/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ positionId: targetPos.id, breakEven: true }),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) {
+        if (payload?.reason === "POSITION_NOT_FOUND") {
+          // Legacy client-only row (seed): fall back to the local path.
+          setPositions((prev) =>
+            prev.map((p) =>
+              p.symbol === sym
+                ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 }
+                : p
+            )
+          );
+        } else {
+          console.error(
+            `Broker move-to-BE gagal (${payload?.reason || res.status}): ${payload?.message || "unknown"}`
+          );
+        }
+        return;
+      }
+      setPositions((prev) =>
+        prev.map((p) =>
+          p.symbol === sym
+            ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 }
+            : p
+        )
+      );
+    } catch (err) {
+      console.error("Broker move-to-BE unreachable:", (err as Error).message);
+    }
   }, []);
 
   const resetPaperAccount = useCallback((initialCapital: number) => {
@@ -321,13 +394,21 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
     [portfolio, prependAudit]
   );
 
-  const closePosition = useCallback(
-    (sym: string, reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => {
-      const targetPos = positionsRef.current.find((p) => p.symbol === sym);
-      if (!targetPos) return;
-
-      const pnl = targetPos.unrealizedPnl;
+  /**
+   * Client-side book-keeping for a closed position (shared by the local sim
+   * path and the server-confirmed path). Overrides let the server's measured
+   * exit price / realized PnL (net of fees) flow into the client book.
+   */
+  const applyClientClose = useCallback(
+    (
+      targetPos: Position,
+      reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE",
+      override?: { pnlUSD: number; exitPrice: number }
+    ) => {
+      const pnl = override ? override.pnlUSD : targetPos.unrealizedPnl;
+      const exitPrice = override ? override.exitPrice : priceRef.current;
       const win = pnl >= 0;
+      const sym = targetPos.symbol;
 
       const closedTrade: ClosedTrade = {
         id: `trade_closed_${Date.now()}`,
@@ -336,9 +417,9 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
         qty: targetPos.qty,
         notionalUSD: targetPos.notionalUSD || targetPos.qty * targetPos.entryPrice,
         entryPrice: targetPos.entryPrice,
-        exitPrice: priceRef.current,
+        exitPrice,
         pnlUSD: Number(pnl.toFixed(2)),
-        pnlPercent: Number(targetPos.unrealizedPnlPercent.toFixed(2)),
+        pnlPercent: Number(((pnl / (targetPos.notionalUSD || targetPos.qty * targetPos.entryPrice)) * 100).toFixed(2)),
         openedAt: targetPos.openedAt,
         closedAt: Date.now(),
         exitReason: reason || "MANUAL_CLOSE",
@@ -353,16 +434,16 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
         symbol: sym,
         action: targetPos.side === "LONG" ? "SELL" : "BUY",
         qty: targetPos.qty,
-        requestedPrice: priceRef.current,
-        executedPrice: priceRef.current,
-        slippageBps: 0.5,
+        requestedPrice: exitPrice,
+        executedPrice: exitPrice,
+        slippageBps: 0,
         status: "FILLED",
         reasoning:
           reason === "TAKE_PROFIT"
             ? "Target Take-Profit terealisasi."
             : reason === "CUT_LOSS"
             ? "Cut Loss dieksekusi untuk proteksi modal."
-            : "Posisi ditutup secara manual oleh user pada simulasi paper trading.",
+            : "Posisi ditutup secara manual oleh user (server-confirmed paper close).",
         confidence: 100,
         riskEvaluation: {
           approved: true,
@@ -394,6 +475,61 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
     [prependAudit]
   );
 
+  const closePosition = useCallback(
+    async (sym: string, reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => {
+      const targetPos = positionsRef.current.find((p) => p.symbol === sym);
+      if (!targetPos) return;
+
+      // Client-owned simulated positions close locally.
+      if (isSimPositionId(targetPos.id)) {
+        applyClientClose(targetPos, reason);
+        return;
+      }
+
+      // Server-backed positions: the paper book owns the exit. Close through
+      // the server so positions, events stream and PositionsPanel stay in sync.
+      try {
+        const res = await fetch("/api/broker/close", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ positionId: targetPos.id }),
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok || !payload?.success) {
+          if (payload?.reason === "POSITION_NOT_FOUND") {
+            // Legacy client-only row (seed): fall back to the local path so
+            // the manual close button keeps working for it.
+            applyClientClose(targetPos, reason);
+          } else if (payload?.reason === "POSITION_ALREADY_CLOSED") {
+            // Server already closed it (bracket monitor) — drop the stale row.
+            setPositions((prev) => prev.filter((p) => p.symbol !== sym));
+          } else {
+            console.error(
+              `Broker close gagal (${payload?.reason || res.status}): ${payload?.message || "unknown"}`
+            );
+          }
+          return;
+        }
+        applyClientClose(targetPos, reason, {
+          pnlUSD: Number(payload.realizedPnlUSD ?? targetPos.unrealizedPnl),
+          exitPrice: Number(payload.exitFillPrice ?? priceRef.current),
+        });
+      } catch (err) {
+        console.error("Broker close unreachable:", (err as Error).message);
+      }
+    },
+    [applyClientClose]
+  );
+
+  /** Prune server-backed rows ("pos-*") that are no longer OPEN on the server
+   *  (closed by the bracket monitor or from PositionsPanel). Client-owned sim
+   *  positions and legacy seed rows are left untouched. */
+  const pruneServerPositions = useCallback((openServerIds: string[]) => {
+    setPositions((prev) =>
+      prev.filter((p) => (isServerBackedId(p.id) ? openServerIds.includes(p.id as string) : true))
+    );
+  }, []);
+
   return {
     portfolio,
     positions,
@@ -405,6 +541,7 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
     resetPaperAccount,
     simulateTradeEntry,
     closePosition,
+    pruneServerPositions,
   };
 }
 
