@@ -1,6 +1,8 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import {
@@ -10,8 +12,10 @@ import {
   fetchCcxtOrderBook,
   fetchCcxtTicker,
   getBrokerStatus,
+  getVaultCredentialsStatus,
   placeBrokerOrder,
   saveBrokerCredentials,
+  setLiveArmed,
   testBrokerConnection,
 } from "./broker";
 import {
@@ -30,13 +34,85 @@ import {
   startBracketMonitor,
   updatePaperPosition,
 } from "./paperBook";
+import {
+  createSession,
+  getAuthPasscode,
+  getSessionFromAuthHeader,
+  requireAuth,
+  removeSessionByToken,
+  validateToken,
+  warnIfDefaultPasscode,
+} from "./auth";
+import {
+  evaluateGuardrails,
+  getGuardrailsSnapshotAsync,
+  getGuardrailsSnapshotSync,
+  getTodayRealized,
+  GuardrailRejectedError,
+  initGuardrails,
+  recordOrderPlaced,
+  setKillSwitch,
+} from "./guardrails";
 
 dotenv.config();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
+const HOST = process.env.HOST || "127.0.0.1";
+
+// ---------- Security middleware ----------
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+  })
+);
+
+// CORS only if CORS_ORIGIN is set
+if (process.env.CORS_ORIGIN) {
+  const allowedOrigin = String(process.env.CORS_ORIGIN).trim();
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    // simple allowlist: if origin matches allowedOrigin, set header
+    if (origin === allowedOrigin || allowedOrigin === "*") {
+      res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+}
 
 app.use(express.json({ limit: "5mb" }));
+
+// Rate limiters
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === "/api/health",
+  handler: (_req, res) => {
+    res.status(429).json({ success: false, code: "RATE_LIMITED", message: "Terlalu banyak request. Coba lagi nanti." });
+  },
+});
+
+const loginLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ success: false, code: "RATE_LIMITED", message: "Terlalu banyak request. Coba lagi nanti." });
+  },
+});
+
+// Apply apiLimiter to all /api routes (will also cover login, but login has stricter limiter separately)
+app.use("/api/", apiLimiter);
 
 // Lazy Gemini client
 let genAI: GoogleGenAI | null = null;
@@ -51,7 +127,33 @@ function getGeminiClient(): GoogleGenAI | null {
   return genAI;
 }
 
-// ================= API ROUTES =================
+// ================= AUTH ROUTES =================
+warnIfDefaultPasscode();
+
+app.post("/api/auth/login", loginLimiter, (req, res) => {
+  const passcode = String((req.body || {}).passcode || "");
+  const expected = getAuthPasscode();
+  if (passcode !== expected) {
+    return res.status(401).json({ success: false, message: "passcode salah" });
+  }
+  const { token, expiresAt } = createSession();
+  res.json({ success: true, token, expiresAt });
+});
+
+app.post("/api/auth/logout", requireAuth, (req: any, res) => {
+  const auth = req.headers.authorization as string | undefined;
+  if (auth) {
+    const parts = auth.trim().split(/\s+/);
+    const token = parts.length === 2 ? parts[1] : "";
+    if (token) removeSessionByToken(token);
+  }
+  res.json({ success: true, message: "logged out" });
+});
+
+app.get("/api/auth/session", requireAuth, (req: any, res) => {
+  const session = (req as any).authSession;
+  res.json({ success: true, authenticated: true, expiresAt: session?.expiresAt || null });
+});
 
 // Helper with timeout
 async function fetchWithTimeout(url: string, timeoutMs = 3000): Promise<any> {
@@ -71,7 +173,7 @@ async function fetchWithTimeout(url: string, timeoutMs = 3000): Promise<any> {
   }
 }
 
-// Health check
+// Health check (public, skip rate limit via skip fn above)
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "online",
@@ -536,12 +638,12 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
 
 // ================= BROKER ROUTES (ccxt provider) =================
 
-// Status broker (mode paper/live + apakah live order bisa dipasang)
-app.get("/api/broker/status", (_req, res) => {
+// Status broker (mode paper/live + apakah live order bisa dipasang) — PROTECTED
+app.get("/api/broker/status", requireAuth, (_req, res) => {
   res.json({ success: true, ...getBrokerStatus() });
 });
 
-// Ticker via ccxt (public, lintas exchange)
+// Ticker via ccxt (public, lintas exchange) — stays public
 app.get("/api/broker/ticker", async (req, res) => {
   const symbol = String(req.query.symbol || "BTC/USDT");
   try {
@@ -552,7 +654,7 @@ app.get("/api/broker/ticker", async (req, res) => {
   }
 });
 
-// Order book via ccxt (public)
+// Order book via ccxt (public) — stays public
 app.get("/api/broker/orderbook", async (req, res) => {
   const symbol = String(req.query.symbol || "BTC/USDT");
   const limit = Math.min(50, Math.max(5, parseInt(String(req.query.limit || "12"))));
@@ -564,7 +666,7 @@ app.get("/api/broker/orderbook", async (req, res) => {
   }
 });
 
-// OHLCV via ccxt (public, timeframe ccxt: "1m","5m","15m","1h","4h","1d","1w")
+// OHLCV via ccxt (public, timeframe ccxt: "1m","5m","15m","1h","4h","1d","1w") — stays public
 app.get("/api/broker/klines", async (req, res) => {
   const symbol = String(req.query.symbol || "BTC/USDT");
   const timeframe = String(req.query.timeframe || req.query.interval || "15m");
@@ -577,8 +679,8 @@ app.get("/api/broker/klines", async (req, res) => {
   }
 });
 
-// Balance (paper: saldo akun paper book; live: saldo exchange asli)
-app.get("/api/broker/balance", async (_req, res) => {
+// Balance (paper: saldo akun paper book; live: saldo exchange asli) — PROTECTED
+app.get("/api/broker/balance", requireAuth, async (_req, res) => {
   try {
     if (getBrokerStatus().mode === "live") {
       const balances = await fetchBrokerBalance();
@@ -595,8 +697,8 @@ app.get("/api/broker/balance", async (_req, res) => {
   }
 });
 
-// Simpan credential broker ke vault lokal (.broker-secrets.json, gitignored)
-app.post("/api/broker/credentials", async (req, res) => {
+// Simpan credential broker ke vault lokal (.broker-secrets.json, gitignored) — PROTECTED
+app.post("/api/broker/credentials", requireAuth, async (req, res) => {
   const { exchange, apiKey, apiSecret, testnet } = req.body || {};
   if (!apiKey || !apiSecret) {
     return res.status(400).json({ success: false, message: "apiKey dan apiSecret wajib diisi." });
@@ -610,14 +712,19 @@ app.post("/api/broker/credentials", async (req, res) => {
   res.json({ success: true, ...getBrokerStatus() });
 });
 
-// Hapus credential vault lokal
-app.post("/api/broker/credentials/clear", async (_req, res) => {
+// Hapus credential vault lokal — PROTECTED
+app.post("/api/broker/credentials/clear", requireAuth, async (_req, res) => {
   await clearBrokerCredentials();
   res.json({ success: true, ...getBrokerStatus() });
 });
 
-// Tes koneksi real ke exchange (READ-ONLY: fetchBalance, TIDAK pernah order)
-app.post("/api/broker/test", async (_req, res) => {
+// Credential status — PROTECTED
+app.get("/api/broker/credentials/status", requireAuth, (_req, res) => {
+  res.json(getVaultCredentialsStatus());
+});
+
+// Tes koneksi real ke exchange (READ-ONLY: fetchBalance, TIDAK pernah order) — PROTECTED
+app.post("/api/broker/test", requireAuth, async (_req, res) => {
   try {
     const result = await testBrokerConnection();
     res.json({ success: true, ...result });
@@ -626,14 +733,59 @@ app.post("/api/broker/test", async (_req, res) => {
   }
 });
 
-// Order (paper: buku posisi paper dengan fill terukur; live: order exchange asli)
-app.post("/api/broker/order", async (req, res) => {
+// Guardrails — PROTECTED
+app.get("/api/broker/guardrails", requireAuth, async (_req, res) => {
+  const snap = await getGuardrailsSnapshotAsync();
+  res.json({ success: true, ...snap });
+});
+
+app.post("/api/broker/kill", requireAuth, (req, res) => {
+  const active = Boolean((req.body || {}).active);
+  const state = setKillSwitch(active);
+  // Return full guard state similar to guardrails endpoint shape
+  const snapSync = getGuardrailsSnapshotSync();
+  res.json({ success: true, killSwitch: state.killSwitch, guardrails: snapSync, state });
+});
+
+// Arm / Disarm — PROTECTED
+app.post("/api/broker/arm", requireAuth, async (_req, res) => {
+  try {
+    await setLiveArmed(true);
+    res.json({ success: true, liveArmed: true, armedForLive: true, ...getBrokerStatus() });
+  } catch (err: any) {
+    const msg = err?.message || "Gagal arm live.";
+    const isArmError = String(msg).includes("ARM_REQUIRES_LIVE_AND_CREDENTIALS");
+    res.status(400).json({ success: false, code: isArmError ? "ARM_REQUIRES_LIVE_AND_CREDENTIALS" : "ARM_FAILED", message: msg });
+  }
+});
+
+app.post("/api/broker/disarm", requireAuth, async (_req, res) => {
+  try {
+    await setLiveArmed(false);
+    res.json({ success: true, liveArmed: false, armedForLive: false, ...getBrokerStatus() });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Gagal disarm." });
+  }
+});
+
+// Helper to map GuardrailRejectedError to 403 REJECTED JSON
+function guardReject(res: any, reason: string, message?: string) {
+  return res.status(403).json({
+    success: false,
+    status: "REJECTED",
+    reason,
+    message: message || `Order ditolak guardrail: ${reason}`,
+  });
+}
+
+// Order (paper: buku posisi paper dengan fill terukur; live: order exchange asli) — PROTECTED + guardrails
+app.post("/api/broker/order", requireAuth, async (req, res) => {
   try {
     const body = req.body || {};
 
     // ---------- PAPER MODE ----------
     if (getBrokerStatus().mode !== "live") {
-      // Closing order: { closePositionId }
+      // Closing order: { closePositionId } — closing de-risks, no guardrail
       if (body.closePositionId) {
         try {
           const result = await closePaperPosition(String(body.closePositionId), "MANUAL");
@@ -644,6 +796,14 @@ app.post("/api/broker/order", async (req, res) => {
           }
           return res.status(400).json({ success: false, status: "REJECTED", reason: "CLOSE_FAILED", message: err?.message || "Gagal menutup posisi." });
         }
+      }
+
+      // Opening order — evaluate guardrails before placement
+      // Only guard OPENs, not closes
+      const guard = await evaluateGuardrails({ symbol: String(body.symbol || "BTC/USDT") });
+      if (!guard.allowed) {
+        const primary = guard.reasons[0] as string;
+        return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guard.reasons.join(", ")})`);
       }
 
       // Opening order
@@ -657,6 +817,7 @@ app.post("/api/broker/order", async (req, res) => {
           takeProfit: body.takeProfit,
           meta: body.meta,
         });
+        recordOrderPlaced();
         const { position, order } = result;
         return res.json({
           success: true,
@@ -686,16 +847,43 @@ app.post("/api/broker/order", async (req, res) => {
       }
     }
 
-    // ---------- LIVE MODE (pass-through, guarded) ----------
-    const result = await placeBrokerOrder(body);
-    res.json({ success: true, ...result });
+    // ---------- LIVE MODE (pass-through, guarded + double-lock) ----------
+    // Guardrails must also apply to live opens
+    const guardLive = await evaluateGuardrails({ symbol: String(body.symbol || "BTC/USDT") });
+    if (!guardLive.allowed) {
+      const primary = guardLive.reasons[0] as string;
+      return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guardLive.reasons.join(", ")})`);
+    }
+    // Double-lock: liveArmed check is inside placeBrokerOrder via assertLiveAllowed, but we surface clearly
+    try {
+      const result = await placeBrokerOrder(body);
+      recordOrderPlaced();
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      const code = err?.code;
+      if (code === "LIVE_NOT_ARMED") {
+        return guardReject(res, "LIVE_NOT_ARMED", err.message);
+      }
+      if (err instanceof GuardrailRejectedError) {
+        return guardReject(res, err.reason, err.message);
+      }
+      // Map other errors to REJECTED shape if they look like guard
+      if (String(err?.message).includes("ARM_REQUIRES_LIVE_AND_CREDENTIALS")) {
+        return res.status(400).json({ success: false, status: "REJECTED", reason: "ARM_REQUIRES_LIVE_AND_CREDENTIALS", message: err.message });
+      }
+      res.status(400).json({ success: false, status: "REJECTED", reason: "ORDER_FAILED", message: err?.message || "Order gagal." });
+    }
   } catch (err: any) {
+    // Generic fallback — check if it's a guard error
+    if (err instanceof GuardrailRejectedError) {
+      return guardReject(res, err.reason, err.message);
+    }
     res.status(400).json({ success: false, message: err?.message || "Order gagal." });
   }
 });
 
-// Positions (paper: buku posisi paper dengan mark terbaru; live: belum disimpan, passthrough)
-app.get("/api/broker/positions", async (_req, res) => {
+// Positions (paper: buku posisi paper dengan mark terbaru; live: belum disimpan, passthrough) — PROTECTED
+app.get("/api/broker/positions", requireAuth, async (_req, res) => {
   if (getBrokerStatus().mode === "live") {
     return res.json({
       success: true,
@@ -718,8 +906,8 @@ app.get("/api/broker/positions", async (_req, res) => {
   });
 });
 
-// Close posisi (paper: market close via paper book)
-app.post("/api/broker/close", async (req, res) => {
+// Close posisi (paper: market close via paper book) — PROTECTED (closing de-risks, no guardrail)
+app.post("/api/broker/close", requireAuth, async (req, res) => {
   try {
     if (getBrokerStatus().mode === "live") {
       return res.status(400).json({ success: false, message: "Live close via /api/broker/close belum diimplementasikan (roadmap Phase 2+)." });
@@ -739,8 +927,8 @@ app.post("/api/broker/close", async (req, res) => {
   }
 });
 
-// Update SL/TP posisi (manual SL edit / move-to-break-even)
-app.post("/api/broker/position/update", (req, res) => {
+// Update SL/TP posisi (manual SL edit / move-to-break-even) — PROTECTED
+app.post("/api/broker/position/update", requireAuth, (req, res) => {
   try {
     const body = req.body || {};
     const positionId = String(body.positionId || "");
@@ -762,8 +950,8 @@ app.post("/api/broker/position/update", (req, res) => {
   }
 });
 
-// Order status: receipt order paper yang tersimpan (600 status lifecycle ada; NEW->FILLED sinkron)
-app.get("/api/broker/order-status/:orderId", (req, res) => {
+// Order status: receipt order paper yang tersimpan (600 status lifecycle ada; NEW->FILLED sinkron) — PROTECTED
+app.get("/api/broker/order-status/:orderId", requireAuth, (req, res) => {
   const order = getPaperOrder(String(req.params.orderId || ""));
   if (!order) {
     return res.status(404).json({ success: false, message: `Order ${req.params.orderId} tidak ditemukan.` });
@@ -771,8 +959,8 @@ app.get("/api/broker/order-status/:orderId", (req, res) => {
   res.json({ success: true, mode: "paper", order });
 });
 
-// Event log paper book (ring buffer) dengan sinceSeq
-app.get("/api/broker/events", (req, res) => {
+// Event log paper book (ring buffer) dengan sinceSeq — PROTECTED
+app.get("/api/broker/events", requireAuth, (req, res) => {
   const sinceSeq = Math.max(0, parseInt(String(req.query.sinceSeq || "0"), 10) || 0);
   const events = getPaperEvents(sinceSeq);
   res.json({ success: true, mode: "paper", events, latestSeq: getLatestEventSeq() });
@@ -794,8 +982,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[AI Trading Agent] Server listening on http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`[AI Trading Agent] Server listening on http://${HOST}:${PORT}`);
     // Paper book adalah sumber kebenaran posisi paper; monitor bracket aktif
     // hanya di mode selain live.
     if (getBrokerStatus().mode !== "live") {
@@ -806,4 +994,5 @@ async function startServer() {
 }
 
 initPaperBook();
+initGuardrails();
 startServer();
