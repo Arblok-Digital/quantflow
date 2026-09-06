@@ -4,6 +4,7 @@ import {
   Timeframe,
   MarketType,
 } from "../types";
+import { authFetch } from "../hooks/useAuth";
 
 export interface OrderExecutionParams {
   symbol: string;
@@ -119,7 +120,7 @@ export async function executeBrokerOrder(
 async function postJson(url: string, body: unknown): Promise<any> {
   let response: globalThis.Response;
   try {
-    response = await fetch(url, {
+    response = await authFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ShieldCheck, Zap, XCircle } from "lucide-react";
+import { authFetch } from "../hooks/useAuth";
 
 // ---------------------------------------------------------------------------
 // Positions Panel — server-backed open positions table (roadmap 1.8).
@@ -84,7 +85,11 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
       return;
     }
     try {
-      const res = await fetch("/api/broker/positions");
+      const res = await authFetch("/api/broker/positions");
+      if (res.status === 401) {
+        setConn("error");
+        return;
+      }
       const payload = (await res.json()) as PositionsResponse;
       setData(payload);
       setConn("ok");
@@ -121,7 +126,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
     setBusyId(pos.id);
     setActionError(null);
     try {
-      const res = await fetch("/api/broker/close", {
+      const res = await authFetch("/api/broker/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ positionId: pos.id }),
@@ -146,7 +151,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
     setBusyId(pos.id);
     setActionError(null);
     try {
-      const res = await fetch("/api/broker/position/update", {
+      const res = await authFetch("/api/broker/position/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ positionId: pos.id, breakEven: true }),

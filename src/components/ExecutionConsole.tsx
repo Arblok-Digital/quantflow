@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, ChevronRight, ChevronDown, Radio } from "lucide-react";
+import { authFetch } from "../hooks/useAuth";
 
 // ---------------------------------------------------------------------------
 // Execution Console — server-backed order lifecycle stream (roadmap 1.7 + 1.9).
@@ -197,9 +198,9 @@ export const ExecutionConsole: React.FC = () => {
     }
     try {
       const [eventsRes, statusRes, posRes] = await Promise.all([
-        fetch(`/api/broker/events?sinceSeq=${lastSeqRef.current}`).then((r) => r.json()),
-        fetch("/api/broker/status").then((r) => r.json()),
-        fetch("/api/broker/positions").then((r) => r.json()),
+        authFetch(`/api/broker/events?sinceSeq=${lastSeqRef.current}`).then((r) => r.json()),
+        authFetch("/api/broker/status").then((r) => r.json()),
+        authFetch("/api/broker/positions").then((r) => r.json()),
       ]);
 
       const evData = eventsRes as EventsResponse;

@@ -5,6 +5,7 @@ import {
   Portfolio,
   Position,
 } from "../types";
+import { authFetch } from "./useAuth";
 
 export interface UsePaperTradingOptions {
   symbol: string;
@@ -264,7 +265,7 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
     // Server-backed positions: the server owns the SL. Move-to-BE must go
     // through /api/broker/position/update so the bracket monitor sees it.
     try {
-      const res = await fetch("/api/broker/position/update", {
+      const res = await authFetch("/api/broker/position/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ positionId: targetPos.id, breakEven: true }),
@@ -489,7 +490,7 @@ export function usePaperTrading({ symbol, currentPrice, prependAudit }: UsePaper
       // Server-backed positions: the paper book owns the exit. Close through
       // the server so positions, events stream and PositionsPanel stay in sync.
       try {
-        const res = await fetch("/api/broker/close", {
+        const res = await authFetch("/api/broker/close", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ positionId: targetPos.id }),

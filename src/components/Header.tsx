@@ -47,6 +47,10 @@ interface HeaderProps {
   openPositionsCount?: number;
   floatingPnl?: number;
   tickCount?: number;
+  isLiveArmed?: boolean;
+  liveMode?: "paper" | "live";
+  liveEquity?: number;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -77,6 +81,10 @@ export const Header: React.FC<HeaderProps> = ({
   openPositionsCount = 0,
   floatingPnl = 0,
   tickCount = 0,
+  isLiveArmed = false,
+  liveMode = "paper",
+  liveEquity,
+  onLogout,
 }) => {
   const getSourceBadge = () => {
     const src = exchangeStatus?.source || "SIMULATED";
@@ -399,6 +407,33 @@ export const Header: React.FC<HeaderProps> = ({
             <ShieldAlert className="h-3.5 w-3.5" />
             <span>{isEmergencyStop ? "KILL ACTIVE" : "KILL SWITCH"}</span>
           </button>
+
+          {/* LIVE / PAPER mode badge + equity, non-dismissable */}
+          <div className="flex items-center gap-1.5">
+            {isLiveArmed ? (
+              <span className="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-mono font-black text-[11px] border border-rose-500 shadow shadow-rose-600/20 animate-pulse">
+                LIVE ARMED
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 rounded-lg bg-zinc-800 text-zinc-400 font-mono font-bold text-[11px] border border-zinc-700">PAPER</span>
+            )}
+            {liveEquity !== undefined && (
+              <span className="hidden sm:inline-flex px-2 py-1 rounded-lg bg-zinc-900 border border-zinc-800 font-mono text-[11px] text-zinc-300" title={liveMode === "live" ? "Live balance equity (real)" : "Paper equity"}>
+                {liveMode === "live" ? "LIVE" : "PAPER"} ${liveEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </span>
+            )}
+          </div>
+
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-800 text-xs font-mono transition"
+              title="Logout — hapus token & kembali ke unlock screen"
+            >
+              <Lock className="h-3.5 w-3.5" />
+              <span>Logout</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

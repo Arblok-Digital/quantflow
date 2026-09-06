@@ -28,10 +28,16 @@ import { useAuditLedger } from "./hooks/useAuditLedger";
 import { usePaperTrading } from "./hooks/usePaperTrading";
 import { useMarketData } from "./hooks/useMarketData";
 import { useTradingPipeline } from "./hooks/useTradingPipeline";
+import { useAuth } from "./hooks/useAuth";
+import { LoginGate } from "./components/LoginGate";
+import { GuardrailsPanel } from "./components/GuardrailsPanel";
+import { useLiveMode } from "./hooks/useLiveMode";
 
 type ModuleTab = "overview" | "paper" | "stream1s" | "onchain" | "macro";
 
 export default function App() {
+  const auth = useAuth();
+  const live = useLiveMode(auth.isAuthenticated);
   // --- UI State ---
   const [symbol, setSymbol] = useState<string>("BTC/USDT");
   const [marketType, setMarketType] = useState<MarketType>("FUTURES");
@@ -189,8 +195,40 @@ export default function App() {
     [paper]
   );
 
+  if (auth.isChecking) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center font-mono text-zinc-500 text-sm">
+        <span className="flex items-center gap-2">
+          <span className="w-3 h-3 border-2 border-zinc-700 border-t-amber-500 rounded-full animate-spin" />
+          Checking session...
+        </span>
+      </div>
+    );
+  }
+
+  if (!auth.isAuthenticated) {
+    return <LoginGate onLogin={auth.login} error={auth.error} />;
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-amber-500 selection:text-zinc-950">
+      {/* LIVE banner — non-dismissable, red when armed */}
+      {live.armedForLive ? (
+        <div className="sticky top-0 z-[60] w-full bg-rose-600 text-white text-center py-1.5 font-mono font-black tracking-widest text-xs border-b border-rose-700 shadow-lg shadow-rose-600/20">
+          <span className="inline-flex items-center gap-2">
+            <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
+            🔴 LIVE TRADING ARMED — real orders enabled
+            <span className="hidden sm:inline opacity-90">— {live.exchangeId.toUpperCase()} • {live.testnet ? "TESTNET" : "MAINNET"}</span>
+          </span>
+        </div>
+      ) : (
+        <div className="sticky top-0 z-[60] w-full bg-zinc-900 text-zinc-400 text-center py-1 font-mono font-bold tracking-widest text-[11px] border-b border-zinc-800">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full" />
+            PAPER MODE — dry-run • LIVE equity vs PAPER shown below
+          </span>
+        </div>
+      )}
       {/* Top Bento Header with MarketType and Timeframe Controls */}
       <Header
         symbol={symbol}
@@ -222,6 +260,10 @@ export default function App() {
         openPositionsCount={openPositionsCount}
         floatingPnl={floatingPnl}
         tickCount={market.microTicks.length}
+        isLiveArmed={live.armedForLive}
+        liveMode={live.mode}
+        liveEquity={live.equity}
+        onLogout={auth.logout}
       />
 
       {/* Main Content Bento Grid */}
@@ -389,7 +431,7 @@ export default function App() {
               timeframe={timeframe}
             />
 
-            {/* Decision Engine Stream + Deterministic Risk Gatekeeper */}
+            {/* Decision Engine Stream + LIVE Guardrails (server truth) */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <DecisionStream
                 decision={pipeline.latestDecision}
@@ -400,13 +442,15 @@ export default function App() {
                 mtfLiquidity={market.mtfLiquidity}
               />
 
-              <RiskManagementPanel
-                config={riskConfig}
-                onChangeConfig={setRiskConfig}
-                lastEvaluation={pipeline.lastRiskEvaluation}
-                currentDrawdown={paper.portfolio.currentDrawdownPercent}
-              />
+              <GuardrailsPanel />
             </div>
+            {/* Legacy RiskManagementPanel kept below as secondary card */}
+            <RiskManagementPanel
+              config={riskConfig}
+              onChangeConfig={setRiskConfig}
+              lastEvaluation={pipeline.lastRiskEvaluation}
+              currentDrawdown={paper.portfolio.currentDrawdownPercent}
+            />
 
             {/* Integrated On-Chain & Macro Side-by-Side Bento Row */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -471,12 +515,7 @@ export default function App() {
                 isAnalyzing={pipeline.isAnalyzing}
                 mtfLiquidity={market.mtfLiquidity}
               />
-              <RiskManagementPanel
-                config={riskConfig}
-                onChangeConfig={setRiskConfig}
-                lastEvaluation={pipeline.lastRiskEvaluation}
-                currentDrawdown={paper.portfolio.currentDrawdownPercent}
-              />
+              <GuardrailsPanel />
             </div>
           </div>
         )}

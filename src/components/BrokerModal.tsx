@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { authFetch } from "../hooks/useAuth";
 import {
   X,
   ShieldCheck,
@@ -63,14 +64,18 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
 
   const loadStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/broker/status");
+      const res = await authFetch("/api/broker/status");
+      if (res.status === 401) {
+        setMessage({ type: "err", text: "Unauthorized — silakan login ulang." });
+        return;
+      }
       const data = await res.json();
       if (data) {
         setStatus(data);
         setExchangeId(data.exchangeId || "binance");
         setTestnet(Boolean(data.testnet));
       }
-    } catch (err) {
+    } catch {
       setMessage({ type: "err", text: "Gagal ambil status broker dari server." });
     }
   }, []);
@@ -78,7 +83,12 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
   const loadBalance = useCallback(async () => {
     setIsLoadingBalance(true);
     try {
-      const res = await fetch("/api/broker/balance");
+      const res = await authFetch("/api/broker/balance");
+      if (res.status === 401) {
+        setMessage({ type: "err", text: "Unauthorized — silakan login ulang." });
+        setIsLoadingBalance(false);
+        return;
+      }
       const data = await res.json();
       if (data.success) {
         setBalances(data.balances || []);
@@ -86,7 +96,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
       } else {
         setMessage({ type: "err", text: data.message || "Gagal ambil balance." });
       }
-    } catch (err) {
+    } catch {
       setMessage({ type: "err", text: "Gagal ambil balance dari server." });
     } finally {
       setIsLoadingBalance(false);
@@ -108,7 +118,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
     setIsSaving(true);
     setMessage(null);
     try {
-      const res = await fetch("/api/broker/credentials", {
+      const res = await authFetch("/api/broker/credentials", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -127,7 +137,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
       } else {
         setMessage({ type: "err", text: data.message || "Gagal menyimpan credential." });
       }
-    } catch (err) {
+    } catch {
       setMessage({ type: "err", text: "Gagal menyimpan credential ke server." });
     } finally {
       setIsSaving(false);
@@ -139,14 +149,14 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
     setTestResult(null);
     setMessage(null);
     try {
-      const res = await fetch("/api/broker/test", { method: "POST" });
+      const res = await authFetch("/api/broker/test", { method: "POST" });
       const data = await res.json();
       if (data.success) {
         setTestResult(data);
       } else {
         setTestResult({ ok: false, message: data.message || "Koneksi gagal." });
       }
-    } catch (err) {
+    } catch {
       setTestResult({ ok: false, message: "Gagal terhubung ke server." });
     } finally {
       setIsTesting(false);
@@ -154,10 +164,12 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
   };
 
   const handleClear = async () => {
+    const ok = window.confirm("Hapus vault credential? Ini akan menghapus .broker-secrets.json.");
+    if (!ok) return;
     setIsClearing(true);
     setMessage(null);
     try {
-      const res = await fetch("/api/broker/credentials/clear", { method: "POST" });
+      const res = await authFetch("/api/broker/credentials/clear", { method: "POST" });
       const data = await res.json();
       if (data.success) {
         setStatus(data);
@@ -167,7 +179,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
       } else {
         setMessage({ type: "err", text: data.message || "Gagal menghapus credential." });
       }
-    } catch (err) {
+    } catch {
       setMessage({ type: "err", text: "Gagal menghapus credential." });
     } finally {
       setIsClearing(false);
@@ -302,7 +314,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
             ))}
           </div>
 
-          {/* Balance */}
+          {/* Balance — LIVE vs PAPER indicator */}
           <div className="rounded-lg bg-zinc-900/40 p-4 border border-zinc-800">
             <div className="flex items-center justify-between mb-2">
               <div className="font-bold text-zinc-200 flex items-center gap-1.5">
@@ -310,8 +322,11 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
                 <span>
                   BALANCE{" "}
                   <span className="text-[10px] text-zinc-500 font-normal">
-                    ({status?.mode === "live" ? "EXCHANGE" : "PAPER SAMPLE - ganti .env TRADING_MODE=live utk real"})
+                    ({status?.mode === "live" ? "EXCHANGE REAL — LIVE equity" : "PAPER SAMPLE — ganti .env TRADING_MODE=live utk real"})
                   </span>
+                </span>
+                <span className={`ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold border ${status?.mode === "live" ? "bg-rose-500/20 text-rose-300 border-rose-500/30" : "bg-zinc-800 text-zinc-400 border-zinc-700"}`}>
+                  {status?.mode === "live" ? "LIVE" : "PAPER"}
                 </span>
               </div>
               <button
