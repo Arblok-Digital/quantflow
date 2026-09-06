@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+.bento-dot-grid {
+  background-image: radial-gradient(#27272a 1px, transparent 1px);
+  background-size: 20px 20px;
+}
