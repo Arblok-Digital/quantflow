@@ -7,3 +7,4 @@ coverage/
 .env*
 !.env.example
 .broker-secrets.json
+.paper-book.json

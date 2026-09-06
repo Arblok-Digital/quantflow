@@ -29,6 +29,38 @@ interface BrokerSecrets {
 const SECRETS_FILE = path.join(process.cwd(), ".broker-secrets.json");
 
 // ------------------------------------------------------------------
+// Exchange instance cache: reuse one ccxt instance per (exchange, testnet)
+// pair instead of creating a new instance on every call.
+// ------------------------------------------------------------------
+const exchangeCache = new Map<string, ccxt.Exchange>();
+const marketsLoadedInstances = new WeakSet<object>();
+
+function exchangeCacheKey(cfg: { exchangeId: string; testnet: boolean }): string {
+  return `${cfg.exchangeId}:${cfg.testnet ? "testnet" : "mainnet"}`;
+}
+
+export function getExchange(): ccxt.Exchange {
+  const cfg = effectiveBrokerConfig();
+  const key = exchangeCacheKey(cfg);
+  let exchange = exchangeCache.get(key);
+  if (!exchange) {
+    exchange = makeExchange();
+    exchangeCache.set(key, exchange);
+  }
+  return exchange;
+}
+
+export async function ensureMarketsLoaded(exchange: ccxt.Exchange): Promise<void> {
+  if (marketsLoadedInstances.has(exchange)) return;
+  await exchange.loadMarkets?.();
+  marketsLoadedInstances.add(exchange);
+}
+
+export function clearExchangeCache(): void {
+  exchangeCache.clear();
+}
+
+// ------------------------------------------------------------------
 // Credential resolution: lingkungan(.env) > vault lokal (.broker-secrets.json)
 // ------------------------------------------------------------------
 function loadSecretsFile(): BrokerSecrets {
@@ -108,12 +140,14 @@ export async function saveBrokerCredentials(input: BrokerSecrets): Promise<void>
   const sealed = { ...loadSecretsFile(), ...input };
   await fs.promises.mkdir(path.dirname(SECRETS_FILE), { recursive: true });
   await fs.promises.writeFile(SECRETS_FILE, JSON.stringify(sealed, null, 2), { mode: 0o600 });
+  clearExchangeCache();
 }
 
 export async function clearBrokerCredentials(): Promise<void> {
   if (fs.existsSync(SECRETS_FILE)) {
     await fs.promises.rm(SECRETS_FILE, { force: true });
   }
+  clearExchangeCache();
 }
 
 // ------------------------------------------------------------------
@@ -125,8 +159,8 @@ export async function testBrokerConnection() {
   if (source === "none" || !cfg.apiKey || !cfg.apiSecret) {
     throw new Error("Credential belum diisi. Simpan API key/secret dulu.");
   }
-  const exchange = makeExchange();
-  await exchange.loadMarkets?.();
+  const exchange = getExchange();
+  await ensureMarketsLoaded(exchange);
   const balance = await exchange.fetchBalance();
   const totals = Object.entries(balance.total || {})
     .filter(([, v]) => Number(v) > 0)
@@ -155,7 +189,7 @@ function assertLiveAllowed() {
 
 // --- 1. Market Data (public, tanpa key) ---
 export async function fetchCcxtTicker(symbol: string) {
-  const exchange = makeExchange();
+  const exchange = getExchange();
   const ticker = await exchange.fetchTicker(symbol);
   return {
     symbol: ticker.symbol,
@@ -172,7 +206,7 @@ export async function fetchCcxtTicker(symbol: string) {
 }
 
 export async function fetchCcxtOrderBook(symbol: string, limit = 12) {
-  const exchange = makeExchange();
+  const exchange = getExchange();
   const book = await exchange.fetchOrderBook(symbol, limit);
   return {
     symbol: book.symbol,
@@ -184,7 +218,7 @@ export async function fetchCcxtOrderBook(symbol: string, limit = 12) {
 }
 
 export async function fetchCcxtOHLCV(symbol: string, timeframe: string, limit = 50) {
-  const exchange = makeExchange();
+  const exchange = getExchange();
   const raw = await exchange.fetchOHLCV(symbol, timeframe, undefined, limit);
   return raw.map((c) => ({
     timestamp: c[0],
@@ -212,7 +246,8 @@ export async function fetchBrokerBalance(): Promise<NormalizedBalance[]> {
     ];
   }
   assertLiveAllowed();
-  const exchange = makeExchange();
+  const exchange = getExchange();
+  await ensureMarketsLoaded(exchange);
   const balance = await exchange.fetchBalance();
   return Object.entries(balance.total || {})
     .filter(([, total]) => Number(total) > 0)
@@ -239,7 +274,8 @@ export async function placeBrokerOrder(req: BrokerOrderRequest) {
   }
 
   if (process.env.TRADING_MODE !== "live") {
-    const exchange = makeExchange();
+    const exchange = getExchange();
+    await ensureMarketsLoaded(exchange);
     const ticker = await exchange.fetchTicker(normalizedSymbol);
     const markPrice = ticker.last || ticker.close || 0;
     if (!markPrice) throw new Error(`Tidak ada harga untuk ${normalizedSymbol}.`);
@@ -284,8 +320,8 @@ export async function placeBrokerOrder(req: BrokerOrderRequest) {
 
   // LIVE PATH - hanya jika TRADING_MODE=live + credential valid
   assertLiveAllowed();
-  const exchange = makeExchange();
-  await exchange.loadMarkets();
+  const exchange = getExchange();
+  await ensureMarketsLoaded(exchange);
   const order = await exchange.createOrder(normalizedSymbol, type, side, amount, type === "limit" ? Number(req.price) : undefined, {
     ...(req.leverage && req.leverage > 1 ? { leverage: req.leverage } : {}),
   });
