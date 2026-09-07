@@ -80,8 +80,6 @@ function mapClosedTrade(t: any): ClosedTrade {
   if (sl > 0 && amount > 0) {
     const riskAmt = Math.abs(entryPrice - sl) * amount;
     if (riskAmt > 1e-9) rMultiple = Number((pnlUSD / riskAmt).toFixed(2));
-  } else {
-    rMultiple = pnlUSD >= 0 ? 1.5 : -1.0;
   }
   return {
     id: String(t.id),
@@ -128,6 +126,9 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
   positionsRef.current = positions;
 
   const mountedRef = useRef(false);
+  // Running peak equity (untuk currentDrawdown yang jujur — bukan max hist
+  // yang bikin gate lock permanen. F10)
+  const runningPeakRef = useRef<number>(INITIAL_PAPER_CASH);
 
   const load = useCallback(async () => {
     if (!mountedRef.current) return;
@@ -175,16 +176,21 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         }
 
         if (mountedRef.current) {
+          // Current drawdown jujur: dari running peak equity, bukan max
+          // historis — supaya gate bisa unlock setelah equity pulih (F10).
+          const ec = Number(equity) || 0;
+          runningPeakRef.current = Math.max(runningPeakRef.current, ec);
+          const currentDD = runningPeakRef.current > 0 ? ((runningPeakRef.current - ec) / runningPeakRef.current) * 100 : 0;
           setPortfolio({
             cash: Number(cash.toFixed(2)),
-            equity: Number(equity.toFixed(2)),
+            equity: ec,
             initialBalance: INITIAL_PAPER_CASH,
             realizedPnl: Number(realizedPnl.toFixed(2)),
             winCount,
             lossCount,
             totalTrades,
             maxDrawdownPercent: Number(maxDD.toFixed(2)),
-            currentDrawdownPercent: Number(maxDD.toFixed(2)),
+            currentDrawdownPercent: Number(Math.max(0, currentDD).toFixed(2)),
           });
         }
       }

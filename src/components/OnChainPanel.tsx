@@ -1,15 +1,16 @@
 import React from "react";
 import { OnChainMetrics, WhaleTransaction } from "../types";
-import { 
-  Boxes, 
-  ArrowDownRight, 
-  ArrowUpRight, 
-  ShieldAlert, 
-  Layers, 
-  Activity, 
-  CheckCircle2, 
-  Wallet, 
-  TrendingUp, 
+import { getDataSourceMode } from "../data/provider";
+import {
+  Boxes,
+  ArrowDownRight,
+  ArrowUpRight,
+  ShieldAlert,
+  Layers,
+  Activity,
+  CheckCircle2,
+  Wallet,
+  TrendingUp,
   TrendingDown,
   ExternalLink,
   Sparkles
@@ -22,6 +23,30 @@ interface OnChainPanelProps {
 
 export const OnChainPanel: React.FC<OnChainPanelProps> = ({ metrics, onRefresh }) => {
   const isNetflowOutflow = metrics.exchangeNetflow24hUSD < 0;
+  // 4.9: Mode feed on-chain dari provider registry — REAL bila ada anchor blockchain.com atau mode "live".
+  const onChainMode = getDataSourceMode("onChain");
+  const hasRealAnchor = Boolean(metrics.realData);
+  const isSimulated = !hasRealAnchor && onChainMode !== "live";
+  const fetchTs = hasRealAnchor
+    ? metrics.realData!.fetchedAt
+    : typeof metrics.timestamp === "number" && metrics.timestamp > 0
+    ? metrics.timestamp
+    : null;
+  const lastFetchAt = fetchTs
+    ? new Date(fetchTs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "--:--:--";
+  /** Label sumber per pilar metrik (4.9): mana yang berasal dari anchor real, mana proyeksi deterministik. */
+  const metricBadge = (real: boolean) => (
+    <span
+      className={`ml-auto text-[9px] font-mono uppercase font-bold px-1.5 py-0.5 rounded border ${
+        real
+          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+          : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+      }`}
+    >
+      {real ? "REAL" : "SIMULATED"}
+    </span>
+  );
 
   return (
     <div id="onchain-panel" className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-6">
@@ -82,6 +107,7 @@ export const OnChainPanel: React.FC<OnChainPanelProps> = ({ metrics, onRefresh }
         <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5 space-y-1.5">
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>Netflow Bursa 24 Jam</span>
+            {metricBadge(hasRealAnchor)}
             {isNetflowOutflow ? (
               <span className="text-emerald-400 flex items-center text-[10px] font-mono font-medium">
                 <ArrowDownRight className="w-3 h-3 mr-0.5" /> Outflow (Akumulasi)
@@ -107,8 +133,11 @@ export const OnChainPanel: React.FC<OnChainPanelProps> = ({ metrics, onRefresh }
         <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5 space-y-1.5">
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>MVRV Z-Score</span>
-            <span className="text-[10px] font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded">
-              {metrics.mvrvTerritory}
+            <span className="flex items-center gap-1">
+              {metricBadge(hasRealAnchor)}
+              <span className="text-[10px] font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded">
+                {metrics.mvrvTerritory}
+              </span>
             </span>
           </div>
           <div className="text-xl font-bold font-mono text-slate-100 flex items-baseline gap-1.5">
@@ -124,8 +153,11 @@ export const OnChainPanel: React.FC<OnChainPanelProps> = ({ metrics, onRefresh }
         <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5 space-y-1.5">
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>SOPR (Profit Ratio)</span>
-            <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
-              {metrics.soprStatus}
+            <span className="flex items-center gap-1">
+              {metricBadge(hasRealAnchor)}
+              <span className="text-[10px] font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                {metrics.soprStatus}
+              </span>
             </span>
           </div>
           <div className="text-xl font-bold font-mono text-slate-100 flex items-baseline gap-1.5">
@@ -141,6 +173,7 @@ export const OnChainPanel: React.FC<OnChainPanelProps> = ({ metrics, onRefresh }
         <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5 space-y-1.5">
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>Aktivitas Wallet 24 Jam</span>
+            {metricBadge(hasRealAnchor)}
             <span className="text-emerald-400 text-[10px] font-mono">
               +{metrics.activeAddressesGrowth24h}%
             </span>
@@ -168,6 +201,19 @@ export const OnChainPanel: React.FC<OnChainPanelProps> = ({ metrics, onRefresh }
           <span className="ml-auto text-slate-500">di-update {new Date(metrics.realData.fetchedAt).toLocaleTimeString()}</span>
         </div>
       )}
+
+      {/* 4.9: Timestamp fetch — selalu tampil; REAL bila ada anchor blockchain.com, SIMULATED bila hanya proyeksi */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5 text-[11px] font-mono text-slate-500 border-t border-slate-800/70">
+        <span className={`font-bold uppercase flex items-center gap-1.5 ${
+          hasRealAnchor ? "text-emerald-400" : "text-amber-400"
+        }`}>
+          <span className="w-1.5 h-1.5 rounded-full bg-current" />
+          {hasRealAnchor ? "REAL DATA (blockchain.com anchor)" : "SIMULATED ENGINE — DERIVED VALUES"}
+        </span>
+        <span>
+          Terakhir fetch: <b className={hasRealAnchor ? "text-emerald-400" : "text-slate-300"}>{lastFetchAt}</b>
+        </span>
+      </div>
 
       {/* Synthesis Insight Callout */}
       <div className="p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/30 flex items-start gap-3">

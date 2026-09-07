@@ -5,7 +5,41 @@ import {
   LiquidityHuntState,
   Timeframe,
   MarketType,
+  OrderBook,
 } from "../types";
+
+/**
+ * Estimate the liquidation-volume depth around a liquidity zone using the REAL
+ * order book, instead of synthetic `volume % N` numbers.
+ *
+ * Honest semantics:
+ * - For a BSL (buy-side, above price): sum of ask-side depth within ~0.3% of
+ *   the zone price → how much resting sell size is "in the way" if price hunts
+ *   up into the pool.
+ * - For an SSL (sell-side, below price): sum of bid-side depth within ~0.3% of
+ *   the zone price → resting buy size below price.
+ * - Falls back to a small fraction of the candle's real volume ONLY as a rough
+ *   lower bound when the book has no levels near the zone, and flags it EST.
+ *
+ * Returns millions (e.g. 14.5 = $14.5M) to stay consistent with existing type.
+ */
+export function estimateLiquidationDepthFromBook(
+  orderBook: OrderBook,
+  zonePrice: number,
+  isBSL: boolean
+): number {
+  const window = zonePrice * 0.003; // ±0.3% band
+  const side = isBSL ? orderBook.asks : orderBook.bids;
+  const levels = (side || []).filter((lvl) => Math.abs(lvl.price - zonePrice) <= window);
+  const depthUSD = levels.reduce((sum, lvl) => sum + lvl.price * lvl.size, 0);
+  const depthMillions = Number((depthUSD / 1_000_000).toFixed(1));
+  // If the book has no levels near the zone, give an honest zero-derived est:
+  // do NOT fabricate a big number — a flat spot is a flat spot.
+  return Number.isFinite(depthMillions) && depthMillions > 0 ? depthMillions : 0;
+}
+
+/** Tag added to zone summaries so the UI/LLM can tell depth-derived from placeholder. */
+export type LiquidityVolumeSource = "ORDERBOOK" | "EST_NODATA";
 
 /**
  * Identifies Swing Highs & Swing Lows in candle series to map out
@@ -14,7 +48,8 @@ import {
 export function detectLiquidityZones(
   candles: Candle[],
   timeframe: Timeframe,
-  currentPrice: number
+  currentPrice: number,
+  orderBook: OrderBook = { bids: [], asks: [], spread: 0 }
 ): LiquidityZone[] {
   if (candles.length < 5) return [];
 
@@ -40,9 +75,9 @@ export function detectLiquidityZones(
       const midPrice = (priceMin + priceMax) / 2;
       const distancePercent = Number((((midPrice - currentPrice) / currentPrice) * 100).toFixed(2));
 
-      // Calculate estimated liquidation density based on volume & leverage
-      const baseVol = timeframe === "4h" ? 18.5 : 6.2;
-      const estimatedVolumeUSD = Number((baseVol + (curr.volume % 15)).toFixed(1));
+      // Honest liquidation-depth estimate from the REAL order book (no
+      // synthetic baseVol + volume % N). 0 = no resting depth near this zone.
+      const estimatedVolumeUSD = estimateLiquidationDepthFromBook(orderBook, curr.high, true);
 
       zones.push({
         id: `BSL-${timeframe}-${curr.timestamp}`,
@@ -66,8 +101,7 @@ export function detectLiquidityZones(
       const midPrice = (priceMin + priceMax) / 2;
       const distancePercent = Number((((midPrice - currentPrice) / currentPrice) * 100).toFixed(2));
 
-      const baseVol = timeframe === "4h" ? 22.0 : 8.4;
-      const estimatedVolumeUSD = Number((baseVol + (curr.volume % 18)).toFixed(1));
+      const estimatedVolumeUSD = estimateLiquidationDepthFromBook(orderBook, curr.low, false);
 
       zones.push({
         id: `SSL-${timeframe}-${curr.timestamp}`,
@@ -97,10 +131,11 @@ export function analyzeMTFLiquidity(
   candles15m: Candle[],
   candles4h: Candle[],
   currentPrice: number,
-  marketType: MarketType = "FUTURES"
+  marketType: MarketType = "FUTURES",
+  orderBook: OrderBook = { bids: [], asks: [], spread: 0 }
 ): MTFLiquidityAnalysis {
-  const zones15m = detectLiquidityZones(candles15m, "15m", currentPrice);
-  const zones4h = detectLiquidityZones(candles4h, "4h", currentPrice);
+  const zones15m = detectLiquidityZones(candles15m, "15m", currentPrice, orderBook);
+  const zones4h = detectLiquidityZones(candles4h, "4h", currentPrice, orderBook);
 
   // Active BSL (above price) and SSL (below price)
   const bslPools = [...zones15m, ...zones4h]
@@ -194,18 +229,28 @@ export function analyzeMTFLiquidity(
   let confluenceScore = 70;
   let confluenceSummary = "15m & 4H structure building equal liquidity pools.";
 
+  // Honest volume label: show real depth-derived $M when the order book had
+  // levels near the zone; otherwise say EST/NODATA instead of presenting a
+  // fabricated number as fact.
+  const volLabel = (z: LiquidityZone | null): string => {
+    if (!z) return "N/A";
+    return z.estimatedVolumeUSD > 0
+      ? `$${z.estimatedVolumeUSD}M`
+      : "EST(no book depth)";
+  };
+
   if (activeState === "SWEPT_SSL") {
     confluenceScore = 88;
-    confluenceSummary = `Liquidity Hunt: Long stop-loss pool swept on 15m ($${recentSweep?.zone.estimatedVolumeUSD}M) with absorption wick. Macro 4H bias remains bullish.`;
+    confluenceSummary = `Liquidity Hunt: Long stop-loss pool swept on 15m (${volLabel(recentSweep?.zone ?? null)}) with absorption wick. Macro 4H bias remains bullish.`;
   } else if (activeState === "SWEPT_BSL") {
     confluenceScore = 85;
-    confluenceSummary = `Liquidity Hunt: Short stop-loss pool swept on 15m ($${recentSweep?.zone.estimatedVolumeUSD}M) with rejection. Target lower 4H SSL pool.`;
+    confluenceSummary = `Liquidity Hunt: Short stop-loss pool swept on 15m (${volLabel(recentSweep?.zone ?? null)}) with rejection. Target lower 4H SSL pool.`;
   } else if (activeState === "HUNTING_BSL") {
     confluenceScore = 78;
-    confluenceSummary = `Magnet effect towards 15m/4H BSL liquidation pool at $${nearestBSL?.midPrice} (est. $${nearestBSL?.estimatedVolumeUSD}M liq volume).`;
+    confluenceSummary = `Magnet effect towards 15m/4H BSL liquidation pool at $${nearestBSL?.midPrice} (${volLabel(nearestBSL)} depth).`;
   } else if (activeState === "HUNTING_SSL") {
     confluenceScore = 76;
-    confluenceSummary = `Downward liquidity hunt toward major SSL pool at $${nearestSSL?.midPrice} (est. $${nearestSSL?.estimatedVolumeUSD}M liq volume).`;
+    confluenceSummary = `Downward liquidity hunt toward major SSL pool at $${nearestSSL?.midPrice} (${volLabel(nearestSSL)} depth).`;
   }
 
   return {

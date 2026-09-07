@@ -114,6 +114,13 @@ export interface MTFLiquidityAnalysis {
   } | null;
 }
 
+/** Provenance tag per pilar data — menandai asal angka (4.4). */
+export interface DataProvenance {
+  source: "REAL" | "SIMULATED" | "STALE";
+  fetchedAt: number;
+  ageMinutes?: number;
+}
+
 export interface LLMDecision {
   action: TradeAction;
   confidence: number;
@@ -143,6 +150,15 @@ export interface LLMDecision {
     volatilityRisk: string;
     fedStance: string;
   };
+  /** Provenance per pilar (4.4): dari mana tiap angka decision berasal. */
+  provenance?: {
+    market?: DataProvenance;
+    liquidity?: DataProvenance;
+    onChain?: DataProvenance;
+    macro?: DataProvenance;
+  };
+  /** 3 baris ringkas prompt server yang meng-hasilkan decision ini (4.5). */
+  promptSummary?: string;
 }
 
 export interface RiskConfig {
@@ -230,7 +246,7 @@ export interface ClosedTrade {
   pnlPercent: number;
   openedAt: number;
   closedAt: number;
-  exitReason: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE" | "TRAILING_STOP" | "EMERGENCY_STOP";
+  exitReason: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE" | "TRAILING_STOP" | "EMERGENCY_STOP" | "LIQUIDATED";
   entryReasoning: string;
   targetLiquidityPool?: string;
   rMultiple: number;
@@ -251,12 +267,19 @@ export interface Portfolio {
 // --- Real Exchange Data Source Types ---
 export type MarketDataSource = "BINANCE_LIVE" | "BYBIT_FALLBACK" | "KRAKEN_FALLBACK" | "SIMULATED";
 
+/** Mode feed pasar real-time: sumber kebenaran harga untuk pipeline & UI. */
+export type FeedMode = "WS_LIVE" | "REST_POLL" | "SIMULATED" | "INTERPOLATED";
+
 export interface ExchangeFeedStatus {
   source: MarketDataSource;
   latencyMs: number;
   lastSyncTimestamp: number;
   isLive: boolean;
   activeEndpoint: string;
+  /** Level kejujuran harga saat ini (5.2): WS live / REST poll / simulasi / interpolasi. */
+  feedMode?: FeedMode;
+  /** Price & depth message rate dari SSE (msg/sec). */
+  messageRate?: number;
 }
 
 // --- On-Chain Analysis Types ---

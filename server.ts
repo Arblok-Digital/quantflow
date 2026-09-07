@@ -5,6 +5,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { z } from "zod";
 import {
   clearBrokerCredentials,
   fetchBrokerBalance,
@@ -32,6 +33,7 @@ import {
   openPaperPosition,
   refreshPaperMarks,
   startBracketMonitor,
+  updatePaperMarkCache,
   updatePaperPosition,
 } from "./paperBook";
 import {
@@ -183,6 +185,272 @@ async function fetchWithTimeout(url: string, timeoutMs = 3000): Promise<any> {
   }
 }
 
+// ---------- Symbol parsing (task 5.5) ----------
+// Generic BASE/QUOTE parser. Menangani:
+//   "BTC/USDT"  -> { base: BTC, quote: USDT, raw: BTCUSDT, ccxt: BTC/USDT }
+//   "USDC/USDT" -> { base: USDC, quote: USDT, raw: USDCUSDT, ccxt: USDC/USDT }
+//   "ETH/USDC"  -> { base: ETH,  quote: USDC, raw: ETHUSDC,  ccxt: ETH/USDC }
+//   "SOLUSDT"   -> { base: SOL,  quote: USDT, raw: SOLUSDT,  ccxt: SOL/USDT }
+const KNOWN_QUOTES_SORTED = ["FDUSD", "BUSD", "USDC", "USDT", "BTC", "ETH", "EUR", "USD"];
+
+interface ParsedSymbol {
+  base: string;
+  quote: string;
+  raw: string; // tanpa slash, untuk Binance REST/WS
+  ccxt: string; // dengan slash, untuk ccxt API broker
+}
+
+function parseMarketSymbol(input: string): ParsedSymbol {
+  const s = String(input || "BTC/USDT").trim().toUpperCase();
+  let base = "";
+  let quote = "USDT";
+  if (s.includes("/")) {
+    const parts = s.split("/").filter(Boolean);
+    base = parts[0] || "BTC";
+    quote = parts[1] || "USDT";
+  } else {
+    // Cari suffix quote terpanjang yang dikenal (USDCUSDT -> base USDC, bukan U).
+    let matched = "";
+    for (const q of KNOWN_QUOTES_SORTED) {
+      if (s.endsWith(q) && s.length > q.length && q.length > matched.length) {
+        matched = q;
+      }
+    }
+    if (matched) {
+      quote = matched;
+      base = s.slice(0, -matched.length);
+    } else {
+      base = s;
+    }
+  }
+  base = base || "BTC";
+  quote = quote || "USDT";
+  return { base, quote, raw: `${base}${quote}`, ccxt: `${base}/${quote}` };
+}
+
+// ---------- Binance WebSocket -> SSE proxy (task 5.1) ----------
+// Menggunakan WebSocket native Node (global sejak Node 22) — tanpa dependency `ws`.
+// Per symbol: satu koneksi Binance wss, dipancarkan ke banyak klien SSE.
+// Reconnect backoff 2s/5s/10s, dan emit status disconnected. Jika WS disabled
+// (env WS_DISABLED), klien mendapat status REST_POLL dan memakai REST polling.
+interface StreamSlot {
+  binanceWs: WebSocket | null;
+  clients: Set<import("express").Response>;
+  reconnectAttempt: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  depth: Map<number, number>; // price -> size (bid)
+  asks: Map<number, number>;
+}
+
+const streamSlots = new Map<string, StreamSlot>();
+
+function streamKey(symbol: string): string {
+  return parseMarketSymbol(symbol).ccxt;
+}
+
+function broadcastSSE(key: string, event: string, data: unknown): void {
+  const slot = streamSlots.get(key);
+  if (!slot) return;
+  const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of slot.clients) {
+    try {
+      client.write(frame);
+    } catch {
+      // client sudah mati; di-handle di req.on("close")
+    }
+  }
+}
+
+function rebuildAndBroadcastDepth(key: string): void {
+  const slot = streamSlots.get(key);
+  if (!slot) return;
+  const bids = [...slot.depth.entries()]
+    .filter(([, size]) => size > 0)
+    .sort((a, b) => b[0] - a[0])
+    .slice(0, 12)
+    .map(([price, size]) => ({ price, size, total: 0 }));
+  const asks = [...slot.asks.entries()]
+    .filter(([, size]) => size > 0)
+    .sort((a, b) => a[0] - b[0])
+    .slice(0, 12)
+    .map(([price, size]) => ({ price, size, total: 0 }));
+  let bidAccum = 0;
+  for (const lvl of bids) {
+    bidAccum += lvl.size;
+    lvl.total = Number(bidAccum.toFixed(4));
+  }
+  let askAccum = 0;
+  for (const lvl of asks) {
+    askAccum += lvl.size;
+    lvl.total = Number(askAccum.toFixed(4));
+  }
+  const spread = bids.length > 0 && asks.length > 0 ? Number((asks[0].price - bids[0].price).toFixed(2)) : 0;
+  broadcastSSE(key, "depth", { type: "depth", bids, asks, spread });
+}
+
+const WS_BACKOFF_MS = [2000, 5000, 10000];
+
+function connectBinanceStream(key: string): void {
+  let slot = streamSlots.get(key);
+  if (!slot) {
+    slot = { binanceWs: null, clients: new Set(), reconnectAttempt: 0, reconnectTimer: null, depth: new Map(), asks: new Map() };
+    streamSlots.set(key, slot);
+  }
+  if (slot.binanceWs || slot.reconnectTimer) return; // sudah connect / sedang nunggu retry
+
+  const wsDisabled = /^(1|true)$/i.test(String(process.env.WS_DISABLED || ""));
+  if (wsDisabled) {
+    broadcastSSE(key, "status", { type: "status", feedMode: "REST_POLL", message: "WS_DISABLED — REST polling aktif." });
+    return;
+  }
+
+  const parsed = parseMarketSymbol(key);
+  const wsUrl = `wss://stream.binance.com:9443/ws/${parsed.raw}@trade/${parsed.raw}@depth@100ms`;
+
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (err) {
+    broadcastSSE(key, "status", { type: "status", feedMode: "REST_POLL", message: `WS init gagal: ${(err as Error).message}` });
+    scheduleStreamReconnect(key);
+    return;
+  }
+  slot.binanceWs = ws;
+
+  ws.onopen = () => {
+    const cur = streamSlots.get(key);
+    if (cur) cur.reconnectAttempt = 0;
+    broadcastSSE(key, "status", { type: "status", feedMode: "WS_LIVE", message: "connected" });
+    // Seed depth snapshot dari REST supaya depth deltas punya basis.
+    fetchWithTimeout(`https://api.binance.com/api/v3/depth?symbol=${parsed.raw}&limit=20`, 3000)
+      .then((depth) => {
+        const curSlot = streamSlots.get(key);
+        if (!curSlot) return;
+        curSlot.depth.clear();
+        curSlot.asks.clear();
+        for (const lvl of (depth?.bids || [])) curSlot.depth.set(parseFloat(lvl[0]), parseFloat(lvl[1]));
+        for (const lvl of (depth?.asks || [])) curSlot.asks.set(parseFloat(lvl[0]), parseFloat(lvl[1]));
+        rebuildAndBroadcastDepth(key);
+      })
+      .catch(() => {});
+  };
+
+  ws.onmessage = (ev) => {
+    const raw = String(ev.data);
+    let msg: any;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const curSlot = streamSlots.get(key);
+    if (!curSlot) return;
+    if (msg.e === "trade") {
+      const price = parseFloat(msg.p);
+      const qty = parseFloat(msg.q);
+      if (isFinite(price) && price > 0) {
+        // Sumber kebenaran mark untuk paper book (6.3): server tick dipakai
+        // pipeline/chart/portfolio, bukan mark-to-market ganda di client.
+        updatePaperMarkCache(parsed.ccxt, price);
+        broadcastSSE(key, "trade", { type: "trade", price, qty, time: msg.T });
+      }
+    } else if (msg.e === "depthUpdate" && Array.isArray(msg.b) && Array.isArray(msg.a)) {
+      for (const lvl of msg.b) {
+        const price = parseFloat(lvl[0]);
+        const size = parseFloat(lvl[1]);
+        if (size === 0) curSlot.depth.delete(price);
+        else curSlot.depth.set(price, size);
+      }
+      for (const lvl of msg.a) {
+        const price = parseFloat(lvl[0]);
+        const size = parseFloat(lvl[1]);
+        if (size === 0) curSlot.asks.delete(price);
+        else curSlot.asks.set(price, size);
+      }
+      rebuildAndBroadcastDepth(key);
+    }
+  };
+
+  ws.onclose = () => {
+    const cur = streamSlots.get(key);
+    if (cur) cur.binanceWs = null;
+    broadcastSSE(key, "status", { type: "status", feedMode: "REST_POLL", message: "disconnected" });
+    scheduleStreamReconnect(key);
+  };
+
+  ws.onerror = () => {
+    // onclose menyusul; cukup tutup agar loop reconnect berjalan.
+    try {
+      ws.close();
+    } catch {}
+  };
+}
+
+function scheduleStreamReconnect(key: string): void {
+  const slot = streamSlots.get(key);
+  if (!slot) return;
+  if (slot.clients.size === 0) return; // tanpa konsumen SSE, jangan reconnect selamanya
+  if (/^(1|true)$/i.test(String(process.env.WS_DISABLED || ""))) return;
+  const delay = WS_BACKOFF_MS[Math.min(slot.reconnectAttempt, WS_BACKOFF_MS.length - 1)];
+  slot.reconnectAttempt += 1;
+  slot.reconnectTimer = setTimeout(() => {
+    const cur = streamSlots.get(key);
+    if (cur) cur.reconnectTimer = null;
+    connectBinanceStream(key);
+  }, delay);
+}
+
+function closeStreamSlot(key: string): void {
+  const slot = streamSlots.get(key);
+  if (!slot) return;
+  if (slot.reconnectTimer) {
+    clearTimeout(slot.reconnectTimer);
+    slot.reconnectTimer = null;
+  }
+  if (slot.binanceWs) {
+    try {
+      slot.binanceWs.close();
+    } catch {}
+    slot.binanceWs = null;
+  }
+  streamSlots.delete(key);
+}
+
+// SSE: proxy harga & depth Binance real-time (task 5.1) — public, sejajar /api/market-feed.
+app.get("/api/market/stream", (req, res) => {
+  const key = streamKey(String(req.query.symbol || "BTC/USDT"));
+  let slot = streamSlots.get(key);
+  if (!slot) {
+    slot = { binanceWs: null, clients: new Set(), reconnectAttempt: 0, reconnectTimer: null, depth: new Map(), asks: new Map() };
+    streamSlots.set(key, slot);
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(": connected\n\n");
+  const st = slot;
+  st.clients.add(res);
+  res.write(`event: status\ndata: ${JSON.stringify({ type: "status", feedMode: "WS_LIVE", symbol: key })}\n\n`);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {}
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    st.clients.delete(res);
+    if (st.clients.size === 0) closeStreamSlot(key);
+  });
+
+  connectBinanceStream(key);
+});
+
 // Health check (public, skip rate limit via skip fn above)
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -195,8 +463,11 @@ app.get("/api/health", (_req, res) => {
 // Real Exchange Market Data Route with Multi-Exchange Fallback (Binance -> Bybit -> Kraken -> Simulated)
 app.get("/api/market-feed", async (req, res) => {
   const tStart = Date.now();
-  const rawSymbol = String(req.query.symbol || "BTC/USDT").replace("/", "").toUpperCase();
-  const asset = rawSymbol.replace("USDT", "") || "BTC";
+  const parsed = parseMarketSymbol(String(req.query.symbol || "BTC/USDT"));
+  const rawSymbol = parsed.raw;
+  const exchangeSymbol = parsed.ccxt;
+  const asset = parsed.base;
+  const quote = parsed.quote;
 
   // 1. Try Binance REST API (Primary)
   try {
@@ -247,7 +518,7 @@ app.get("/api/market-feed", async (req, res) => {
     return res.json({
       success: true,
       source: "BINANCE_LIVE",
-      symbol: `${asset}/USDT`,
+      symbol: exchangeSymbol,
       currentPrice,
       ticker24h: {
         high: parseFloat(tickerData.highPrice),
@@ -304,7 +575,7 @@ app.get("/api/market-feed", async (req, res) => {
       return res.json({
         success: true,
         source: "BYBIT_FALLBACK",
-        symbol: `${asset}/USDT`,
+        symbol: exchangeSymbol,
         currentPrice,
         ticker24h: {
           high: parseFloat(ticker.highPrice24h || currentPrice * 1.02),
@@ -326,7 +597,7 @@ app.get("/api/market-feed", async (req, res) => {
   res.json({
     success: true,
     source: "SIMULATED",
-    symbol: `${asset}/USDT`,
+    symbol: exchangeSymbol,
     latencyMs: Date.now() - tStart,
     timestamp: Date.now(),
     message: "Exchange public REST API uncontactable or rate-limited; using client/server synthetic feeder.",
@@ -335,7 +606,7 @@ app.get("/api/market-feed", async (req, res) => {
 
 // Multi-Timeframe Dedicated Klines Endpoint (1s to 1w)
 app.get("/api/klines", async (req, res) => {
-  const rawSymbol = String(req.query.symbol || "BTCUSDT").replace("/", "").toUpperCase();
+  const rawSymbol = parseMarketSymbol(String(req.query.symbol || "BTCUSDT")).raw;
   const tf = String(req.query.interval || req.query.timeframe || "15m");
   const limit = Math.min(100, Math.max(10, parseInt(String(req.query.limit || "50"))));
 
@@ -538,7 +809,7 @@ app.post("/api/ai-decision", async (req, res) => {
 
   const client = getGeminiClient();
 
-  // If Gemini API Key is available, call Gemini 3.8 Flash
+  // If Gemini API Key is available, call Gemini (2.0-flash primary, 1.5-flash fallback)
   if (client) {
     try {
       const prompt = `Anda adalah Institutional AI Trading Agent dengan keahlian komprehensif:
@@ -610,53 +881,227 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
   }
 }`;
 
-      const aiResponse = await client.models.generateContent({
-        model: "gemini-3.8-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-        },
+      // Zod schema untuk validasi output LLM (4.1)
+      const decisionSchema = z.object({
+        action: z.enum(["BUY", "SELL", "HOLD"]),
+        confidence: z.number().int().min(1).max(100).finite(),
+        targetPrice: z.number().finite().positive(),
+        stopLoss: z.number().finite().positive(),
+        takeProfit: z.number().finite().positive(),
+        positionSizePercent: z.number().min(1).max(100),
+        reasoning: z.string().optional(),
+        onChainContext: z
+          .object({
+            smartMoneyBias: z.string().optional(),
+            netflowStatus: z.string().optional(),
+            mvrvZScore: z.number().optional(),
+            whaleSignal: z.string().optional(),
+          })
+          .optional(),
+        macroContext: z
+          .object({
+            nearestEventName: z.string().optional(),
+            volatilityRisk: z.string().optional(),
+            fedStance: z.string().optional(),
+          })
+          .optional(),
       });
 
-      const responseText = aiResponse.text || "{}";
-      const parsedDecision = JSON.parse(responseText);
+      // Coba model primary, lalu fallback pada INVALID_MODEL (4.2).
+      const candidateModels = ["gemini-2.0-flash", "gemini-1.5-flash"];
+      let responseText: string = "{}";
+      let usedModel = "gemini-2.0-flash";
+      let lastErr: any = null;
+      for (const model of candidateModels) {
+        try {
+          const aiResponse = await client.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0.2,
+            },
+          });
+          if (aiResponse && aiResponse.text) {
+            responseText = aiResponse.text;
+            usedModel = model;
+            break;
+          }
+          lastErr = new Error(`model ${model} returned empty response`);
+        } catch (modelErr: any) {
+          lastErr = modelErr;
+          const msg = String(modelErr?.message || "");
+          if (/INVALID_MODEL|not found|does not exist|404/i.test(msg)) {
+            console.warn(`Gemini model ${model} tidak valid, coba fallback...`);
+            continue;
+          }
+          throw modelErr;
+        }
+      }
+      if (!responseText || /^\s*\{?\s*\}$/.test(responseText.trim())) {
+        responseText = "{}";
+        if (lastErr) {
+          throw lastErr;
+        }
+      }
+
+      let parsedDecision: unknown;
+      try {
+        parsedDecision = JSON.parse(responseText);
+      } catch (parseErr: any) {
+        const inferenceLatency = Date.now() - startTime;
+        try {
+          appendAudit("decision", {
+            symbol: String(symbol || "BTC/USDT"),
+            action: "REJECTED_JSON_PARSE",
+            latencyMs: inferenceLatency,
+            modelId: usedModel,
+            reason: "raw-llm-output-not-json",
+          });
+        } catch {}
+        return res.status(502).json({
+          success: false,
+          source: "fallback-validation-failed",
+          reason: "unparseable-llm-json",
+          message: "Output LLM tidak valid JSON. Keputusan ditolak (tidak fallback diam-diam).",
+        });
+      }
+
+      // Validasi skema + urutan harga per aksi (4.1)
+      const validation = decisionSchema.safeParse(parsedDecision);
+      if (!validation.success) {
+        const inferenceLatency = Date.now() - startTime;
+        try {
+          const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const responseStr = String(responseText).slice(0, 2000);
+          saveAgentDecisionDb({
+            id: decisionId,
+            created_at: Date.now(),
+            symbol: String(symbol || "BTC/USDT"),
+            action: "REJECTED",
+            confidence: 0,
+            model_id: usedModel,
+            latency_ms: inferenceLatency,
+            prompt: prompt.slice(0, 800),
+            response: responseStr,
+            source_tags: JSON.stringify({ validation: "failed", issues: validation.error.issues }),
+          });
+          appendAudit("decision", {
+            decisionId,
+            symbol: String(symbol || "BTC/USDT"),
+            action: "REJECTED",
+            latencyMs: inferenceLatency,
+            modelId: usedModel,
+            reason: "validation-failed",
+            issues: validation.error.issues,
+          });
+        } catch {}
+        return res.status(502).json({
+          success: false,
+          source: "fallback-validation-failed",
+          reason: "validation-failed",
+          issues: validation.error.issues,
+          message: "Output LLM gagal validasi. Keputusan ditolak (tidak fallback diam-diam).",
+        });
+      }
+
+      const parsedDecision2 = validation.data as z.infer<typeof decisionSchema>;
+      const currentP = Number(currentPrice) || 0;
+      const isBadOrder =
+        (parsedDecision2.action === "BUY" &&
+          !(parsedDecision2.stopLoss < currentP && currentP < parsedDecision2.takeProfit)) ||
+        (parsedDecision2.action === "SELL" &&
+          !(parsedDecision2.takeProfit < currentP && currentP < parsedDecision2.stopLoss));
+      if (parsedDecision2.action !== "HOLD" && isBadOrder) {
+        const inferenceLatency = Date.now() - startTime;
+        try {
+          appendAudit("decision", {
+            symbol: String(symbol || "BTC/USDT"),
+            action: parsedDecision2.action,
+            latencyMs: inferenceLatency,
+            modelId: usedModel,
+            reason: "invalid-price-order",
+            details: {
+              currentPrice: currentP,
+              stopLoss: parsedDecision2.stopLoss,
+              takeProfit: parsedDecision2.takeProfit,
+            },
+          });
+        } catch {}
+        return res.status(502).json({
+          success: false,
+          source: "fallback-validation-failed",
+          reason: "invalid-price-order",
+          message:
+            parsedDecision2.action === "BUY"
+              ? "Order BUY tidak valid: harus stopLoss < harga sekarang < takeProfit."
+              : "Order SELL tidak valid: harus takeProfit < harga sekarang < stopLoss.",
+        });
+      }
+
+      // Clamp positionSizePercent ke maxRiskPerTradePercent (4.1)
+      const maxRisk = Number(riskParams?.maxRiskPerTradePercent) || 0;
+      const positionSizePercent =
+        maxRisk > 0 && parsedDecision2.positionSizePercent > maxRisk
+          ? maxRisk
+          : parsedDecision2.positionSizePercent;
 
       const inferenceLatency = Date.now() - startTime;
-      // Persist decision audit (server-measured latency, modelId)
+      // Provenance dari body (4.4) — dikirim client lewat /api/ai-decision payload.
+      const provenance = (req.body && req.body.provenance) || null;
+
+      // Persist decision audit (server-measured latency, modelId, provenance)
       try {
         const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const promptSummary = prompt.slice(0, 800);
-        const responseStr = JSON.stringify(parsedDecision).slice(0, 2000);
+        const responseStr = JSON.stringify(parsedDecision2).slice(0, 2000);
+        const sourceTags =
+          JSON.stringify({
+            model: usedModel,
+            provenance,
+            clampedPositionSize: positionSizePercent !== parsedDecision2.positionSizePercent,
+          }) || null;
         saveAgentDecisionDb({
           id: decisionId,
           created_at: Date.now(),
           symbol: String(symbol || "BTC/USDT"),
-          action: String(parsedDecision.action || "HOLD"),
-          confidence: Number(parsedDecision.confidence ?? 0),
-          model_id: "gemini-3.8-flash",
+          action: parsedDecision2.action,
+          confidence: parsedDecision2.confidence,
+          model_id: usedModel,
           latency_ms: inferenceLatency,
           prompt: promptSummary,
           response: responseStr,
-          source_tags: null,
+          source_tags: sourceTags,
         });
         appendAudit("decision", {
           decisionId,
           symbol: String(symbol || "BTC/USDT"),
-          action: parsedDecision.action,
-          confidence: parsedDecision.confidence,
+          action: parsedDecision2.action,
+          confidence: parsedDecision2.confidence,
           latencyMs: inferenceLatency,
-          modelId: "gemini-3.8-flash",
+          modelId: usedModel,
           prompt: promptSummary.slice(0, 200),
           response: responseStr.slice(0, 500),
+          provenance,
+          provenance_json: provenance,
         });
       } catch (e) {
         console.warn(`[audit] Gagal simpan decision: ${(e as Error).message}`);
       }
+      // 4.5: ringkas prompt (3 baris) dikirim ke UI agar DecisionStream <details> terisi.
+      const promptSummary =
+        [
+          `symbol=${symbol} price=${currentPrice}`,
+          `mtf=${mtfLiquidity?.activeState ?? "?"} state, conf=${mtfLiquidity?.confluenceScore ?? "?"}%`,
+          `riskMax=${riskParams?.maxRiskPerTradePercent ?? "?"}% equity=${portfolioEquity ?? "?"}`,
+        ].join("\n") + `\nmodel=${usedModel} latency=${inferenceLatency}ms`;
       return res.json({
-        ...parsedDecision,
-        source: "gemini-3.8-flash",
+        ...parsedDecision2,
+        positionSizePercent,
+        source: usedModel,
         inferenceLatencyMs: inferenceLatency,
+        provenance,
+        promptSummary,
       });
     } catch (err: any) {
       console.warn("Gemini API call failed:", err?.message);
@@ -727,7 +1172,7 @@ app.get("/api/broker/status", requireAuth, (_req, res) => {
 
 // Ticker via ccxt (public, lintas exchange) — stays public
 app.get("/api/broker/ticker", async (req, res) => {
-  const symbol = String(req.query.symbol || "BTC/USDT");
+  const symbol = parseMarketSymbol(String(req.query.symbol || "BTC/USDT")).ccxt;
   try {
     const ticker = await fetchCcxtTicker(symbol);
     res.json({ success: true, ...ticker });
@@ -738,7 +1183,7 @@ app.get("/api/broker/ticker", async (req, res) => {
 
 // Order book via ccxt (public) — stays public
 app.get("/api/broker/orderbook", async (req, res) => {
-  const symbol = String(req.query.symbol || "BTC/USDT");
+  const symbol = parseMarketSymbol(String(req.query.symbol || "BTC/USDT")).ccxt;
   const limit = Math.min(50, Math.max(5, parseInt(String(req.query.limit || "12"))));
   try {
     const book = await fetchCcxtOrderBook(symbol, limit);
@@ -750,7 +1195,7 @@ app.get("/api/broker/orderbook", async (req, res) => {
 
 // OHLCV via ccxt (public, timeframe ccxt: "1m","5m","15m","1h","4h","1d","1w") — stays public
 app.get("/api/broker/klines", async (req, res) => {
-  const symbol = String(req.query.symbol || "BTC/USDT");
+  const symbol = parseMarketSymbol(String(req.query.symbol || "BTC/USDT")).ccxt;
   const timeframe = String(req.query.timeframe || req.query.interval || "15m");
   const limit = Math.min(100, Math.max(10, parseInt(String(req.query.limit || "50"))));
   try {
@@ -881,7 +1326,10 @@ app.post("/api/broker/order", requireAuth, async (req, res) => {
               realizedPnlUSD: result.realizedPnlUSD,
               orderId: result.order.id,
             });
-          } catch {}
+          } catch (err) {
+            // P3: audit failure TIDAK boleh silent — log selalu biar operator tau.
+            console.error("[audit] GAGAL tulis audit close: ", (err as Error)?.message);
+          }
           return res.json({ success: true, mode: "paper", closed: true, ...result });
         } catch (err: any) {
           if (err instanceof PaperOrderError) {
@@ -923,7 +1371,9 @@ app.post("/api/broker/order", requireAuth, async (req, res) => {
             stopLoss: body.stopLoss,
             takeProfit: body.takeProfit,
           });
-        } catch {}
+        } catch (err) {
+          console.error("[audit] GAGAL tulis audit order: ", (err as Error)?.message);
+        }
         const { position, order } = result;
         return res.json({
           success: true,
@@ -1033,7 +1483,9 @@ app.post("/api/broker/close", requireAuth, async (req, res) => {
         realizedPnlUSD: result.realizedPnlUSD,
         orderId: result.order.id,
       });
-    } catch {}
+    } catch (err) {
+      console.error("[audit] GAGAL tulis audit close (manual): ", (err as Error)?.message);
+    }
     res.json({ success: true, mode: "paper", closed: true, ...result });
   } catch (err: any) {
     if (err instanceof PaperOrderError) {

@@ -144,6 +144,7 @@ export default function App() {
     prependAudit,
     onPositionOpened: paper.addPosition,
     onPortfolioUpdated: paper.commitPortfolio,
+    orderBook: market.orderBook,
   });
 
   // Tombol "Sinkronisasi" OnChainPanel: refetch snapshot real lalu rebuild metrics.
@@ -443,6 +444,8 @@ export default function App() {
             currentPrice={market.currentPrice}
             symbol={symbol}
             exchangeStatus={market.exchangeStatus}
+            feedMode={market.feedMode}
+            messageRate={market.messageRate}
           />
         )}
 
@@ -508,6 +511,7 @@ export default function App() {
               latestLatency={pipeline.latestLatency}
               onClosePosition={paper.closePosition}
               averageSlippageBps={typeof avgSlippageDisplay === "number" ? avgSlippageDisplay : 0}
+              closedTrades={paper.closedTrades}
             />
 
             <TradeJournalPanel />

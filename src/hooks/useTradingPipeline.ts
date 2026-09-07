@@ -7,6 +7,7 @@ import {
   MacroSummary,
   MarketType,
   OnChainMetrics,
+  OrderBook,
   Portfolio,
   Position,
   RiskConfig,
@@ -34,14 +35,16 @@ export interface UseTradingPipelineOptions {
   prependAudit: (entry: AuditLogEntry) => void;
   onPositionOpened: (position: Position) => void;
   onPortfolioUpdated: (portfolio: Portfolio) => void;
+  /** Real order book untuk estimasi likuiditas jujur (opsional, default kosong). */
+  orderBook?: OrderBook;
 }
 
 const INITIAL_LATENCY: LatencyBreakdown = {
-  feederMs: 2,
-  inferenceMs: 210,
-  riskCheckMs: 1,
-  brokerExecutionMs: 9,
-  totalMs: 222,
+  feederMs: 0,
+  inferenceMs: 0,
+  riskCheckMs: 0,
+  brokerExecutionMs: 0,
+  totalMs: 0,
 };
 
 /**
@@ -82,6 +85,7 @@ export function useTradingPipeline(options: UseTradingPipelineOptions) {
         lastBlockHash: s.latestBlockHash,
         onChainMetrics: s.onChainMetrics,
         macroCalendar: s.macroSummary,
+        orderBook: s.orderBook,
       });
 
       if (result.decision) {

@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { 
   MicroTick1s, 
-  ExchangeFeedStatus 
+  ExchangeFeedStatus,
+  FeedMode
 } from "../types";
 import { 
   Activity, 
@@ -24,6 +25,30 @@ interface Realtime1sMLFeedProps {
   currentPrice: number;
   symbol: string;
   exchangeStatus?: ExchangeFeedStatus;
+  feedMode?: FeedMode;
+  messageRate?: number;
+}
+
+const FEED_MODE_LABEL: Record<FeedMode, string> = {
+  WS_LIVE: "WS LIVE",
+  REST_POLL: "REST POLL",
+  INTERPOLATED: "INTERPOLATED",
+  SIMULATED: "SIMULATED",
+};
+
+function heartbeatClass(feedMode?: FeedMode): { dot: string; text: string } {
+  switch (feedMode) {
+    case "WS_LIVE":
+      return { dot: "bg-emerald-400 animate-pulse", text: "text-emerald-400" };
+    case "INTERPOLATED":
+      return { dot: "bg-amber-400 animate-pulse", text: "text-amber-400" };
+    case "REST_POLL":
+      return { dot: "bg-amber-400/80", text: "text-amber-300/90" };
+    case "SIMULATED":
+      return { dot: "bg-rose-500 animate-pulse", text: "text-rose-400" };
+    default:
+      return { dot: "bg-zinc-500", text: "text-zinc-400" };
+  }
 }
 
 export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
@@ -31,6 +56,8 @@ export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
   currentPrice,
   symbol,
   exchangeStatus,
+  feedMode,
+  messageRate,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<"ticks" | "tensors" | "docs">("ticks");
   const latestTick = ticks[ticks.length - 1];
@@ -92,6 +119,43 @@ export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Feed Source Header Row (task 5.3): badge sumber + msg rate + heartbeat */}
+      <div className="flex flex-wrap items-center gap-2 bg-zinc-900/80 border border-zinc-800 rounded-xl px-3 py-2 font-mono text-[11px]">
+        <span className="text-zinc-500 uppercase tracking-wider">Feed Source:</span>
+        <span
+          className={`px-2 py-0.5 rounded-md border text-[10px] font-bold flex items-center gap-1.5 ${
+            feedMode === "WS_LIVE"
+              ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+              : feedMode === "INTERPOLATED"
+              ? "bg-amber-500/15 text-amber-300 border-amber-500/40"
+              : feedMode === "REST_POLL"
+              ? "bg-sky-500/15 text-sky-300 border-sky-500/40"
+              : "bg-rose-500/15 text-rose-300 border-rose-500/40"
+          }`}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${heartbeatClass(feedMode).dot}`} />
+          {FEED_MODE_LABEL[feedMode || "SIMULATED"]}
+        </span>
+        <span className="flex items-center gap-1.5 text-zinc-400">
+          <Radio className="w-3 h-3 text-cyan-400" />
+          <span className="font-bold text-zinc-200">{messageRate ?? 0} msg/s</span>
+        </span>
+        <span className="text-zinc-500">
+          {exchangeStatus?.source || "BINANCE_LIVE"} &bull; {exchangeStatus?.latencyMs ?? "-"}ms &bull;{" "}
+          {exchangeStatus?.activeEndpoint || "auto"}
+        </span>
+        <span className="ml-auto flex items-center gap-2 text-zinc-400">
+          <span className={`w-2 h-2 rounded-full ${heartbeatClass(feedMode).dot}`} />
+          {feedMode === "WS_LIVE"
+            ? "Koneksi WS live"
+            : feedMode === "INTERPOLATED"
+            ? "WS terputus — interpolasi"
+            : feedMode === "REST_POLL"
+            ? "REST polling aktif"
+            : "Feed terjatuh — simulasi"}
+        </span>
       </div>
 
       {/* Metric Cards Row */}

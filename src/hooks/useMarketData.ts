@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Candle,
   ExchangeFeedStatus,
+  FeedMode,
   MacroSummary,
   MicroTick1s,
   MTFLiquidityAnalysis,
@@ -20,6 +21,7 @@ import {
 import { analyzeMTFLiquidity } from "../logic/liquidityHunt";
 import { generateNextMicroTick } from "../logic/microTickStream";
 import { fetchKlinesForTimeframe, fetchLiveMarketData } from "../data/marketData";
+import { useMarketStream } from "./useMarketStream";
 
 export interface UseMarketDataOptions {
   symbol: string;
@@ -84,9 +86,36 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
   // Anchor harga real terakhir dari exchange (dipakai untuk mean-reversion di tick loop).
   const anchorPriceRef = useRef<number>(64250.0);
 
+  // Task 5.1/5.2/6.3: konsumsi SSE proxy Binance WS — satu sumber kebenaran
+  // harga real-time (harga & depth) untuk pipeline, chart, DAN portfolio.
+  const stream = useMarketStream({ symbol });
+  const streamRef = useRef(stream);
+  streamRef.current = stream;
+
+  // Feed mode otoritatif (task 5.2): berlabel jujur.
+  const feedMode: FeedMode = useMemo(() => {
+    const liveAge = stream.lastUpdateAt != null ? Date.now() - stream.lastUpdateAt : Number.POSITIVE_INFINITY;
+    const wsFresh = liveAge <= 1500;
+    if (wsFresh) return "WS_LIVE";
+    if (exchangeStatus.source === "SIMULATED" && !exchangeStatus.isLive) return "SIMULATED";
+    if (stream.feedMode === "REST_POLL") return "REST_POLL";
+    if (stream.feedMode === "INTERPOLATED") return "INTERPOLATED";
+    // WS terhubung tapi diam / WS tak pernah live: interpolasi di sekitar anchor.
+    return exchangeStatus.isLive ? "INTERPOLATED" : "SIMULATED";
+  }, [stream.lastUpdateAt, stream.feedMode, exchangeStatus.source, exchangeStatus.isLive]);
+
+  // Sinkronkan feedMode & messageRate ke exchangeStatus (UI via prop exchangeStatus).
+  useEffect(() => {
+    setExchangeStatus((prev) =>
+      prev.feedMode === feedMode && prev.messageRate === stream.messageRate
+        ? prev
+        : { ...prev, feedMode, messageRate: stream.messageRate }
+    );
+  }, [feedMode, stream.messageRate]);
+
   const mtfLiquidity: MTFLiquidityAnalysis = useMemo(
-    () => analyzeMTFLiquidity(candles15m, candles4h, currentPrice),
-    [candles15m, candles4h, currentPrice]
+    () => analyzeMTFLiquidity(candles15m, candles4h, currentPrice, "FUTURES", orderBook),
+    [candles15m, candles4h, currentPrice, orderBook]
   );
 
   // Refs terbarui tiap render -> interval 1s tidak pernah re-subscribe (anti churn).
@@ -201,27 +230,57 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
 
   // --- Real-time 1-Second Micro-Tick Feeder (1000ms sampling) ---
   // Deps hanya [symbol] -> interval stabil, tanpa churn meski state berubah tiap detik.
+  // Harga 1s: pakai trade harga real dari WS/SSE saat fresh; jika WS mati
+  // (INTERPOLATED/REST_POLL), fallback ke microTick interpolation ter-anchor
+  // harga exchange terakhir yang asli.
   useEffect(() => {
     const tickInterval = setInterval(() => {
+      const live = streamRef.current;
+      const wsFresh = live.lastUpdateAt != null && Date.now() - live.lastUpdateAt <= 1500;
+      const hasLivePrice = wsFresh && live.currentPrice != null && live.currentPrice > 0;
       const prevPrice = priceRef.current;
-      const nextTick = generateNextMicroTick(
-        prevPrice,
-        symbolRef.current,
-        technicalsRef.current,
-        mtfLiquidityRef.current,
-        onChainMetricsRef.current,
-        macroSummaryRef.current,
-        microTicksRef.current,
-        anchorPriceRef.current
-      );
-      const newPrice = nextTick.close;
+
+      let nextTick: MicroTick1s;
+      let newPrice: number;
+      if (hasLivePrice) {
+        // Harga nyata dari Binance (single source of truth, task 6.3).
+        const real = live.currentPrice as number;
+        nextTick = generateNextMicroTick(
+          real,
+          symbolRef.current,
+          technicalsRef.current,
+          mtfLiquidityRef.current,
+          onChainMetricsRef.current,
+          macroSummaryRef.current,
+          microTicksRef.current,
+          real
+        );
+        nextTick.close = real;
+        nextTick.price = real;
+        nextTick.open = prevPrice;
+        nextTick.high = Math.max(prevPrice, real, nextTick.high);
+        nextTick.low = Math.min(prevPrice, real, nextTick.low);
+        newPrice = real;
+      } else {
+        nextTick = generateNextMicroTick(
+          prevPrice,
+          symbolRef.current,
+          technicalsRef.current,
+          mtfLiquidityRef.current,
+          onChainMetricsRef.current,
+          macroSummaryRef.current,
+          microTicksRef.current,
+          anchorPriceRef.current
+        );
+        newPrice = nextTick.close;
+      }
 
       setCurrentPrice(newPrice);
       setMicroTicks((prev) => [...prev.slice(-119), nextTick]);
 
-      const deltaPercent = (newPrice - prevPrice) / prevPrice;
-      setPriceDelta((prev) => Number((prev + deltaPercent * 10).toFixed(2)));
-
+      // Task 5.4: priceDelta TIDAK lagi diskalakan `+ delta * 10`. Nilainya
+      // adalah priceChangePercent 24h real dari ticker Binance (set saat
+      // syncLiveExchangeData) — jujur, bukan angka karangan.
       const updated15m = updateCandleSeries(candles15mRef.current, newPrice, nextTick.volume, 0.1);
       const updated4h = updateCandleSeries(candles4hRef.current, newPrice, nextTick.volume, 0);
       setCandles15m(updated15m);
@@ -246,7 +305,12 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
         }));
       }
 
-      setOrderBook(generateOrderBook(newPrice));
+      // Order book: real dari SSE saat WS live; synthetic hanya saat interpolating.
+      setOrderBook(hasLivePrice && live.orderBook ? live.orderBook : generateOrderBook(newPrice));
+
+      // Re-anchor ke harga real tiap tick WS agar interpolasi sempat (WS mati)
+      // tetap dekat dengan harga exchange yang benar.
+      if (hasLivePrice) anchorPriceRef.current = newPrice;
     }, 1000);
 
     return () => clearInterval(tickInterval);
@@ -262,6 +326,8 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     orderBook,
     technicals,
     exchangeStatus,
+    feedMode,
+    messageRate: stream.messageRate,
     isSyncingFeed,
     mtfLiquidity,
     syncLiveExchangeData,

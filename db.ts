@@ -16,6 +16,25 @@ export function getDb(): DatabaseSync {
   return db;
 }
 
+/**
+ * Transaction wrapper (P1/P4): semua write multi-tabel harus dibungkus
+ * BEGIN/COMMIT supaya crash/kill tidak menyisakan state parsial yang korup.
+ * `DatabaseSync` sinkron, jadi cukup exec() berurutan.
+ */
+export function beginTx(): void {
+  getDb().exec("BEGIN");
+}
+export function commitTx(): void {
+  getDb().exec("COMMIT");
+}
+export function rollbackTx(): void {
+  try {
+    getDb().exec("ROLLBACK");
+  } catch {
+    /* rollback gagal = state sudah buntu; biar eksplisit */
+  }
+}
+
 export function initDb(): DatabaseSync {
   if (db) return db;
   db = new DatabaseSync(DB_FILE);
@@ -23,7 +42,9 @@ export function initDb(): DatabaseSync {
   try {
     db.exec("PRAGMA journal_mode = WAL;");
   } catch {}
-  db.exec("PRAGMA synchronous = NORMAL;");
+  // FULL = fsync tiap commit → order/loss data ga hilang saat power failure.
+  // Trade-off latency kecil, worth it buat trading (P4).
+  db.exec("PRAGMA synchronous = FULL;");
   db.exec("PRAGMA foreign_keys = ON;");
 
   // Audit ledger — hash chain

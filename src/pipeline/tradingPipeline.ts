@@ -11,6 +11,7 @@ import {
   RiskEvaluationResult,
   MTFLiquidityAnalysis,
   LatencyBreakdown,
+  OrderBook,
 } from "../types";
 import { analyzeMTFLiquidity } from "../logic/liquidityHunt";
 import { evaluateTradingDecision } from "../logic/decisionEngine";
@@ -32,6 +33,8 @@ export interface PipelineCycleInput {
   lastBlockHash: string;
   onChainMetrics?: import("../types").OnChainMetrics;
   macroCalendar?: import("../types").MacroSummary;
+  /** Real order book (bids/asks) to estimate liquidation depth honestly. */
+  orderBook?: OrderBook;
 }
 
 export interface PipelineCycleOutput {
@@ -60,9 +63,10 @@ export async function runTradingPipelineCycle(
     input.candles15m,
     input.candles4h,
     input.currentPrice,
-    input.marketType
+    input.marketType,
+    input.orderBook
   );
-  const feederMs = Date.now() - feederStart + 2;
+  const feederMs = Date.now() - feederStart;
 
   // Step 2: Decision Engine (Gemini 3.8 Flash or Algorithmic MTF Hunter)
   const inferenceStart = Date.now();
@@ -88,10 +92,10 @@ export async function runTradingPipelineCycle(
     input.portfolio,
     input.currentPrice
   );
-  const riskCheckMs = Date.now() - riskStart + 1;
+  const riskCheckMs = Date.now() - riskStart;
 
   // Step 4: Broker Execution (if approved & action != HOLD)
-  let brokerExecutionMs = 4;
+  let brokerExecutionMs = 0;
   let newPosition: Position | null = null;
   let executedPrice = input.currentPrice;
   let slippageBps = 0.4;

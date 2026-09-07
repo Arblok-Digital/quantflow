@@ -21,6 +21,13 @@ export interface DecisionEngineInput {
   activePositions: Position[];
   portfolioEquity: number;
   riskConfig: RiskConfig;
+  /** Provenance tag per pilar (4.4) — diteruskan ke server /api/ai-decision. */
+  provenance?: {
+    market?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
+    liquidity?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
+    onChain?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
+    macro?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
+  };
 }
 
 /**
@@ -62,6 +69,8 @@ export async function evaluateTradingDecision(
           maxDrawdownPercent: input.riskConfig.maxDrawdownLimit,
           minConfidenceThreshold: input.riskConfig.minConfidenceThreshold,
         },
+        /*** Provenance tags per pilar (4.4) — server simpan di audit ledger. */
+        provenance: input.provenance,
       }),
     });
 
@@ -75,7 +84,7 @@ export async function evaluateTradingDecision(
         takeProfit: data.takeProfit || Number((input.currentPrice * 1.03).toFixed(2)),
         positionSizePercent: data.positionSizePercent || 8,
         reasoning: data.reasoning || "Evaluasi MTF Liquidation Hunt, On-Chain, dan Makro selesai.",
-        source: data.source || "gemini-3.8-flash",
+        source: data.source || "ai-decision-server",
         inferenceLatencyMs: Date.now() - startTime,
         liquidityHuntAnalysis: data.liquidityHuntAnalysis || {
           targetPool: input.mtfLiquidity.huntingTarget?.targetType || "BSL",
@@ -92,9 +101,11 @@ export async function evaluateTradingDecision(
           whaleSignal: "Akumulasi Cold Storage",
         },
         macroContext: data.macroContext || {
-          nearestEventName: input.macroCalendar?.nearestEvent?.name || "FOMC Rate Decision",
-          volatilityRisk: input.macroCalendar?.nearestEvent?.volatilityRisk || "HIGH_ALERT",
-          fedStance: input.macroCalendar?.fedPolicyStance || "DOVISH_PIVOT",
+          // Jujur: kalau tidak ada data makro real, jangan klaim FOMC/HIGH_ALERT
+          // yang ber-opini — kasih label no-data (F9).
+          nearestEventName: input.macroCalendar?.nearestEvent?.name || "No macro data (fail-closed)",
+          volatilityRisk: input.macroCalendar?.nearestEvent?.volatilityRisk || "UNKNOWN",
+          fedStance: input.macroCalendar?.fedPolicyStance || "DATA_DEPENDENT",
         },
       };
     }
@@ -103,7 +114,7 @@ export async function evaluateTradingDecision(
   }
 
   // Deterministic Fallback Logic based on MTF Liquidity Hunt Zones
-  const { mtfLiquidity, currentPrice, technicals, riskConfig, onChainMetrics, macroCalendar } = input;
+  const { mtfLiquidity, currentPrice, technicals, onChainMetrics, macroCalendar } = input;
   const isWhaleAccumulation = onChainMetrics?.smartMoneyBias === "STRONG_BULLISH" || (onChainMetrics?.exchangeNetflow24hUSD || -100) < 0;
   const isMacroAlert = (macroCalendar?.macroRiskIndex || 30) > 70;
   const targetPool = mtfLiquidity.huntingTarget?.targetType || "BSL";
@@ -115,7 +126,10 @@ export async function evaluateTradingDecision(
     const target = mtfLiquidity.nearestBSL?.midPrice || currentPrice * 1.035;
     return {
       action: "BUY",
-      confidence: Math.max(riskConfig.minConfidenceThreshold, isWhaleAccumulation ? 92 : 86),
+      // 4.3: lapor confidence apa adanya (raw) — biarkan RiskGatekeeper yang reject.
+      // Bervariasi dengan kekuatan confluence: base 78 + confluenceScore/10,
+      // naik jika on-chain mengonfirmasi akumulasi whale.
+      confidence: 78 + mtfLiquidity.confluenceScore / 10 + (isWhaleAccumulation ? 6 : 0),
       targetPrice: currentPrice,
       stopLoss: invalidation,
       takeProfit: target,
@@ -138,9 +152,9 @@ export async function evaluateTradingDecision(
         whaleSignal: "Penarikan Bursa Terverifikasi",
       },
       macroContext: {
-        nearestEventName: macroCalendar?.nearestEvent?.name || "FOMC Rate Decision",
-        volatilityRisk: macroCalendar?.nearestEvent?.volatilityRisk || "HIGH_ALERT",
-        fedStance: macroCalendar?.fedPolicyStance || "DOVISH_PIVOT",
+        nearestEventName: macroCalendar?.nearestEvent?.name || "No macro data (fail-closed)",
+        volatilityRisk: macroCalendar?.nearestEvent?.volatilityRisk || "UNKNOWN",
+        fedStance: macroCalendar?.fedPolicyStance || "DATA_DEPENDENT",
       },
     };
   }
@@ -151,7 +165,9 @@ export async function evaluateTradingDecision(
     const target = mtfLiquidity.nearestSSL?.midPrice || currentPrice * 0.965;
     return {
       action: "SELL",
-      confidence: Math.max(riskConfig.minConfidenceThreshold, 86),
+      // 4.3: lapor confidence raw (tanpa self-bypass Math.max gate).
+      // Bervariasi dengan kekuatan confluence: base 78 + confluenceScore/10.
+      confidence: 78 + mtfLiquidity.confluenceScore / 10,
       targetPrice: currentPrice,
       stopLoss: invalidation,
       takeProfit: target,
@@ -174,9 +190,9 @@ export async function evaluateTradingDecision(
         whaleSignal: "Potensi Distribusi Swing High",
       },
       macroContext: {
-        nearestEventName: macroCalendar?.nearestEvent?.name || "FOMC Rate Decision",
-        volatilityRisk: macroCalendar?.nearestEvent?.volatilityRisk || "HIGH_ALERT",
-        fedStance: macroCalendar?.fedPolicyStance || "DOVISH_PIVOT",
+        nearestEventName: macroCalendar?.nearestEvent?.name || "No macro data (fail-closed)",
+        volatilityRisk: macroCalendar?.nearestEvent?.volatilityRisk || "UNKNOWN",
+        fedStance: macroCalendar?.fedPolicyStance || "DATA_DEPENDENT",
       },
     };
   }

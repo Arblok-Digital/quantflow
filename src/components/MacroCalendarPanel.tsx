@@ -1,13 +1,14 @@
 import React from "react";
 import { MacroSummary, MacroCalendarEvent } from "../types";
-import { 
-  Calendar, 
-  AlertTriangle, 
-  ShieldCheck, 
-  Flame, 
-  Clock, 
-  ArrowUpRight, 
-  TrendingUp, 
+import { getDataSourceMode } from "../data/provider";
+import {
+  Calendar,
+  AlertTriangle,
+  ShieldCheck,
+  Flame,
+  Clock,
+  ArrowUpRight,
+  TrendingUp,
   Globe2,
   Info,
   Sparkles
@@ -20,6 +21,13 @@ interface MacroCalendarPanelProps {
 
 export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, onRefresh }) => {
   const isHighRisk = macro.macroRiskIndex > 70;
+  // 4.9: Mode feed makro dari provider registry — REAL bila "live", SIMULATED bila "simulated".
+  const macroMode = getDataSourceMode("macro");
+  const isSimulated = macroMode !== "live";
+  const lastFetchAt =
+    typeof macro.lastUpdated === "number" && macro.lastUpdated > 0
+      ? new Date(macro.lastUpdated).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : "--:--:--";
 
   return (
     <div id="macro-calendar-panel" className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-6">
@@ -35,6 +43,16 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, o
               <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
                 GLOBAL ECONOMIC CATALYSTS
               </span>
+              <span
+                title={`Mode feed: ${macroMode}`}
+                className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold border ${
+                  isSimulated
+                    ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                    : "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                }`}
+              >
+                {isSimulated ? "SIMULATED" : "REAL"}
+              </span>
             </div>
             <p className="text-xs text-slate-400">
               Jadwal rilis data inflasi (CPI), suku bunga FOMC, data tenaga kerja (NFP), dan sentimen likuiditas global
@@ -43,6 +61,12 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, o
         </div>
 
         <div className="flex items-center gap-3">
+          <div className="text-right">
+            <span className="text-[11px] text-slate-400 block">Terakhir fetch:</span>
+            <span className={`text-xs font-mono ${isSimulated ? "text-slate-300" : "text-emerald-400"}`}>
+              {lastFetchAt}
+            </span>
+          </div>
           <div className="text-right">
             <span className="text-[11px] text-slate-400 block">The Fed Policy Stance:</span>
             <span className="text-xs font-bold font-mono px-2 py-0.5 rounded border bg-blue-500/15 text-blue-400 border-blue-500/30">
@@ -61,6 +85,21 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, o
           )}
         </div>
       </div>
+
+      {/* 4.9: Fail-closed banner — tidak ada data makro real, jangan biarkan angka fiktif lewat */}
+      {isSimulated && (
+        <div className="flex items-center gap-3 px-3.5 py-2.5 rounded-lg bg-rose-950/30 border border-rose-500/30">
+          <div className="p-1 rounded bg-rose-500/20 text-rose-400 shrink-0">
+            <ShieldCheck className="w-4 h-4" />
+          </div>
+          <p className="text-xs text-rose-300 font-semibold">
+            No real macro — fail-closed
+          </p>
+          <span className="text-[11px] text-rose-400/70 ml-auto">
+            Kalender ini berisi data simulasi; angka FOMC/CPI di atas bukan rilis resmi.
+          </span>
+        </div>
+      )}
 
       {/* Top Banner: Nearest Catalyst & Risk Gauge */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

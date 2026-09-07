@@ -3,6 +3,9 @@ import { getExchange, ensureMarketsLoaded } from "./broker";
 import {
   initDb,
   getDb,
+  beginTx,
+  commitTx,
+  rollbackTx,
   savePositionDb,
   saveOrderDb,
   saveFillDb,
@@ -29,7 +32,7 @@ export const ERROR_LOG_THROTTLE_MS = 30000;
 
 export type PaperSide = "LONG" | "SHORT";
 export type PaperPositionStatus = "OPEN" | "CLOSED";
-export type ExitReason = "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL";
+export type ExitReason = "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL" | "LIQUIDATED";
 export type PaperEventType =
   | "ORDER_FILLED"
   | "POSITION_CLOSED"
@@ -150,6 +153,23 @@ let state: PaperBookState = {
   realizedPnl: 0,
 };
 let bookInitialized = false;
+
+// Shared mark cache dari server tick (task 6.3): satu sumber kebenaran harga
+// untuk posisi/margin. Diisi oleh WS Binance proxy (server.ts) atau REST,
+// dikonsumsi refreshPaperMarks & bracket monitor sebelum turun ke ccxt.
+const sharedMarkCache = new Map<string, { mark: number; ts: number }>();
+
+export function updatePaperMarkCache(symbol: string, mark: number): void {
+  if (isFinite(mark) && mark > 0) {
+    sharedMarkCache.set(symbol, { mark, ts: Date.now() });
+  }
+}
+
+function freshMarkFromCache(symbol: string, maxAgeMs = MARK_TTL_MS): { mark: number; ts: number } | null {
+  const cached = sharedMarkCache.get(symbol);
+  if (cached && Date.now() - cached.ts < maxAgeMs) return cached;
+  return null;
+}
 
 function freshState(): PaperBookState {
   return {
@@ -484,7 +504,7 @@ interface FillResult {
   fillPrice: number;
   slippageBps: number;
   feeUSD: number;
-  method: "ORDERBOOK" | "TICKER";
+  method: "ORDERBOOK" | "TICKER" | "LIQUIDATION";
   latencyMs: number;
 }
 
@@ -519,8 +539,18 @@ async function marketFill(
         remaining -= take;
       }
       if (remaining > 0) {
+        // Order melebihi kedalaman book yang terlihat: jangan isi di harga
+        // level terakhir flat (understates slippage & terlalu optimistic).
+        // Beri marginal penalty sebesar spread tiap "level tak terlihat" —
+        // fill di luar visible depth lebih mahal/lebih murah secara realistis.
         const worst = ladder.length > 0 ? Number(ladder[ladder.length - 1][0]) : mid;
-        weightedSum += worst * remaining;
+        const depthGapBps = Math.max(
+          5,
+          (Math.abs(worst - mid) / mid) * 10000 + 5
+        );
+        const beyondDepthPrice =
+          side === "buy" ? worst * (1 + depthGapBps / 10000) : worst * (1 - depthGapBps / 10000);
+        weightedSum += beyondDepthPrice * remaining;
       }
       let fillPrice = weightedSum / qty;
       if (bracketMode !== "none" && triggerPrice !== undefined && triggerPrice > 0) {
@@ -723,9 +753,30 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     payloadHash: signed.payloadHash,
   });
 
-  dbSavePosition(position);
-  dbSaveOrder(order);
-  persistSnapshot();
+  // P1: atomic — position + order + snapshot + audit dalam satu transaksi
+  // supaya crash/kill tidak menyisakan posisi tanpa order (state korup).
+  try {
+    beginTx();
+    dbSavePosition(position);
+    dbSaveOrder(order);
+    persistSnapshot();
+    try {
+      appendAudit("order", {
+        id: order.id,
+        symbol: order.symbol,
+        side: order.side,
+        amount: order.amount,
+        fillPrice: order.fillPrice,
+        status: order.status,
+        reason: "PAPER_OPEN",
+        timestamp: Date.now(),
+      });
+    } catch {}
+    commitTx();
+  } catch (err) {
+    rollbackTx();
+    throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis posisi/order ke DB: ${(err as Error).message}`);
+  }
 
   return { position: { ...position }, order: { ...order }, account: getPaperAccount() };
 }
@@ -752,15 +803,31 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
   const closingSide = pos.side === "LONG" ? "sell" : "buy";
   let triggerPrice: number | undefined;
   let bracketMode: "none" | "stop" | "profit" = "none";
-  if (exitReason === "STOP_LOSS") {
-    triggerPrice = pos.stopLoss;
-    bracketMode = "stop";
-  } else if (exitReason === "TAKE_PROFIT") {
-    triggerPrice = pos.takeProfit;
-    bracketMode = "profit";
+
+  // Task 6.2: likuidasi jujur — saat mark menyentuh liquidationPrice, posisi
+  // di-close paksa di harga likuidasi dengan PnL terhitung (bukan hardcode).
+  let fill: FillResult;
+  if (exitReason === "LIQUIDATED") {
+    const liqPrice = pos.liquidationPrice > 0 ? pos.liquidationPrice : liquidationPrice(pos.entryPrice, pos.leverage, pos.side);
+    const exitFee = r4(liqPrice * pos.qty * TAKER_FEE_RATE);
+    fill = {
+      fillPrice: r6(liqPrice),
+      slippageBps: 0,
+      feeUSD: exitFee,
+      method: "LIQUIDATION",
+      latencyMs: 0,
+    };
+  } else {
+    if (exitReason === "STOP_LOSS") {
+      triggerPrice = pos.stopLoss;
+      bracketMode = "stop";
+    } else if (exitReason === "TAKE_PROFIT") {
+      triggerPrice = pos.takeProfit;
+      bracketMode = "profit";
+    }
+    fill = await marketFill(pos.symbol, closingSide, pos.qty, triggerPrice, bracketMode);
   }
 
-  const fill = await marketFill(pos.symbol, closingSide, pos.qty, triggerPrice, bracketMode);
   const exitPrice = fill.fillPrice;
   const grossPnl = pos.side === "LONG" ? (exitPrice - pos.entryPrice) * pos.qty : (pos.entryPrice - exitPrice) * pos.qty;
   const totalFees = pos.feesPaidUSD + fill.feeUSD;
@@ -769,8 +836,10 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
   let effectiveExitReason = exitReason;
 
   if (realizedPnl <= -pos.marginUSD) {
+    // Gap parah (SL tersentuh jauh di bawah/atas liq): realitasnya itu
+    // likuidasi — catat jujur sebagai LIQUIDATED dengan max loss = margin.
     effectiveExitPrice = pos.liquidationPrice;
-    effectiveExitReason = "STOP_LOSS";
+    effectiveExitReason = "LIQUIDATED";
     realizedPnl = -pos.marginUSD;
   }
 
@@ -850,10 +919,32 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
     cashAfter: result.cashAfter,
   });
 
-  dbSavePosition(pos);
-  dbSaveOrder(result.order);
-  // also need to update the open position row's status already via dbSavePosition, and ensure fill for exit
-  persistSnapshot();
+  // P1: atomic close — posisi + order + snapshot + audit dalam satu transaksi.
+  try {
+    beginTx();
+    dbSavePosition(pos);
+    dbSaveOrder(result.order);
+    // also need to update the open position row's status already via dbSavePosition, and ensure fill for exit
+    persistSnapshot();
+    try {
+      appendAudit("order", {
+        id: result.order.id,
+        symbol: result.order.symbol,
+        side: result.order.side,
+        amount: result.order.amount,
+        fillPrice: result.order.fillPrice,
+        status: result.order.status,
+        realizedPnlUSD: r2(realizedPnl),
+        reason: "PAPER_CLOSE",
+        timestamp: Date.now(),
+      });
+    } catch {}
+    commitTx();
+  } catch (err) {
+    rollbackTx();
+    console.error(`[paperBook] Gagal menulis close ke DB: ${(err as Error).message}`);
+    throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis close ke DB: ${(err as Error).message}`);
+  }
 
   result.position = { ...pos };
   return result;
@@ -873,7 +964,12 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
   }
 
   if (input.breakEven === true) {
-    pos.stopLoss = pos.entryPrice;
+    // Break-even sejati harus selalu dalam kondisi NET PROFIT setelah fee.
+    // Taruh SL sedikit di bawah/atas entry sebesar ~2x taker fee (entry+exit)
+    // supaya exit di BE bukan rugi kecil gara-gara fee. (F7)
+    const beOffsetPct = 0.0008; // 0.08% ≈ 2 * takerFee (0.04%) + buffer
+    pos.stopLoss =
+      pos.side === "LONG" ? pos.entryPrice * (1 - beOffsetPct) : pos.entryPrice * (1 + beOffsetPct);
   }
   if (input.stopLoss !== undefined) {
     const sl = Number(input.stopLoss);
@@ -901,19 +997,61 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
 // ------------------------------------------------------------------
 // Mark price refresh and bracket monitor
 // ------------------------------------------------------------------
-async function fetchMarkTicker(symbol: string): Promise<{ mark: number; ok: boolean; error?: string; latencyMs: number }> {
+async function fetchMarkTicker(symbol: string): Promise<{
+  mark: number;
+  high1m: number;
+  low1m: number;
+  ok: boolean;
+  error?: string;
+  latencyMs: number;
+  source?: "WS_CACHE" | "CCXT";
+}> {
   const t0 = Date.now();
+  // Preferensi WS cache (server tick = single source of truth, task 6.3).
+  // Kalau cache fresh, pakai langsung — harga real dari Binance WS, bukan
+  // round-trip ccxt tambahan.
+  const cached = freshMarkFromCache(symbol);
+  if (cached) {
+    return {
+      mark: cached.mark,
+      high1m: cached.mark,
+      low1m: cached.mark,
+      ok: true,
+      latencyMs: Date.now() - t0,
+      source: "WS_CACHE",
+    };
+  }
   try {
     const exchange = getExchange();
     await ensureMarketsLoaded(exchange);
     const ticker = await exchange.fetchTicker(symbol);
     const mark = Number(ticker.last);
     if (!isFinite(mark) || mark <= 0) {
-      return { mark: 0, ok: false, error: `Ticker tidak berisi harga untuk ${symbol}.`, latencyMs: Date.now() - t0 };
+      return { mark: 0, high1m: 0, low1m: 0, ok: false, error: `Ticker tidak berisi harga untuk ${symbol}.`, latencyMs: Date.now() - t0, source: "CCXT" };
     }
-    return { mark, ok: true, latencyMs: Date.now() - t0 };
+
+    // Ambil range 1m terakhir (high/low candle) supaya wick yang menembus
+    // SL/TP di antara dua poll tidak terlewat — bracket monitor dievaluasi
+    // terhadap RANGE, bukan hanya last price. (F4: anti paper-optimistic.)
+    let high1m = mark;
+    let low1m = mark;
+    try {
+      const ohlcv = await exchange.fetchOHLCV(symbol, "1m", undefined, 1);
+      if (Array.isArray(ohlcv) && ohlcv.length > 0 && Array.isArray(ohlcv[0])) {
+        const c = ohlcv[0];
+        const h = Number(c[2]);
+        const l = Number(c[3]);
+        if (isFinite(h) && h > 0) high1m = Math.max(mark, h);
+        if (isFinite(l) && l > 0) low1m = Math.min(mark, l);
+      }
+    } catch {
+      // Fallback: last price sebagai range point (tetap lebih aman daripada
+      // tidak ada range sama sekali).
+    }
+
+    return { mark, high1m, low1m, ok: true, latencyMs: Date.now() - t0, source: "CCXT" };
   } catch (err) {
-    return { mark: 0, ok: false, error: `${(err as Error).message}`, latencyMs: Date.now() - t0 };
+    return { mark: 0, high1m: 0, low1m: 0, ok: false, error: `${(err as Error).message}`, latencyMs: Date.now() - t0, source: "CCXT" };
   }
 }
 
@@ -922,14 +1060,26 @@ export async function refreshPaperMarks(force = false): Promise<void> {
   if (open.length === 0) return;
   const now = Date.now();
   const staleSymbols = new Set<string>();
+  let changed = false;
   for (const pos of open) {
     const age = now - (pos.lastMarkUpdatedAt || 0);
+    const cached = freshMarkFromCache(pos.symbol);
+    if (cached) {
+      if (pos.lastMark !== cached.mark) {
+        pos.lastMark = cached.mark;
+        pos.lastMarkUpdatedAt = now;
+        changed = true;
+      }
+      continue;
+    }
     if (force || age >= MARK_TTL_MS) staleSymbols.add(pos.symbol);
   }
-  if (staleSymbols.size === 0) return;
+  if (staleSymbols.size === 0) {
+    if (changed) persistSnapshot();
+    return;
+  }
   const results = await Promise.all([...staleSymbols].map(async (symbol) => ({ symbol, ...(await fetchMarkTicker(symbol)) })));
   const marks = new Map(results.map((r) => [r.symbol, r]));
-  let changed = false;
   for (const pos of open) {
     const entry = marks.get(pos.symbol);
     if (entry && entry.ok) {
@@ -978,10 +1128,26 @@ export async function runBracketMonitorPass(): Promise<void> {
       pos.lastMarkUpdatedAt = Date.now();
       persisted = true;
 
-      const hitStop = pos.side === "LONG" ? entry.mark <= pos.stopLoss : entry.mark >= pos.stopLoss;
-      const hitProfit = pos.side === "LONG" ? entry.mark >= pos.takeProfit : entry.mark <= pos.takeProfit;
+      // Deteksi exit terhadap RANGE 1m (high/low), bukan last price doang —
+      // wick yang menembus SL/TP lalu balik tetap ke-catch (jujur, tidak
+      // over-optimistic). Konservatif: jika dalam satu candle SL & TP
+      // dua-duanya kena, anggap SL kena dulu.
+      const rangeHigh = Number.isFinite(entry.high1m) && entry.high1m > 0 ? entry.high1m : entry.mark;
+      const rangeLow = Number.isFinite(entry.low1m) && entry.low1m > 0 ? entry.low1m : entry.mark;
+      // Task 6.2: simulasikan margin call — mark menyentuh liquidationPrice
+      // (range wick ikut diperhitungkan) => auto-close LIQUIDATED, prioritas
+      // di atas SL/TP brackets.
+      const hitLiq =
+        pos.liquidationPrice > 0
+          ? pos.side === "LONG"
+            ? rangeLow <= pos.liquidationPrice
+            : rangeHigh >= pos.liquidationPrice
+          : false;
+      const hitStop = pos.side === "LONG" ? rangeLow <= pos.stopLoss : rangeHigh >= pos.stopLoss;
+      const hitProfit = pos.side === "LONG" ? rangeHigh >= pos.takeProfit : rangeLow <= pos.takeProfit;
       let triggered: ExitReason | null = null;
-      if (hitStop && hitProfit) triggered = "STOP_LOSS";
+      if (hitLiq) triggered = "LIQUIDATED";
+      else if (hitStop && hitProfit) triggered = "STOP_LOSS";
       else if (hitStop) triggered = "STOP_LOSS";
       else if (hitProfit) triggered = "TAKE_PROFIT";
 

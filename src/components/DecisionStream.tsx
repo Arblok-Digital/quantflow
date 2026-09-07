@@ -118,7 +118,7 @@ export const DecisionStream: React.FC<DecisionStreamProps> = ({
               STRATEGY: MTF_LIQUIDITY_HUNT
             </span>
             <span className="px-2 py-0.5 bg-zinc-800 text-zinc-400 text-[10px] rounded border border-zinc-700/50 font-mono">
-              {decision?.source || "GEMINI-3.8-FLASH"}
+              {decision?.source || "AI-DECISION-SERVER"}
             </span>
             <button
               onClick={() => setShowPromptInspector(!showPromptInspector)}
@@ -153,6 +153,11 @@ export const DecisionStream: React.FC<DecisionStreamProps> = ({
               <span className="text-zinc-200 font-bold">
                 Conf: {confidence}%
               </span>
+              {decision?.inferenceLatencyMs != null && (
+                <span className="px-2 py-0.5 rounded bg-zinc-950 border border-zinc-800 text-cyan-400 text-[10px] font-mono">
+                  {decision.inferenceLatencyMs}ms
+                </span>
+              )}
             </div>
           </div>
 
@@ -290,11 +295,55 @@ export const DecisionStream: React.FC<DecisionStreamProps> = ({
           </div>
         </div>
 
+        {/* Data Provenance Source Badges (4.5) — dari mana tiap angka decision berasal */}
+        {(decision?.provenance || decision?.promptSummary) && (
+          <div className="mt-3 pt-3 border-t border-zinc-800 space-y-2">
+            {/* Badge provenance selalu tampil; pilar tanpa data di-fallback ke SIMULATED. */}
+            {(["market", "liquidity", "onChain", "macro"] as const).map((pillar) => {
+              const p = decision?.provenance?.[pillar];
+              const source = p?.source ?? "SIMULATED";
+              const color =
+                source === "REAL"
+                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                  : source === "STALE"
+                  ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
+                  : "bg-amber-500/10 text-amber-400 border-amber-500/30";
+              const label = pillar.charAt(0).toUpperCase() + pillar.slice(1);
+              return (
+                <div className="flex flex-wrap items-center gap-2" key={pillar}>
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wider font-mono font-semibold">Sumber:</span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[9px] font-mono uppercase font-bold border ${color}`}
+                    title={
+                      p
+                        ? `fetchedAt: ${new Date(p.fetchedAt).toLocaleTimeString()}${p.ageMinutes != null ? `, age: ${p.ageMinutes}min` : ""}`
+                        : "No provenance recorded — falling back to SIMULATED"
+                    }
+                  >
+                    {label} {source}
+                    {p && p.ageMinutes != null && source === "STALE" ? ` (${p.ageMinutes}m)` : ""}
+                  </span>
+                </div>
+              );
+            })}
+            {decision.promptSummary && (
+              <details className="rounded-lg bg-zinc-950/70 border border-zinc-800 font-mono">
+                <summary className="px-3 py-2 text-[10px] text-zinc-400 hover:text-cyan-400 cursor-pointer uppercase tracking-wider font-semibold select-none">
+                  Ringkas Prompt Server (LLM)
+                </summary>
+                <p className="px-3 pb-2 text-[10px] text-zinc-400 whitespace-pre-wrap leading-relaxed">
+                  {decision.promptSummary}
+                </p>
+              </details>
+            )}
+          </div>
+        )}
+
         {/* Collapsible Prompt Inspector */}
         {showPromptInspector && (
           <div className="mt-3 rounded-xl bg-zinc-950 p-3 border border-zinc-800 font-mono text-[11px] text-zinc-300">
             <div className="text-zinc-500 text-[10px] uppercase mb-1">
-              // Strict JSON Prompt Payload Sent to Gemini 3.8 Flash Endpoint:
+              // Strict JSON Prompt Payload Sent to Gemini (2.0-flash primary, 1.5-flash fallback):
             </div>
             <pre className="overflow-x-auto p-2 rounded-lg bg-zinc-900 text-amber-400 border border-zinc-800/80 text-[10px]">
 {`{

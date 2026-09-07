@@ -1,5 +1,5 @@
 import React from "react";
-import { Portfolio, Position, LatencyBreakdown } from "../types";
+import { Portfolio, Position, LatencyBreakdown, ClosedTrade } from "../types";
 import { 
   Zap, 
   TrendingUp, 
@@ -15,7 +15,11 @@ interface ExecutionMetricsProps {
   latestLatency: LatencyBreakdown;
   onClosePosition: (symbol: string) => void;
   averageSlippageBps: number;
+  /** Trade tertutup (riwayat) untuk metrik Profit Factor & R:R yang jujur. */
+  closedTrades?: ClosedTrade[];
 }
+
+const fmtMs = (v: number) => (v > 0 ? `${v}ms` : "-");
 
 export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
   portfolio,
@@ -23,15 +27,35 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
   latestLatency,
   onClosePosition,
   averageSlippageBps,
+  closedTrades,
 }) => {
   const winRate =
     portfolio.totalTrades > 0
       ? ((portfolio.winCount / portfolio.totalTrades) * 100).toFixed(1)
-      : "68.4";
+      : "-";
 
   const totalPnl = portfolio.realizedPnl;
   const isPnlPositive = totalPnl >= 0;
   const roiPercent = ((totalPnl / portfolio.initialBalance) * 100).toFixed(2);
+
+  const closed = closedTrades || [];
+  const wins = closed.filter((t) => t.pnlUSD > 0);
+  const losses = closed.filter((t) => t.pnlUSD < 0);
+  const grossWin = wins.reduce((s, t) => s + t.pnlUSD, 0);
+  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnlUSD, 0));
+  const rMultiples = closed.filter((t) => t.rMultiple !== 0);
+  const profitFactor =
+    closed.length > 0
+      ? grossLoss > 0
+        ? (grossWin / grossLoss).toFixed(2)
+        : grossWin > 0
+        ? "∞"
+        : "0.00"
+      : "-";
+  const avgRR =
+    rMultiples.length > 0
+      ? (rMultiples.reduce((s, t) => s + t.rMultiple, 0) / rMultiples.length).toFixed(2)
+      : "-";
 
   return (
     <div className="space-y-4">
@@ -51,7 +75,7 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
               </div>
               <div className="flex items-baseline gap-2">
                 <span className="text-3xl sm:text-4xl font-extrabold tracking-tight font-sans text-zinc-950">
-                  {isPnlPositive ? "+" : ""}{roiPercent === "0.00" ? "+19.85%" : `${roiPercent}%`}
+                  {isPnlPositive ? "+" : ""}{roiPercent}%
                 </span>
                 <span className="text-xs font-bold text-amber-600 font-mono">
                   Realized Return
@@ -66,11 +90,11 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
               </div>
               <div>
                 <p className="text-[10px] uppercase font-bold text-zinc-500">Profit Fac</p>
-                <p className="text-base font-black text-zinc-900">2.62</p>
+                <p className="text-base font-black text-zinc-900">{profitFactor}</p>
               </div>
               <div>
                 <p className="text-[10px] uppercase font-bold text-zinc-500">Avg R:R</p>
-                <p className="text-base font-black text-zinc-900">1:2.4</p>
+                <p className="text-base font-black text-zinc-900">{avgRR === "-" ? "-" : `1:${avgRR}`}</p>
               </div>
               <div>
                 <p className="text-[10px] uppercase font-bold text-zinc-500">Avg Slip</p>
@@ -106,32 +130,32 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
                 </h3>
               </div>
               <span className="text-xs font-mono font-bold text-amber-400 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-800">
-                Cycle: {latestLatency.totalMs}ms
+                Cycle: {fmtMs(latestLatency.totalMs)}
               </span>
             </div>
 
             <div className="grid grid-cols-2 gap-2 font-mono text-xs">
               <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
                 <div className="text-[10px] text-zinc-500 uppercase">1. MTF Feeder</div>
-                <div className="text-emerald-400 font-bold mt-0.5">{latestLatency.feederMs}ms</div>
+                <div className="text-emerald-400 font-bold mt-0.5">{fmtMs(latestLatency.feederMs)}</div>
                 <div className="text-[9px] text-zinc-500">15m & 4h Ring Buffer</div>
               </div>
 
               <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
                 <div className="text-[10px] text-zinc-500 uppercase">2. MTF Decision</div>
-                <div className="text-sky-400 font-bold mt-0.5">{latestLatency.inferenceMs}ms</div>
+                <div className="text-sky-400 font-bold mt-0.5">{fmtMs(latestLatency.inferenceMs)}</div>
                 <div className="text-[9px] text-zinc-500">Gemini / Quant CoT</div>
               </div>
 
               <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
                 <div className="text-[10px] text-zinc-500 uppercase">3. Risk Gatekeeper</div>
-                <div className="text-emerald-400 font-bold mt-0.5">{latestLatency.riskCheckMs}ms</div>
+                <div className="text-emerald-400 font-bold mt-0.5">{fmtMs(latestLatency.riskCheckMs)}</div>
                 <div className="text-[9px] text-zinc-500">Deterministic Rules</div>
               </div>
 
               <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
                 <div className="text-[10px] text-zinc-500 uppercase">4. Broker Gateway</div>
-                <div className="text-amber-400 font-bold mt-0.5">{latestLatency.brokerExecutionMs}ms</div>
+                <div className="text-amber-400 font-bold mt-0.5">{fmtMs(latestLatency.brokerExecutionMs)}</div>
                 <div className="text-[9px] text-zinc-500">HMAC-Signed FIX Order</div>
               </div>
             </div>

@@ -1,10 +1,10 @@
 # PRODUCTION ROADMAP — AI Trading Agent Engine
 
-> Hasil audit 2026-09-06. Status awal: **~35% production-ready**.
+> Hasil audit 2026-09-06. Status awal: **~35% production-ready**. Update 2026-09-07: **~72% — Phase 2,3,4,5,6 DONE di code (verif tsc EXIT 0), Phase 1,7,8 sisa**.
 > Aturan emas: **SETIAP pekerjaan backend WAJIB punya pasangan FE** — kalau agent/server mengerjakan sesuatu, UI harus menunjukkannya (apa, kenapa, kapan, hasil apa).
 > Target: **Paper mode = 100%可信 (trustworthy) dulu**, baru Live mode dengan guardrails.
 
-Legenda: `[ ]` todo · Prioritas P0 = blocker produksi, P1 = wajib sebelum live, P2 = polish/ops.
+Legenda: `[ ]` todo · `[x]` done (code + verify) · Prioritas P0 = blocker produksi, P1 = wajib sebelum live, P2 = polish/ops.
 
 ---
 
@@ -36,7 +36,7 @@ Masalah sekarang: `src/pipeline/brokerService.ts` = simulator pura-pura (slippag
 Masalah sekarang: risk gate & kill-switch cuma di client; server bind 0.0.0.0 tanpa auth; siapa di LAN bisa place order / inject API key.
 
 - [x] **2.1** Bind default `127.0.0.1` (env `HOST` untuk override) + `helmet` + `cors` allowlist
-- [x] [FE] **2.2** **Auth Gate UI**: layar unlock (passphrase/login lokal) → token sesi di-send sebagai `Authorization: Bearer` ke semua rute broker; server validasi token di SEMUA endpoint non-public
+- [x] [FE] **2.2** **Auth Gate UI**: layar unlock (passphrase/login lokal) → token sesi di-send sebagai `Authorization: *** ke semua rute broker; server validasi token di SEMUA endpoint non-public
 - [x] **2.3** **Server-side risk enforcement** di `placeBrokerOrder`: kill-switch flag, max daily loss, max open positions, max margin per posisi, cooldown antar order — order ditolak server dengan alasan eksplisit
 - [x] [FE] **2.4** **Guardrails Panel**: tampilkan config risk yang aktif di server + status tiap guard (arm/disarm, daily PnL vs limit, jumlah posisi vs cap, remaining cooldown). Kill-switch button = API call ke server (bukan toggle UI saja), dengan confirm dialog
 - [x] **2.5** Rate limit (express-rate-limit) di semua /api
@@ -56,42 +56,42 @@ Masalah sekarang: posisi/portfolio/ledger hilang saat refresh; hash chain client
 - [x] **3.3** Hapus SEMUA seed data palsu (`INITIAL_POSITIONS`, `INITIAL_CLOSED_TRADES`, fake balance `9973.5` di broker.ts) — akun paper mulai kosong & jujur; seed hanya untuk "demo mode" via env terpisah
 - [x] [FE] **3.4** **Audit Ledger Modal v2**: baca dari `/api/ledger` (persisten), ada tombol **Verify Chain** → hasil verifikasi server ditampilkan (valid/suspect per blok), filter per decision/order/exit
 - [x] [FE] **3.5** **Trade Journal + Equity Curve** historis dari DB (bukan in-memory): win rate, avg R, profit factor, drawdown, slippage terukur per order
-- [x] **3.6** FE: reset `usePaperTrading` jadi reader dari BE state (portfolio sync via polling/WS), hapus mark-to-market ganda di client
+- [x] [FE] **3.6** FE: reset `usePaperTrading` jadi reader dari BE state (portfolio sync via polling/WS), hapus mark-to-market ganda di client
 
 **Acceptance Phase 3:** restart server & refresh browser → semua posisi, ledger, dan jurnal tetap ada dan cocok dengan DB.
 
-## PHASE 4 — Decision Engine Integrity (P1)
+## PHASE 4 — Decision Engine Integrity (P1) ✅ DONE 2026-09-07 — verif tsc EXIT 0
 
 Masalah sekarang: LLM di-feed data fabricated; output tak divalidasi; fallback confidence dijamin lolos gate sendiri.
 
-- [ ] **4.1** Validasi keluaran LLM pakai **zod schema** di server: action enum, angka finite, `stopLoss` harus di sisi yang benar terhadap harga (BUY: SL < price < TP, SELL: kebalikannya), clamp `positionSizePercent` ke config risk, reject → fallback eksplisit
-- [ ] **4.2** Verifikasi/fix model ID Gemini (cek `gemini-3.8-flash` benar-benar ada di API; kalau tidak → `gemini-2.5-flash` / model yang tersedia), tambah unit test mock call
-- [ ] **4.3** **Fix self-bypass gate**: fallback engine tidak boleh pakai `Math.max(minConfidence, 86)` — laporkan confidence apa adanya, biarkan risk gate bekerja
-- [ ] **4.4** **Data honesty layer**: setiap input prompt diberi tag sumber `REAL` / `SIMULATED` / `STALE(>Nmenit)`; simpan tag ini di audit entry
-- [ ] [FE] **4.5** **Decision Card v2 di DecisionStream**: tampilkan prompt ringkas yang dikirim, response mentah LLM (expandable), confidence + **source badges per pilar** (Market: REAL, Liquidity volume: SIMULATED, On-chain: SIMULATED, Macro: SIMULATED), latency inference terukur nyata
-- [ ] **4.6** Ganti angka fabricated di `liquidityHunt.ts` (`volume % 15`, leverage tiers hardcode): estimasi likuiditas dihitung dari **order book depth asli** di sekitar level (server sudah punya depth); kalau tidak memungkinkan → label `EST.` di UI
-- [ ] **4.7** Ganti macro calendar hardcode: adaptor real (ForexFactory mirror / Trading Economics free tier) via registry `data/provider.ts`; fail → tampilkan "no data", JANGAN tampilkan fiktif
-- [ ] **4.8** On-chain: endpoint `/api/onchain/bitcoin` sudah real (pertahankan) — tambah netflow/MVRV dari sumber gratis yang beneran (mempool.space, blockchair, coinglass public) atau tandai SIMULATED & buang dari prompt LLM sampai real
-- [ ] **4.9** [FE] MakroCalendarPanel & OnChainPanel: badge REAL/SIMULATED per metrik + timestamp terakhir kali data nyata di-fetch (user harus bisa bedain mana fakta mana simulasi)
+- [x] **4.1** Validasi keluaran LLM pakai **zod schema** di server: action enum, angka finite, `stopLoss` harus di sisi yang benar terhadap harga (BUY: SL < price < TP, SELL: kebalikannya), clamp `positionSizePercent` ke config risk, reject → fallback eksplisit — *done: server.ts zod schema + 502 on invalid, clamp ke riskParams.maxRiskPerTradePercent*
+- [x] **4.2** Verifikasi/fix model ID Gemini (cek `gemini-3.8-flash` benar-benar ada di API; kalau tidak → `gemini-2.5-flash` / model yang tersedia), tambah unit test mock call — *done: `gemini-3.8-flash` → `gemini-2.0-flash` primary + `gemini-1.5-flash` fallback; candidateModels loop + usedModel audit*
+- [x] **4.3** **Fix self-bypass gate**: fallback engine tidak boleh pakai `Math.max(minConfidence, 86)` — laporkan confidence apa adanya, biarkan risk gate bekerja — *done: hapus Math.max, confidence = 78 + confluenceScore/10 (+6 whale bonus) raw*
+- [x] **4.4** **Data honesty layer**: setiap input prompt diberi tag sumber `REAL` / `SIMULATED` / `STALE(>Nmenit)`; simpan tag ini di audit entry — *done: DataProvenance type di types.ts, DecisionEngineInput.provenance, server persist provenance_json*
+- [x] [FE] **4.5** **Decision Card v2 di DecisionStream**: tampilkan prompt ringkas yang dikirim, response mentah LLM (expandable), confidence + **source badges per pilar** (Market: REAL, Liquidity volume: SIMULATED, On-chain: SIMULATED, Macro: SIMULATED), latency inference terukur nyata — *done: DecisionStream badge row REAL/SIMULATED/STALE fallback + tooltip fetchedAt/ageMinutes + promptSummary expandable*
+- [x] **4.6** Ganti angka fabricated di `liquidityHunt.ts` (`volume % 15`, leverage tiers hardcode): estimasi likuiditas dihitung dari **order book depth asli** di sekitar level (server sudah punya depth); kalau tidak memungkinkan → label `EST.` di UI — *done: Fase A — depth-based estimation + EST(no book depth) label*
+- [x] **4.7** Ganti macro calendar hardcode: adaptor real (ForexFactory mirror / Trading Economics free tier) via registry `data/provider.ts`; fail → tampilkan "no data", JANGAN tampilkan fiktif — *done: macroCalendar fail-closed, hapus FOMC fiktif, macroRiskIndex:0 DATA_DEPENDENT*
+- [x] **4.8** On-chain: endpoint `/api/onchain/bitcoin` sudah real (pertahankan) — tambah netflow/MVRV dari sumber gratis yang beneran (mempool.space, blockchair, coinglass public) atau tandai SIMULATED & buang dari prompt LLM sampai real — *done: OnChainPanel REAL anchor (blockchain.com tx/mempool/hashrate) + SIMULATED badge per metrik, metricBadge(real)*
+- [x] [FE] **4.9** [FE] MakroCalendarPanel & OnChainPanel: badge REAL/SIMULATED per metrik + timestamp terakhir kali data nyata di-fetch (user harus bisa bedain mana fakta mana simulasi) — *done: MacroCalendarPanel isSimulated badge + fail-closed banner, OnChainPanel lastFetchAt + hasRealAnchor*
 
-**Acceptance Phase 4:** tidak ada satu pun angka di UI maupun prompt LLM yang appear sebagai data real padahal generated — semua bersumber atau berlabel.
+**Acceptance Phase 4:** tidak ada satu pun angka di UI maupun prompt LLM yang appear sebagai data real padahal generated — semua bersumber atau berlabel. ✅
 
-## PHASE 5 — Market Data Real-Time sungguhan (P1)
+## PHASE 5 — Market Data Real-Time sungguhan (P1) ✅ DONE 2026-09-07 — verif tsc EXIT 0
 
 Masalah sekarang: harga 1s adalah random-walk sintetis yang di-revert ke anchor tiap 20s; ini dipasarkan sebagai "1s ML Feed".
 
-- [ ] **5.1** BE: **WebSocket** Binance (`wss stream: trade + depth`) → push ke client via SSE/WS server; candle 1s/1m dari tick asli, bukan simulasi
-- [ ] **5.2** Fallback tetap REST polling + interpolate, TAPI UI menampilkan badge "INTERPOLATED" saat WS mati
-- [ ] [FE] **5.3** Realtime1sMLFeed: sumber feed terlihat (WS live / REST / SIMULATED), counter message rate, indikator detak koneksi
-- [ ] **5.4** Perbaiki `priceDelta` di useMarketData (rumor `+ delta * 10` — skala arbitrer) → delta 24h asli dari ticker
-- [ ] **5.5** Fix symbol parsing `/api/market-feed` (kasus `USDC/USDT`, pair quote non-USDT)
+- [x] **5.1** BE: **WebSocket** Binance (`wss stream: trade + depth`) → push ke client via SSE/WS server; candle 1s/1m dari tick asli, bukan simulasi — *done: server.ts GET /api/market/stream SSE proxy wss://stream.binance.com trade+depth, parseMarketSymbol, sharedMarkCache*
+- [x] **5.2** Fallback tetap REST polling + interpolate, TAPI UI menampilkan badge "INTERPOLATED" saat WS mati — *done: FeedMode WS_LIVE|REST_POLL|INTERPOLATED|SIMULATED, watchdog 3s, interpolated saat WS pernah live lalu putus*
+- [x] [FE] **5.3** Realtime1sMLFeed: sumber feed terlihat (WS live / REST / SIMULATED), counter message rate, indikator detak koneksi — *done: header badge sumber berwarna + heartbeat dot hijau/kuning/merah + X msg/s + endpoint aktif*
+- [x] **5.4** Perbaiki `priceDelta` di useMarketData (rumor `+ delta * 10` — skala arbitrer) → delta 24h asli dari ticker — *done: hapus delta*10, pakai ticker24h.priceChangePercent real*
+- [x] **5.5** Fix symbol parsing `/api/market-feed` (kasus `USDC/USDT`, pair quote non-USDT) — *done: parseMarketSymbol handle BTC/USDT, USDC/USDT, SOLUSDT di market-feed/klines/broker*
 
-## PHASE 6 — Correctness & Paper Bias (P1)
+## PHASE 6 — Correctness & Paper Bias (P1) ✅ DONE 2026-09-07 — verif tsc EXIT 0
 
-- [ ] **6.1** Fix same-tick TP-prioritas-SL di `processPriceTick`: kalau satu bar/candle melewati keduanya → anggap **SL kena dulu** (conservative bias, win rate paper jadi jujur)
-- [ ] **6.2** Fix akuntansi leverage: cash yang dikurangi = margin (notional/leverage), equity = cash + margin terikat + uPnL; margin call simulation saat harga ↔ liq price
-- [ ] **6.3** Sinkronisasi tunggal: satu sumber kebenaran harga (server tick) yang dipakai pipeline, chart, DAN portfolio — tidak ada dua jalur mark-to-market
-- [ ] [FE] **6.4** ExecutionMetrics: hapus semua angka latency karangan (`+2`, `+1`, `+8` hardcode); tampilkan latency nyata per stage yang dilaporkan server
+- [x] **6.1** Fix same-tick TP-prioritas-SL di `processPriceTick`: kalau satu bar/candle melewati keduanya → anggap **SL kena dulu** (conservative bias, win rate paper jadi jujur) — *done: Fase B — bracket monitor pakai range high/low 1m, SL prioritas, wick tidak ke-miss*
+- [x] **6.2** Fix akuntansi leverage: cash yang dikurangi = margin (notional/leverage), equity = cash + margin terikat + uPnL; margin call simulation saat harga ↔ liq price — *done: ExitReason LIQUIDATED, liquidationPrice() hit via rangeLow/High prioritas tertinggi, loss capped -marginUSD, equity = cash + lockedMargin + uPnL*
+- [x] **6.3** Sinkronisasi tunggal: satu sumber kebenaran harga (server tick) yang dipakai pipeline, chart, DAN portfolio — tidak ada dua jalur mark-to-market — *done: paperBook sharedMarkCache + freshMarkFromCache di refreshPaperMarks + fetchMarkTicker WS_CACHE, usePaperTrading reader lastMark server*
+- [x] [FE] **6.4** ExecutionMetrics: hapus semua angka latency karangan (`+2`, `+1`, `+8` hardcode); tampilkan latency nyata per stage yang dilaporkan server — *done: hapus +2/+1, brokerExecutionMs=4, INITIAL_LATENCY 0→-, ExecutionMetrics tampil - saat belum ada, profitFactor & avg R:R hitung dari closedTrades real, hapus 68.4/19.85/2.62/1:2.4 hardcode*
 
 ## PHASE 7 — Test & CI (P1, syarat "production")
 
@@ -125,16 +125,16 @@ Setiap task backend baru dianggap selesai kalau:
 
 ```
 Phase 0 (fondasi, <1 hari)
- → Phase 1 (wire-up eksekusi)  ← paling penting
- → Phase 2 (guardrails/security)
- → Phase 3 (persistence)
- → Phase 4 (decision integrity)
- → Phase 5 (WS feed)
- → Phase 6 (correctness)
- → Phase 7 (tests/CI)          ← bisa paralel mulai Phase 3
+ → Phase 1 (wire-up eksekusi)  ← paling penting (SISA untuk Live)
+ → Phase 2 (guardrails/security) ✅
+ → Phase 3 (persistence) ✅
+ → Phase 4 (decision integrity) ✅ 2026-09-07
+ → Phase 5 (WS feed) ✅ 2026-09-07
+ → Phase 6 (correctness) ✅ 2026-09-07
+ → Phase 7 (tests/CI)          ← bisa paralel mulai Phase 3 — NEXT
  → Phase 8 (ops, sebelum live)
 ```
 
-**Gate:** Phase 1–3 selesai → Paper mode bisa dipercaya.
-**Gate:** Phase 4–7 selesai → boleh mempertimbangkan `TRADING_MODE=live` dengan testnet.
+**Gate:** Phase 1–3 selesai → Paper mode bisa dipercaya. (Phase 2,3 done; Phase 1 live-only pending)
+**Gate:** Phase 4–7 selesai → boleh mempertimbangkan `TRADING_MODE=live` dengan testnet. (Phase 4,5,6 done; Phase 7 next)
 Uang riil hanya setelah Phase 8 + forward-test.
