@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import { pathToFileURL } from "node:url";
 import dotenv from "dotenv";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -1563,8 +1564,12 @@ app.get("/api/ledger/stats", requireAuth, (_req, res) => {
 });
 
 // --- Server & Vite Startup ---
+// `NODE_ENV !== "production"` + `VITE_ENABLED` gate: ketika `app` diimpor oleh test
+// (supertest) kita TIDAK mau men-spin Vite dev server middleware (butuh port & lambat).
+// Ekspor `app` untuk integration test — logika server tidak diubah.
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
+  const viteEnabled = process.env.VITE_ENABLED !== "false";
+  if (viteEnabled && process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1578,7 +1583,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`[AI Trading Agent] Server listening on http://${HOST}:${PORT}`);
     // Paper book adalah sumber kebenaran posisi paper; monitor bracket aktif
     // hanya di mode selain live.
@@ -1587,8 +1592,25 @@ async function startServer() {
       startBracketMonitor(3000);
     }
   });
+  return server;
 }
 
-initPaperBook();
-initGuardrails();
-startServer();
+// Ekspor app untuk integration test (supertest) — sisi CC Phase 7.2.
+// Tidak memulai listener selama diimpor (bukan dijalankan sebagai entrypoint).
+// Dipertahankan: NODE_ENV=production masih serve dist seperti biasa.
+export { app };
+export { startServer };
+
+const isMain =
+  typeof process !== "undefined" &&
+  typeof require !== "undefined" &&
+  require.main === module;
+
+const isMainESM =
+  import.meta.url === pathToFileURL(process.argv[1] || "").href;
+
+if (isMain || isMainESM) {
+  initPaperBook();
+  initGuardrails();
+  startServer();
+}

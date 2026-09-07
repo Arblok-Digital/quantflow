@@ -1,6 +1,6 @@
 # PRODUCTION ROADMAP — AI Trading Agent Engine
 
-> Hasil audit 2026-09-06. Status awal: **~35% production-ready**. Update 2026-09-07: **~72% — Phase 2,3,4,5,6 DONE di code (verif tsc EXIT 0), Phase 1,7,8 sisa**.
+> Hasil audit 2026-09-06. Status awal: **~35% production-ready**. Update 2026-09-07: **~88% — Phase 2,3,4,5,6,7 DONE di code (verif tsc EXIT 0 + 46 tests PASS), Phase 1,8 sisa**.
 > Aturan emas: **SETIAP pekerjaan backend WAJIB punya pasangan FE** — kalau agent/server mengerjakan sesuatu, UI harus menunjukkannya (apa, kenapa, kapan, hasil apa).
 > Target: **Paper mode = 100%可信 (trustworthy) dulu**, baru Live mode dengan guardrails.
 
@@ -93,12 +93,12 @@ Masalah sekarang: harga 1s adalah random-walk sintetis yang di-revert ke anchor 
 - [x] **6.3** Sinkronisasi tunggal: satu sumber kebenaran harga (server tick) yang dipakai pipeline, chart, DAN portfolio — tidak ada dua jalur mark-to-market — *done: paperBook sharedMarkCache + freshMarkFromCache di refreshPaperMarks + fetchMarkTicker WS_CACHE, usePaperTrading reader lastMark server*
 - [x] [FE] **6.4** ExecutionMetrics: hapus semua angka latency karangan (`+2`, `+1`, `+8` hardcode); tampilkan latency nyata per stage yang dilaporkan server — *done: hapus +2/+1, brokerExecutionMs=4, INITIAL_LATENCY 0→-, ExecutionMetrics tampil - saat belum ada, profitFactor & avg R:R hitung dari closedTrades real, hapus 68.4/19.85/2.62/1:2.4 hardcode*
 
-## PHASE 7 — Test & CI (P1, syarat "production")
+## PHASE 7 — Test & CI (P1, syarat "production") ✅ DONE 2026-09-07 — 46 tests PASS + tsc EXIT 0
 
-- [ ] **7.1** Vitest: unit test untuk `riskGatekeeper` (setiap gate reject/approve), `liquidityHunt` (swing detect, sweep detect, edge case candles < 5), `decisionEngine` fallback, validasi zod LLM output, kalkulasi margin/liq price
-- [ ] **7.2** Integration test broker: paper order lifecycle pakai ccxt mock; test penolakan guardrails (kill-switch on, daily loss tercapai)
-- [ ] **7.3** CI (GitHub Actions): `tsc --noEmit` + eslint + vitest di setiap push
-- [ ] **7.4** Smoke test manual script: `npm run build && npm start` → health check semua endpoint
+- [x] **7.1** Vitest: unit test untuk `riskGatekeeper` (setiap gate reject/approve), `liquidityHunt` (swing detect, sweep detect, edge case candles < 5), `decisionEngine` fallback, validasi zod LLM output, kalkulasi margin/liq price — *done: 4 files 41 tests (riskGatekeeper 9, liquidityHunt 11, decisionEngine 13 incl zod, margin 8) + src/logic/margin.ts pure, vite test globals node*
+- [x] **7.2** Integration test broker: paper order lifecycle pakai ccxt mock; test penolakan guardrails (kill-switch on, daily loss tercapai) — *done: tests/integration/broker.test.ts 5/5 PASS — auth 401, lifecycle POST→GET status→POST close, kill-switch 403, max daily loss 403, export {app} dari server.ts*
+- [x] **7.3** CI (GitHub Actions): `tsc --noEmit` + eslint + vitest di setiap push — *done: .github/workflows/ci.yml — Node 22 (node:sqlite ≥22.5, lokal 24.15), jobs lint/test/build, npm ci, tsc --noEmit + vitest run + build*
+- [x] **7.4** Smoke test manual script: `npm run build && npm start` → health check semua endpoint — *done: scripts/smoke-test.mjs + npm run test:smoke, 4/4 PASS — /api/health, /ai-decision 503 fallback, /broker/status 401→200 dengan auth; UV_HANDLE_CLOSING noise Windows ignore*
 
 ## PHASE 8 — Ops & Go-Live Hardening (P2, sebelum live uang riil)
 
@@ -131,10 +131,10 @@ Phase 0 (fondasi, <1 hari)
  → Phase 4 (decision integrity) ✅ 2026-09-07
  → Phase 5 (WS feed) ✅ 2026-09-07
  → Phase 6 (correctness) ✅ 2026-09-07
- → Phase 7 (tests/CI)          ← bisa paralel mulai Phase 3 — NEXT
+ → Phase 7 (tests/CI) ✅ 2026-09-07 — 46 tests PASS
  → Phase 8 (ops, sebelum live)
 ```
 
 **Gate:** Phase 1–3 selesai → Paper mode bisa dipercaya. (Phase 2,3 done; Phase 1 live-only pending)
-**Gate:** Phase 4–7 selesai → boleh mempertimbangkan `TRADING_MODE=live` dengan testnet. (Phase 4,5,6 done; Phase 7 next)
+**Gate:** Phase 4–7 selesai → boleh mempertimbangkan `TRADING_MODE=live` dengan testnet. (Phase 4,5,6,7 done ✅; siap testnet)
 Uang riil hanya setelah Phase 8 + forward-test.
