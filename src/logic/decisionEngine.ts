@@ -9,6 +9,7 @@ import {
   MacroSummary,
 } from "../types";
 import { authFetch } from "../hooks/useAuth";
+import { runKeelQuantEngine } from "./keelAdapter";
 
 export interface DecisionEngineInput {
   symbol: string;

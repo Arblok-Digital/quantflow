@@ -16,6 +16,9 @@ import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
 import { PaperTradingPanel } from "./components/PaperTradingPanel";
 import { ExecutionConsole } from "./components/ExecutionConsole";
 import { PositionsPanel } from "./components/PositionsPanel";
+import { ScannerPanel } from "./components/ScannerPanel";
+import { ProbabilityBadge } from "./components/ProbabilityBadge";
+import { ReconciliationPanel } from "./components/ReconciliationPanel";
 
 import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig } from "./types";
 import { generateCandlesForTimeframe } from "./logic/indicators";
@@ -151,6 +154,27 @@ export default function App() {
   const handleRefreshOnChain = useCallback(async () => {
     await refreshOnChainRealData();
     setOnChainMetrics(fetchOnChainMetrics(symbol, market.currentPrice));
+  }, [symbol, market.currentPrice]);
+
+  // Manual trigger Keel Quant Engine untuk testing decision logic langsung di UI
+  const runKeelSignal = useCallback(async () => {
+    try {
+      const res = await fetch("/api/keel/signal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol, currentPrice: market.currentPrice }),
+      });
+      const data = await res.json();
+      if (data?.decision) {
+        alert(`[Keel Engine] Signal: ${data.decision.action}\nConfidence: ${data.decision.confidence}%\nReasoning: ${data.decision.reasoning}`);
+      } else {
+        alert(`[Keel Engine] ${data?.message || "Tidak ada decision (mungkin data tidak cukup)"}`);
+      }
+      console.log("Full Keel Analysis:", data);
+    } catch (err) {
+      console.error("Keel signal error:", err);
+      alert(`[Keel Engine] Error: ${(err as Error).message}`);
+    }
   }, [symbol, market.currentPrice]);
 
   // --- Health & Gemini status ---
@@ -432,6 +456,7 @@ export default function App() {
               onMoveToBreakEven={paper.moveToBreakEven}
               onResetPaperAccount={paper.resetPaperAccount}
               onSimulateTradeEntry={paper.simulateTradeEntry}
+              actionableRunKeel={runKeelSignal}
             />
 
             <TradeJournalPanel />
@@ -461,6 +486,7 @@ export default function App() {
               mtfLiquidity={market.mtfLiquidity}
               timeframe={timeframe}
               onSelectTimeframe={handleSelectTimeframe}
+              candlesByTimeframe={market.candlesByTimeframe}
             />
 
             {/* MTF Liquidity Hunt Radar Panel */}
@@ -469,7 +495,10 @@ export default function App() {
               currentPrice={market.currentPrice}
               marketType={marketType}
               timeframe={timeframe}
+              orderBook={market.orderBook}
             />
+
+            <ScannerPanel currentSymbol={symbol} onSelectSymbol={setSymbol} />
 
             {/* Decision Engine Stream + LIVE Guardrails (server truth) */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -484,6 +513,18 @@ export default function App() {
 
               <GuardrailsPanel />
             </div>
+            <ProbabilityBadge
+              currentPrice={market.currentPrice}
+              probInput={{
+                confluenceScore: market.mtfLiquidity.confluenceScore / 100,
+                absorptionScore: 50,
+                wallAction: "NONE",
+                spreadPct: market.orderBook.spread,
+                imbalance: market.technicals.orderBookImbalance,
+              }}
+              side="LONG"
+            />
+
             {/* Legacy RiskManagementPanel kept below as secondary card */}
             <RiskManagementPanel
               config={riskConfig}
@@ -503,6 +544,8 @@ export default function App() {
                 onRefresh={() => setMacroSummary(fetchMacroCalendar())}
               />
             </div>
+
+            <ReconciliationPanel />
 
             {/* Swing Execution Metrics & Modular Pipeline Telemetry */}
             <ExecutionMetrics
@@ -538,6 +581,7 @@ export default function App() {
                 currentPrice={market.currentPrice}
                 marketType={marketType}
                 timeframe={timeframe}
+                orderBook={market.orderBook}
               />
             </div>
           </div>

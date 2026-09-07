@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Candle, TechnicalIndicators, OrderBook, MTFLiquidityAnalysis, Timeframe } from "../types";
 import { Layers, BarChart2, Flame, Crosshair, Clock, Compass, TrendingUp, Sparkles, Activity } from "lucide-react";
+import { calculateEMA, calculateRSI, calculateMACD } from "../logic/indicators";
 
 interface MarketChartProps {
   candles: Candle[];
@@ -11,6 +12,8 @@ interface MarketChartProps {
   mtfLiquidity: MTFLiquidityAnalysis;
   timeframe: Timeframe;
   onSelectTimeframe?: (tf: Timeframe) => void;
+  /** Per-timeframe candle series — real data for the 4TF confluence matrix. */
+  candlesByTimeframe?: Partial<Record<Timeframe, Candle[]>>;
 }
 
 const ALL_TIMEFRAMES: { id: Timeframe; label: string; tag?: string; desc: string }[] = [
@@ -33,6 +36,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   mtfLiquidity,
   timeframe,
   onSelectTimeframe,
+  candlesByTimeframe,
 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
@@ -114,7 +118,55 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   };
 
   // MTF Multi-Timeframe Status Matrix (Indikator TF Confluence)
+  // 4TF upgrade: real per-timeframe indicators computed from actual candles
+  // (candlesByTimeframe), not hardcoded "BULLISH" claims. TFs without real
+  // data are labeled honestly as "NO DATA" instead of fabricating a bias.
   const mtfIndicatorMatrix = useMemo(() => {
+    const perTf = (tf: Timeframe): { rsi: number; ema20: number; ema50: number; macdHist: number } | null => {
+      const series = candlesByTimeframe?.[tf];
+      if (!series || series.length < 5) {
+        return null;
+      }
+      const closes = series.map((c) => c.close);
+      return {
+        rsi: calculateRSI(closes, 14),
+        ema20: calculateEMA(closes, 20),
+        ema50: calculateEMA(closes, 50),
+        macdHist: calculateMACD(closes).histogram,
+      };
+    };
+
+    const biasOf = (v: { rsi: number; ema20: number; ema50: number; macdHist: number } | null, tf: Timeframe) => {
+      if (!v) return { bias: "NO DATA" as const, signal: "no candle series loaded", statusBadge: "NODATA" };
+      // EMA structure is the primary bias; RSI/MACD confirm
+      const trend = v.ema20 >= v.ema50 ? "BULLISH" : "BEARISH";
+      const confirm =
+        v.rsi > 55 || v.macdHist > 0
+          ? trend
+          : v.rsi < 45 || v.macdHist < 0
+          ? trend === "BULLISH" ? "NEUTRAL" : trend
+          : "NEUTRAL";
+      return {
+        bias: confirm as "BULLISH" | "BEARISH" | "NEUTRAL",
+        signal: `${v.rsi.toFixed(0)} RSI • EMA${v.ema20 >= v.ema50 ? "20>50" : "20<50"} • MACD ${v.macdHist >= 0 ? "bull" : "bear"}`,
+        statusBadge: `${seriesLenLabel(tf)}`,
+      };
+    };
+
+    const seriesLenLabel = (tf: Timeframe) => {
+      const n = candlesByTimeframe?.[tf]?.length ?? 0;
+      return n > 0 ? `${n} CANDLES` : "NO DATA";
+    };
+
+    const v15 = perTf("15m");
+    const v1h = perTf("1h");
+    const v4h = perTf("4h");
+    const v1D = perTf("1D");
+    const b15 = biasOf(v15, "15m");
+    const b1h = biasOf(v1h, "1h");
+    const b4h = biasOf(v4h, "4h");
+    const b1D = biasOf(v1D, "1D");
+
     return [
       {
         tf: "1s" as Timeframe,
@@ -140,41 +192,41 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       {
         tf: "15m" as Timeframe,
         name: "15m (AI Anchor)",
-        bias: mtfLiquidity.hasActive15mSweep ? "BULLISH" : technicals.ema20 >= technicals.ema50 ? "BULLISH" : "BEARISH",
-        signal: mtfLiquidity.hasActive15mSweep ? "🎯 SSL Swept + Reversal" : "Anchor Signal Run",
-        statusBadge: "★ BOT EXECUTOR",
+        bias: (mtfLiquidity.recentSweep?.type === "BULLISH_SSL_SWEEP" ? "BULLISH" : b15.bias) as "BULLISH" | "BEARISH" | "NEUTRAL",
+        signal: mtfLiquidity.recentSweep?.type === "BULLISH_SSL_SWEEP" ? "🎯 SSL Swept + Reversal" : b15.signal,
+        statusBadge: b15.statusBadge,
         isAnchor: true,
       },
       {
         tf: "1h" as Timeframe,
         name: "1h (Swing S/R)",
-        bias: technicals.ema20 >= technicals.ema50 ? "BULLISH" : "BEARISH",
-        signal: technicals.ema20 >= technicals.ema50 ? "EMA20 > EMA50 Bull" : "EMA Bearish Cross",
-        statusBadge: "HOURLY TREND",
+        bias: b1h.bias,
+        signal: b1h.signal,
+        statusBadge: b1h.statusBadge,
       },
       {
         tf: "4h" as Timeframe,
         name: "4h (Macro)",
-        bias: "BULLISH" as const,
-        signal: "Institutional Zone",
-        statusBadge: "SWING RANGE",
+        bias: b4h.bias,
+        signal: b4h.signal,
+        statusBadge: b4h.statusBadge,
       },
       {
         tf: "1D" as Timeframe,
         name: "1D (Daily)",
-        bias: "BULLISH" as const,
-        signal: "Accumulation Channel",
-        statusBadge: "DAILY BIAS",
+        bias: b1D.bias,
+        signal: b1D.signal,
+        statusBadge: b1D.statusBadge,
       },
       {
         tf: "1W" as Timeframe,
         name: "1W (Weekly)",
-        bias: "BULLISH" as const,
-        signal: "Halving Expansion Cycle",
-        statusBadge: "MACRO CYCLE",
+        bias: "NEUTRAL" as const,
+        signal: "no weekly series loaded",
+        statusBadge: "NODATA",
       },
     ];
-  }, [technicals, mtfLiquidity]);
+  }, [technicals, mtfLiquidity, candlesByTimeframe]);
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 relative overflow-hidden shadow-sm flex flex-col">

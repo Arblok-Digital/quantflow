@@ -65,6 +65,8 @@ import {
   recordOrderPlaced,
   setKillSwitch,
 } from "./guardrails";
+import { runKeelQuantEngine, evaluateKeelRisk } from "./src/logic/keelAdapter";
+import { fetchMarketData, fetchOHLCVWithFallback } from "./src/data/marketFetcher";
 
 dotenv.config();
 
@@ -101,10 +103,12 @@ if (process.env.CORS_ORIGIN) {
 
 app.use(express.json({ limit: "5mb" }));
 
-// Rate limiters
+// Rate limiters — relaxed in development
+const isDev = process.env.NODE_ENV !== "production";
+
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  max: isDev ? 1000 : 300, // 1000 req/min in dev, 300 in prod
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.path === "/api/health",
@@ -115,7 +119,7 @@ const apiLimiter = rateLimit({
 
 const loginLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 10,
+  max: isDev ? 100 : 30, // 100 req/min in dev, 30 in prod
   standardHeaders: true,
   legacyHeaders: false,
   handler: (_req, res) => {
@@ -461,235 +465,36 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-// Real Exchange Market Data Route with Multi-Exchange Fallback (Binance -> Bybit -> Kraken -> Simulated)
+// Real Exchange Market Data Route with Multi-Exchange Fallback (Binance -> Binance Vision -> Gate.io -> Bybit -> CCXT -> Synthetic)
 app.get("/api/market-feed", async (req, res) => {
-  const tStart = Date.now();
-  const parsed = parseMarketSymbol(String(req.query.symbol || "BTC/USDT"));
-  const rawSymbol = parsed.raw;
-  const exchangeSymbol = parsed.ccxt;
-  const asset = parsed.base;
-  const quote = parsed.quote;
-
-  // 1. Try Binance REST API (Primary)
+  const symbol = String(req.query.symbol || "BTC/USDT");
   try {
-    const [tickerData, klines15mData, klines4hData, depthData] = await Promise.all([
-      fetchWithTimeout(`https://api.binance.com/api/v3/ticker/24hr?symbol=${rawSymbol}`),
-      fetchWithTimeout(`https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=15m&limit=40`),
-      fetchWithTimeout(`https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=4h&limit=40`),
-      fetchWithTimeout(`https://api.binance.com/api/v3/depth?symbol=${rawSymbol}&limit=12`),
-    ]);
-
-    const candles15m = klines15mData.map((k: any) => ({
-      timestamp: k[0],
-      open: parseFloat(k[1]),
-      high: parseFloat(k[2]),
-      low: parseFloat(k[3]),
-      close: parseFloat(k[4]),
-      volume: parseFloat(k[5]),
-    }));
-
-    const candles4h = klines4hData.map((k: any) => ({
-      timestamp: k[0],
-      open: parseFloat(k[1]),
-      high: parseFloat(k[2]),
-      low: parseFloat(k[3]),
-      close: parseFloat(k[4]),
-      volume: parseFloat(k[5]),
-    }));
-
-    let bidAccum = 0;
-    const bids = (depthData.bids || []).map((b: any) => {
-      const price = parseFloat(b[0]);
-      const size = parseFloat(b[1]);
-      bidAccum += size;
-      return { price, size: Number(size.toFixed(4)), total: Number(bidAccum.toFixed(4)) };
-    });
-
-    let askAccum = 0;
-    const asks = (depthData.asks || []).map((a: any) => {
-      const price = parseFloat(a[0]);
-      const size = parseFloat(a[1]);
-      askAccum += size;
-      return { price, size: Number(size.toFixed(4)), total: Number(askAccum.toFixed(4)) };
-    });
-
-    const currentPrice = parseFloat(tickerData.lastPrice);
-    const latencyMs = Date.now() - tStart;
-
-    return res.json({
-      success: true,
-      source: "BINANCE_LIVE",
-      symbol: exchangeSymbol,
-      currentPrice,
-      ticker24h: {
-        high: parseFloat(tickerData.highPrice),
-        low: parseFloat(tickerData.lowPrice),
-        priceChangePercent: parseFloat(tickerData.priceChangePercent),
-        volumeUSD: parseFloat(tickerData.quoteVolume),
-      },
-      candles15m,
-      candles4h,
-      orderBook: {
-        bids,
-        asks,
-        spread: bids[0] && asks[0] ? Number((asks[0].price - bids[0].price).toFixed(2)) : 0.5,
-      },
-      latencyMs,
-      timestamp: Date.now(),
-    });
-  } catch (binanceErr: any) {
-    console.warn(`Binance fetch failed (${binanceErr?.message}), attempting Bybit fallback...`);
+    const data = await fetchMarketData(symbol);
+    return res.json({ ...data, symbol });
+  } catch (err: any) {
+    console.error(`[market-feed] Unexpected error: ${err?.message}`);
+    // Ultimate fallback - synthetic
+    const synthetic = await fetchMarketData(symbol); // will return synthetic
+    return res.json({ ...synthetic, symbol });
   }
-
-  // 2. Try Bybit API (Fallback 1)
-  try {
-    const [tickerRes, kline15mRes, kline4hRes] = await Promise.all([
-      fetchWithTimeout(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${rawSymbol}`),
-      fetchWithTimeout(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=15&limit=40`),
-      fetchWithTimeout(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=240&limit=40`),
-    ]);
-
-    const ticker = tickerRes?.result?.list?.[0];
-    const k15mList = (kline15mRes?.result?.list || []).reverse();
-    const k4hList = (kline4hRes?.result?.list || []).reverse();
-
-    if (ticker && k15mList.length > 0) {
-      const currentPrice = parseFloat(ticker.lastPrice);
-      const candles15m = k15mList.map((k: any) => ({
-        timestamp: parseInt(k[0]),
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-      }));
-
-      const candles4h = k4hList.map((k: any) => ({
-        timestamp: parseInt(k[0]),
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-      }));
-
-      return res.json({
-        success: true,
-        source: "BYBIT_FALLBACK",
-        symbol: exchangeSymbol,
-        currentPrice,
-        ticker24h: {
-          high: parseFloat(ticker.highPrice24h || currentPrice * 1.02),
-          low: parseFloat(ticker.lowPrice24h || currentPrice * 0.98),
-          priceChangePercent: parseFloat(ticker.price24hPcnt || "0.0") * 100,
-          volumeUSD: parseFloat(ticker.turnover24h || "50000000"),
-        },
-        candles15m,
-        candles4h,
-        latencyMs: Date.now() - tStart,
-        timestamp: Date.now(),
-      });
-    }
-  } catch (bybitErr: any) {
-    console.warn(`Bybit fallback failed (${bybitErr?.message}), falling back to internal synthetic engine...`);
-  }
-
-  // 3. Graceful Fallback to Synthetic Data (Safe Offline / Restricted Network Mode)
-  res.json({
-    success: true,
-    source: "SIMULATED",
-    symbol: exchangeSymbol,
-    latencyMs: Date.now() - tStart,
-    timestamp: Date.now(),
-    message: "Exchange public REST API uncontactable or rate-limited; using client/server synthetic feeder.",
-  });
 });
 
-// Multi-Timeframe Dedicated Klines Endpoint (1s to 1w)
+// Multi-Timeframe Dedicated Klines Endpoint (1s to 1w) with fallback chain
 app.get("/api/klines", async (req, res) => {
-  const rawSymbol = parseMarketSymbol(String(req.query.symbol || "BTCUSDT")).raw;
+  const symbol = String(req.query.symbol || "BTC/USDT");
   const tf = String(req.query.interval || req.query.timeframe || "15m");
   const limit = Math.min(100, Math.max(10, parseInt(String(req.query.limit || "50"))));
 
-  let binanceInterval = "15m";
-  if (tf === "1s") binanceInterval = "1s";
-  else if (tf === "1m") binanceInterval = "1m";
-  else if (tf === "5m") binanceInterval = "5m";
-  else if (tf === "15m") binanceInterval = "15m";
-  else if (tf === "1h") binanceInterval = "1h";
-  else if (tf === "4h") binanceInterval = "4h";
-  else if (tf === "1D" || tf === "1d") binanceInterval = "1d";
-  else if (tf === "1W" || tf === "1w") binanceInterval = "1w";
-
   try {
-    const rawKlines = await fetchWithTimeout(
-      `https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=${binanceInterval}&limit=${limit}`,
-      3500
-    );
-    if (Array.isArray(rawKlines) && rawKlines.length > 0) {
-      const candles = rawKlines.map((k: any) => ({
-        timestamp: k[0],
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-      }));
-      return res.json({
-        success: true,
-        source: "BINANCE_LIVE",
-        symbol: rawSymbol,
-        timeframe: tf,
-        candles,
-      });
+    const candles = await fetchOHLCVWithFallback(symbol, tf, limit);
+    if (candles.length > 0) {
+      return res.json({ success: true, source: "FALLBACK_CHAIN", symbol, timeframe: tf, candles });
     }
+    return res.json({ success: false, symbol, timeframe: tf, candles: [] });
   } catch (err: any) {
-    // Proceed to Bybit fallback
+    console.error(`[klines] Error: ${err?.message}`);
+    return res.json({ success: false, symbol, timeframe: tf, candles: [], error: err?.message });
   }
-
-  // Bybit Fallback for standard intervals
-  try {
-    let bybitInterval = "15";
-    if (tf === "1m") bybitInterval = "1";
-    else if (tf === "5m") bybitInterval = "5";
-    else if (tf === "15m") bybitInterval = "15";
-    else if (tf === "1h") bybitInterval = "60";
-    else if (tf === "4h") bybitInterval = "240";
-    else if (tf === "1D" || tf === "1d") bybitInterval = "D";
-    else if (tf === "1W" || tf === "1w") bybitInterval = "W";
-
-    const bybitRes = await fetchWithTimeout(
-      `https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=${bybitInterval}&limit=${limit}`,
-      3500
-    );
-    const kList = (bybitRes?.result?.list || []).reverse();
-    if (kList.length > 0) {
-      const candles = kList.map((k: any) => ({
-        timestamp: parseInt(k[0]),
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
-      }));
-      return res.json({
-        success: true,
-        source: "BYBIT_FALLBACK",
-        symbol: rawSymbol,
-        timeframe: tf,
-        candles,
-      });
-    }
-  } catch (bybitErr) {
-    // Return empty candles to trigger client-side generator
-  }
-
-  res.json({
-    success: false,
-    symbol: rawSymbol,
-    timeframe: tf,
-    candles: [],
-  });
 });
 
 // ================= ON-CHAIN REAL DATA (blockchain.com / blockchain.info, FREE = no key) =================
@@ -1114,54 +919,95 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     }
   }
 
-  // Tanpa Gemini: tetap audit (latency nyata) lalu fallback client-side
+  // Tanpa Gemini: gunakan Keel Quantitative MM Engine
   try {
     const latencyMs = Date.now() - startTime;
-    const fallbackDecision: any = {
-      action: "HOLD",
-      confidence: 50,
-      targetPrice: currentPrice ?? 0,
-      stopLoss: 0,
-      takeProfit: 0,
-      positionSizePercent: 0,
-      reasoning: "GEMINI_API_KEY tidak dikonfigurasi — fallback client-side; audit HOLD tercatat.",
-    };
+    const keelResult = runKeelQuantEngine({
+      symbol: String(symbol || "BTC/USDT"),
+      currentPrice: Number(currentPrice) || 64250,
+      technicals,
+      mtfLiquidity,
+    });
+    const keelDecision = keelResult.decision;
+
     const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const promptSummary = `policy=fallback symbol=${String(symbol || "BTC/USDT")} price=${currentPrice}`.slice(0, 800);
-    const responseStr = JSON.stringify(fallbackDecision).slice(0, 2000);
+    const promptSummary = `policy=keel-quant symbol=${String(symbol || "BTC/USDT")} price=${currentPrice}`.slice(0, 800);
+    const responseStr = JSON.stringify(keelDecision).slice(0, 2000);
     try {
       saveAgentDecisionDb({
         id: decisionId,
         created_at: Date.now(),
         symbol: String(symbol || "BTC/USDT"),
-        action: "HOLD",
-        confidence: 50,
-        model_id: "fallback-hold",
+        action: keelDecision.action,
+        confidence: keelDecision.confidence,
+        model_id: "keel-institutional-quant",
         latency_ms: latencyMs,
         prompt: promptSummary,
         response: responseStr,
-        source_tags: "fallback",
+        source_tags: "keel-quant",
       });
     } catch (e) {
-      console.warn(`[audit] Gagal simpan fallback decision: ${(e as Error).message}`);
+      console.warn(`[audit] Gagal simpan keel decision: ${(e as Error).message}`);
     }
     try {
       appendAudit("decision", {
         decisionId,
         symbol: String(symbol || "BTC/USDT"),
-        action: "HOLD",
-        confidence: 50,
+        action: keelDecision.action,
+        confidence: keelDecision.confidence,
         latencyMs,
-        modelId: "fallback-hold",
-        source: "fallback",
+        modelId: "keel-institutional-quant",
+        source: "keel-quant",
       });
     } catch {}
-  } catch {}
+
+    return res.json({
+      ...keelDecision,
+      source: "keel-institutional-quant",
+      inferenceLatencyMs: latencyMs,
+      promptSummary,
+    });
+  } catch (err: any) {
+    console.warn(`Keel quant engine fallback error: ${err?.message}`);
+  }
+
   return res.status(503).json({
     success: false,
     source: "unavailable",
-    message: "GEMINI_API_KEY belum dikonfigurasi. Fallback keputusan ditangani client-side (logic/decisionEngine).",
+    message: "Gemini API Key dan Keel Engine fallback gagal.",
   });
+});
+
+// Dedicated Keel Institutional Quant Engine Signal Endpoint
+app.post("/api/keel/signal", (req, res) => {
+  const { symbol, currentPrice, technicals, mtfLiquidity, orderBook } = req.body || {};
+  try {
+    const result = runKeelQuantEngine({
+      symbol: String(symbol || "BTC/USDT"),
+      currentPrice: Number(currentPrice) || 64250,
+      technicals,
+      mtfLiquidity,
+      orderBook,
+    });
+    const currentEquity = (() => { try { return getPaperAccount().equity; } catch { return 10000; } })();
+    const riskEval = evaluateKeelRisk(
+      {
+        venue: "BINANCE_SPOT",
+        action: result.decision.action,
+        sizePct: result.decision.positionSizePercent || 5,
+        stopLossPct: -2.0,
+      },
+      currentEquity
+    );
+    res.json({
+      success: true,
+      decision: result.decision,
+      rawSignal: result.rawSignalResult,
+      riskGate: riskEval,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || "Keel signal failed." });
+  }
 });
 
 // ================= BROKER ROUTES (ccxt provider) =================

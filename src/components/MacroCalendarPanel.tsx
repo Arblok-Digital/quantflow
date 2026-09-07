@@ -1,6 +1,7 @@
 import React from "react";
 import { MacroSummary, MacroCalendarEvent } from "../types";
 import { getDataSourceMode } from "../data/provider";
+import { evaluateMacroGate, MacroGateVerdict } from "../logic/macroGate";
 import {
   Calendar,
   AlertTriangle,
@@ -11,7 +12,9 @@ import {
   TrendingUp,
   Globe2,
   Info,
-  Sparkles
+  Sparkles,
+  Octagon,
+  Gauge,
 } from "lucide-react";
 
 interface MacroCalendarPanelProps {
@@ -28,6 +31,14 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, o
     typeof macro.lastUpdated === "number" && macro.lastUpdated > 0
       ? new Date(macro.lastUpdated).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
       : "--:--:--";
+
+  // FOMC/CPI FLAT gate (Keel macro calendar port)
+  const gate: MacroGateVerdict = evaluateMacroGate(macro);
+  const gateColor =
+    gate.level === "FLAT" ? "text-rose-300 border-rose-500/40 bg-rose-500/10"
+    : gate.level === "SIZE_DOWN" ? "text-amber-300 border-amber-500/40 bg-amber-500/10"
+    : "text-emerald-300 border-emerald-500/30 bg-emerald-500/10";
+  const gateIcon = gate.noData ? <Gauge className="w-3.5 h-3.5" /> : gate.level === "FLAT" ? <Octagon className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />;
 
   return (
     <div id="macro-calendar-panel" className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-6">
@@ -100,6 +111,34 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, o
           </span>
         </div>
       )}
+
+      {/* FOMC/CPI FLAT Gate — ported from Keel macro calendar gate */}
+      <div className={`flex flex-wrap items-center gap-3 px-3.5 py-2.5 rounded-lg border ${gateColor}`}>
+        <div className="p-1 rounded shrink-0">{gateIcon}</div>
+        <div className="flex-1 min-w-[200px]">
+          <div className={`text-xs font-bold font-mono uppercase tracking-wider ${gate.level === "FLAT" ? "text-rose-400" : gate.level === "SIZE_DOWN" ? "text-amber-400" : "text-emerald-400"}`}>
+            {gate.noData ? "MACRO GATE: NO CATALYST DATA" : `MACRO GATE: ${gate.level}`}
+            {!gate.noData && gate.mult < 1 && (
+              <span className="ml-2 text-[10px] font-mono bg-zinc-800 text-zinc-300 rounded px-1.5 py-0.5 border border-zinc-700">
+                SIZE MULT {gate.mult.toFixed(2)}×
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-zinc-300 mt-0.5 font-mono">
+            {gate.noData
+              ? "Belum ada data katalis real — gate terbuka (jujur, bukan klaim aman)."
+              : gate.reason}
+          </p>
+        </div>
+        {gate.next && !gate.noData && (
+          <div className="text-right shrink-0">
+            <div className="text-[10px] text-zinc-400 font-mono">Next catalyst</div>
+            <div className="text-[11px] font-bold text-zinc-200 font-mono">
+              {gate.next.name} {gate.minsTo != null ? `in ${Math.round(gate.minsTo)}m` : ""}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Top Banner: Nearest Catalyst & Risk Gauge */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

@@ -1,5 +1,6 @@
-import React from "react";
-import { MTFLiquidityAnalysis } from "../types";
+import React, { useEffect, useRef, useState } from "react";
+import { MTFLiquidityAnalysis, OrderBook } from "../types";
+import { analyzeWallDynamics, WallDynamicsVerdict } from "../logic/wallDynamics";
 import { 
   Crosshair, 
   Target, 
@@ -8,21 +9,48 @@ import {
   ArrowUpRight, 
   ArrowDownRight, 
   CheckCircle2, 
-  AlertCircle 
+  AlertCircle,
+  Waves,
+  ShieldX,
+  ShieldCheck,
+  Activity
 } from "lucide-react";
 
 interface LiquidityHuntPanelProps {
   mtfLiquidity: MTFLiquidityAnalysis;
   currentPrice: number;
+  /** Real order book from SSE/WS feed — drives live WallDynamics. */
+  orderBook?: OrderBook;
 }
 
 export const LiquidityHuntPanel: React.FC<LiquidityHuntPanelProps> = ({
   mtfLiquidity,
   currentPrice,
+  orderBook,
 }) => {
   const isSweepActive = Boolean(mtfLiquidity.recentSweep);
   const nearestBSL = mtfLiquidity.nearestBSL;
   const nearestSSL = mtfLiquidity.nearestSSL;
+
+  // --- Live Wall Dynamics (ported from Keel wall-dynamics.ts) ---
+  // Compare consecutive order book snapshots to detect sell-wall pulls,
+  // bid-support shifts, and wall additions.
+  const [wall, setWall] = useState<WallDynamicsVerdict | null>(null);
+  const prevBookRef = useRef<OrderBook | null>(null);
+
+  useEffect(() => {
+    if (!orderBook || orderBook.asks.length === 0) return;
+    const verdict = analyzeWallDynamics(prevBookRef.current, orderBook);
+    if (prevBookRef.current) {
+      // Only update when a meaningful change happened to avoid noisy re-renders
+      if (verdict.action !== "NONE" || verdict.sellWallUsd > 0) {
+        setWall(verdict);
+      }
+    } else {
+      setWall(verdict); // baseline
+    }
+    prevBookRef.current = orderBook;
+  }, [orderBook]);
 
   const bslDistPercent = nearestBSL
     ? (((nearestBSL.midPrice - currentPrice) / currentPrice) * 100).toFixed(2)
@@ -31,6 +59,20 @@ export const LiquidityHuntPanel: React.FC<LiquidityHuntPanelProps> = ({
   const sslDistPercent = nearestSSL
     ? (((currentPrice - nearestSSL.midPrice) / currentPrice) * 100).toFixed(2)
     : "-0.00";
+
+  const wallBadge = (action?: string) => {
+    switch (action) {
+      case "PULLED_SELL_WALL":
+        return { cls: "bg-rose-500/15 text-rose-400 border-rose-500/30", label: "SELL WALL PULLED", icon: <ShieldX className="w-3 h-3" /> };
+      case "BID_SUPPORT_UP":
+        return { cls: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30", label: "BID SUPPORT UP", icon: <ArrowUpRight className="w-3 h-3" /> };
+      case "WALL_ADDED":
+        return { cls: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30", label: "WALL ADDED", icon: <Activity className="w-3 h-3" /> };
+      default:
+        return { cls: "bg-zinc-800 text-zinc-400 border-zinc-700", label: "NO WALL MOVE", icon: <Waves className="w-3 h-3" /> };
+    }
+  };
+  const badge = wallBadge(wall?.action);
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 relative overflow-hidden shadow-sm flex flex-col justify-between">
@@ -130,7 +172,7 @@ export const LiquidityHuntPanel: React.FC<LiquidityHuntPanelProps> = ({
           </div>
         </div>
 
-        {/* Sweep Detection Banner & Confluence Score */}
+        {/* MTF Confluence & Sweep Status */}
         <div className="bg-zinc-950/90 rounded-xl p-3 border border-zinc-800 font-mono text-xs space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-1.5">
@@ -173,6 +215,45 @@ export const LiquidityHuntPanel: React.FC<LiquidityHuntPanelProps> = ({
               <span>Scanning 15m & 4H High/Low wicks</span>
             </div>
           )}
+        </div>
+
+        {/* Live Wall Dynamics (real order book from WS feed) */}
+        <div className="bg-zinc-950/90 rounded-xl p-3 border border-zinc-800 font-mono text-xs space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <Waves className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-[11px] font-bold text-zinc-300">LIVE WALL DYNAMICS:</span>
+            </div>
+            <span className={`text-[10px] px-2 py-0.5 rounded border font-bold flex items-center gap-1 ${badge.cls}`}>
+              {badge.icon} {badge.label}
+            </span>
+          </div>
+
+          <p className="text-[11px] text-zinc-400 leading-relaxed">
+            {wall?.detail ?? "Menunggu snapshot order book berikutnya untuk analisis dinding likuiditas."}
+          </p>
+
+          <div className="grid grid-cols-3 gap-2 text-[10px]">
+            <div className="bg-zinc-900 rounded-lg p-2 border border-zinc-800">
+              <span className="text-zinc-500 block">SELL WALL</span>
+              <span className="text-rose-400 font-bold">${((wall?.sellWallUsd ?? 0) / 1_000).toFixed(0)}K</span>
+            </div>
+            <div className="bg-zinc-900 rounded-lg p-2 border border-zinc-800">
+              <span className="text-zinc-500 block">BID WALL</span>
+              <span className="text-emerald-400 font-bold">${((wall?.bidWallUsd ?? 0) / 1_000).toFixed(0)}K</span>
+            </div>
+            <div className="bg-zinc-900 rounded-lg p-2 border border-zinc-800">
+              <span className="text-zinc-500 block">BID SHIFT</span>
+              <span className="text-cyan-400 font-bold">
+                {wall?.bidSupportShiftBps != null ? `${wall.bidSupportShiftBps >= 0 ? "+" : ""}${wall.bidSupportShiftBps} bps` : "–"}
+              </span>
+            </div>
+          </div>
+          <div className="text-[9px] text-zinc-600 flex items-center gap-1">
+            <ShieldCheck className="w-2.5 h-2.5 text-emerald-500" />
+            {wall?.pulledNotionalUsd ? `Pulled: $${(wall.pulledNotionalUsd / 1_000).toFixed(0)}K` : "No pull detected"}
+            <span className="ml-auto">Sumber: {orderBook && orderBook.asks.length > 0 ? "REAL ORDER BOOK (WS)" : "menunggu depth..."}</span>
+          </div>
         </div>
       </div>
     </div>

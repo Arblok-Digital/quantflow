@@ -47,6 +47,7 @@ interface PositionsResponse {
 interface ActionError {
   reason: string;
   message: string;
+  duplicatePositionId?: string;
 }
 
 interface PositionsPanelProps {
@@ -133,9 +134,11 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
       });
       const payload = await res.json().catch(() => null);
       if (!res.ok || !payload?.success) {
+        const duplicateId = payload?.duplicatePositionId || payload?.existingPositionId;
         setActionError({
           reason: String(payload?.reason || `HTTP ${res.status}`),
           message: String(payload?.message || "Close gagal."),
+          duplicatePositionId: duplicateId,
         });
         return;
       }
@@ -270,13 +273,47 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
               <span>
                 <strong>REJECTED ({actionError.reason}):</strong> {actionError.message}
               </span>
-              <button
-                onClick={() => setActionError(null)}
-                className="text-rose-400 hover:text-rose-200 transition-colors shrink-0"
-                title="Tutup"
-              >
-                <XCircle className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {actionError.duplicatePositionId && (
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm(`Tutup posisi yang sudah ada (${actionError.duplicatePositionId})?`)) return;
+                      setBusyId(actionError.duplicatePositionId!);
+                      try {
+                        const res = await authFetch("/api/broker/close", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ positionId: actionError.duplicatePositionId }),
+                        });
+                        const payload = await res.json().catch(() => null);
+                        if (!res.ok || !payload?.success) {
+                          setActionError({
+                            reason: String(payload?.reason || `HTTP ${res.status}`),
+                            message: String(payload?.message || "Close gagal."),
+                          });
+                          return;
+                        }
+                        await load();
+                        setActionError(null);
+                      } catch (err) {
+                        setActionError({ reason: "NETWORK", message: (err as Error).message });
+                      } finally {
+                        setBusyId(null);
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold transition"
+                  >
+                    Close existing
+                  </button>
+                )}
+                <button
+                  onClick={() => setActionError(null)}
+                  className="text-rose-400 hover:text-rose-200 transition-colors shrink-0"
+                  title="Tutup"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           )}
 

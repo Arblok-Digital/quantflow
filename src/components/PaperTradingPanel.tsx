@@ -42,6 +42,7 @@ interface PaperTradingPanelProps {
   onMoveToBreakEven: (symbol: string) => void;
   onResetPaperAccount: (initialCapital: number) => void;
   onSimulateTradeEntry: (side: "LONG" | "SHORT") => void;
+  actionableRunKeel?: () => void;
 }
 
 export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
@@ -56,9 +57,11 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   onMoveToBreakEven,
   onResetPaperAccount,
   onSimulateTradeEntry,
+  actionableRunKeel,
 }) => {
-  const [expandedPositionId, setExpandedPositionId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"positions" | "history">("positions");
+  const [expandedPositionId, setExpandedPositionId] = useState<string | null>(null);
+  const [simulateError, setSimulateError] = useState<{ reason: string; message: string; duplicatePositionId?: string } | null>(null);
   const [selectedCapital, setSelectedCapital] = useState<number>(50000);
 
   // Cashflow and PnL metrics
@@ -124,6 +127,16 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
               <TrendingDown className="w-3.5 h-3.5" />
               <span>Simulate SHORT</span>
             </button>
+            {actionableRunKeel && (
+              <button
+                onClick={actionableRunKeel}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold font-mono text-xs shadow-md shadow-indigo-600/20 transition"
+                title="Jalankan Keel Quant Engine untuk menghasilkan sinyal decision nyata"
+              >
+                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                <span>Evaluasi Keel Engine</span>
+              </button>
+            )}
             <button
               onClick={() => onResetPaperAccount(selectedCapital)}
               className="flex items-center gap-1.5 px-2.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 border border-zinc-700 font-mono text-xs transition"
@@ -287,6 +300,21 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
                     className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold font-mono transition"
                   >
                     + Simulasikan Entry SHORT
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const res = await fetch("/api/keel/signal", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ symbol, currentPrice }),
+                      });
+                      const data = await res.json();
+                      alert(`[Keel Engine] Signal: ${data.decision.action}\nConfidence: ${data.decision.confidence}%\nReasoning: ${data.decision.reasoning}`);
+                      console.log("Full Keel Analysis:", data);
+                    }}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold font-mono transition"
+                  >
+                    ⚡ Evaluasi Keel Engine
                   </button>
                 </div>
               </div>

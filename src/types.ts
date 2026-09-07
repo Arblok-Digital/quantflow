@@ -343,6 +343,32 @@ export interface BitcoinRealDataSnapshot {
   marketCapUSD: number;
 }
 
+// --- Scanner & Probability Types ---
+export interface ScannerCandidate {
+  symbol: string;
+  price: number;
+  change24hPct: number;
+  volumeUsd24h: number;
+  bid: number | null;
+  ask: number | null;
+  score: number;
+  flow: "ACCUMULATION" | "DISTRIBUTION" | "NEUTRAL";
+  liquidityUsd: number;
+  liquidityDataSource: "ORDERBOOK" | "N/A";
+  mtfAlignment: boolean;
+}
+
+export type WallAction = "PULLED_SELL_WALL" | "BID_SUPPORT_UP" | "WALL_ADDED" | "NONE";
+
+export interface WallDynamicsVerdict {
+  action: WallAction;
+  pulledNotionalUsd: number;
+  bidSupportShiftBps: number | null;
+  detail: string;
+  sellWallUsd: number;
+  bidWallUsd: number;
+}
+
 // --- Macroeconomic Calendar Types ---
 export type MacroImpact = "HIGH" | "MEDIUM" | "LOW";
 
