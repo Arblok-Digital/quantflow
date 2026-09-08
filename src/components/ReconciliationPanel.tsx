@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { authFetch } from "../hooks/useAuth";
-import { useLiveMode } from "../hooks/useLiveMode";
+import { authFetch, useAuth } from "../hooks/useAuth";
 import { Scale, CheckCircle2, AlertTriangle, RefreshCw, ShieldCheck, Activity } from "lucide-react";
 
 const POLL_MS = 6000;
@@ -20,6 +19,7 @@ interface LocalRecon {
 }
 
 export const ReconciliationPanel: React.FC = () => {
+  const { isAuthenticated } = useAuth();
   const [report, setReport] = useState<LocalRecon | null>(null);
   const [conn, setConn] = useState<"ok" | "loading" | "error" | "none">("loading");
   const [lastSync, setLastSync] = useState<number | null>(null);
@@ -28,6 +28,7 @@ export const ReconciliationPanel: React.FC = () => {
 
   const load = useCallback(async () => {
     if (!mountedRef.current) return;
+    if (!isAuthenticated) return;
     if (document.hidden) return;
     try {
       const [posRes, balRes, statsRes] = await Promise.all([
@@ -108,20 +109,24 @@ export const ReconciliationPanel: React.FC = () => {
     } catch {
       setConn("error");
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     mountedRef.current = true;
+    if (!isAuthenticated) return;
     load();
     const iv = setInterval(load, POLL_MS);
     const onVis = () => { if (!document.hidden) load(); };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      mountedRef.current = false;
       clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [load]);
+  }, [isAuthenticated, load]);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const fmtUsd = (v: string | number) => {
     const n = Number(v ?? 0);

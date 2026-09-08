@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { authFetch } from "./useAuth";
+import { authFetch, useAuth } from "./useAuth";
 
 interface LiveModeState {
   armedForLive: boolean;
@@ -14,7 +14,7 @@ interface LiveModeState {
 
 const POLL_MS = 5000;
 
-export function useLiveMode(isAuthenticated: boolean) {
+export function useLiveMode(isAuthenticated?: boolean) {
   const [state, setState] = useState<LiveModeState>({
     armedForLive: false,
     liveArmed: false,
@@ -26,9 +26,12 @@ export function useLiveMode(isAuthenticated: boolean) {
   const [loading, setLoading] = useState(false);
   const mountedRef = useRef(false);
 
+  const auth = useAuth();
+  const effectiveAuth = typeof isAuthenticated === "boolean" ? isAuthenticated : auth.isAuthenticated;
+
   const load = useCallback(async () => {
     if (!mountedRef.current) return;
-    if (!isAuthenticated) return;
+    if (!effectiveAuth) return;
     if (document.hidden) return;
     try {
       const [credRes, guardRes, balRes] = await Promise.all([
@@ -70,11 +73,11 @@ export function useLiveMode(isAuthenticated: boolean) {
     } catch {
       // ignore
     }
-  }, [isAuthenticated]);
+  }, [effectiveAuth]);
 
   useEffect(() => {
     mountedRef.current = true;
-    if (!isAuthenticated) return;
+    if (!effectiveAuth) return;
     setLoading(true);
     load().finally(() => setLoading(false));
     const iv = setInterval(() => load(), POLL_MS);
@@ -86,7 +89,7 @@ export function useLiveMode(isAuthenticated: boolean) {
       clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [isAuthenticated, load]);
+  }, [effectiveAuth, load]);
 
   // Keep mountedRef true after first mount so load can be called manually
   useEffect(() => {

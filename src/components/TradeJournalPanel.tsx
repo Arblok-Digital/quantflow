@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { authFetch } from "../hooks/useAuth";
+import { authFetch, useAuth } from "../hooks/useAuth";
 import {
   BarChart3,
   TrendingUp,
@@ -162,6 +162,7 @@ function EquityCurveSVG({ curve }: { curve: Array<{ ts: number; equity: number }
 }
 
 export const TradeJournalPanel: React.FC = () => {
+  const { isAuthenticated } = useAuth();
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [conn, setConn] = useState<"ok" | "error" | "hidden" | "loading">("loading");
   const [lastSync, setLastSync] = useState<number | null>(null);
@@ -169,6 +170,7 @@ export const TradeJournalPanel: React.FC = () => {
 
   const load = useCallback(async () => {
     if (!mountedRef.current) return;
+    if (!isAuthenticated) return;
     if (document.hidden) {
       setConn("hidden");
       return;
@@ -190,10 +192,11 @@ export const TradeJournalPanel: React.FC = () => {
     } catch {
       setConn("error");
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     mountedRef.current = true;
+    if (!isAuthenticated) return;
     load();
     const iv = setInterval(load, POLL_MS);
     const onVis = () => {
@@ -201,11 +204,14 @@ export const TradeJournalPanel: React.FC = () => {
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      mountedRef.current = false;
       clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [load]);
+  }, [isAuthenticated, load]);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const hasTrades = stats ? stats.totalTrades > 0 : false;
   const healthDot = conn === "ok" ? "bg-emerald-400" : conn === "error" ? "bg-rose-500" : "bg-zinc-600";

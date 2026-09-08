@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ShieldCheck, Zap, XCircle } from "lucide-react";
-import { authFetch } from "../hooks/useAuth";
+import { authFetch, useAuth } from "../hooks/useAuth";
 
 // ---------------------------------------------------------------------------
 // Positions Panel — server-backed open positions table (roadmap 1.8).
@@ -69,6 +69,7 @@ function unrealizedFor(pos: ServerPosition): { pnlUSD: number; pnlPct: number } 
 }
 
 export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPositions }) => {
+  const { isAuthenticated } = useAuth();
   const [data, setData] = useState<PositionsResponse | null>(null);
   const [conn, setConn] = useState<"ok" | "error" | "hidden">("hidden");
   const [lastSync, setLastSync] = useState<number | null>(null);
@@ -81,6 +82,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
 
   const load = useCallback(async () => {
     if (!mountedRef.current) return;
+    if (!isAuthenticated) return;
     if (document.hidden) {
       setConn("hidden");
       return;
@@ -103,10 +105,11 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
     } catch {
       setConn("error");
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     mountedRef.current = true;
+    if (!isAuthenticated) return;
     const interval = setInterval(() => {
       load();
     }, POLL_MS);
@@ -116,11 +119,14 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
     document.addEventListener("visibilitychange", onVisibility);
     load();
     return () => {
-      mountedRef.current = false;
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [load]);
+  }, [isAuthenticated, load]);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const handleClose = async (pos: ServerPosition) => {
     if (!window.confirm(`Tutup posisi ${pos.symbol}? Ini mengirim order lawan ke server.`)) return;

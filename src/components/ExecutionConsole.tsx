@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, ChevronRight, ChevronDown, Radio } from "lucide-react";
-import { authFetch } from "../hooks/useAuth";
+import { authFetch, useAuth } from "../hooks/useAuth";
 
 // ---------------------------------------------------------------------------
 // Execution Console — server-backed order lifecycle stream (roadmap 1.7 + 1.9).
@@ -178,6 +178,7 @@ const EventRow: React.FC<{ event: PaperEvent }> = ({ event }) => {
 }
 
 export const ExecutionConsole: React.FC = () => {
+  const { isAuthenticated } = useAuth();
   const [events, setEvents] = useState<PaperEvent[]>([]);
   const [mode, setMode] = useState<string>("paper");
   const [conn, setConn] = useState<"ok" | "error" | "hidden">("hidden");
@@ -192,6 +193,7 @@ export const ExecutionConsole: React.FC = () => {
 
   const tick = useCallback(async () => {
     if (!mountedRef.current) return;
+    if (!isAuthenticated) return;
     if (document.hidden) {
       setConn("hidden");
       return;
@@ -246,10 +248,11 @@ export const ExecutionConsole: React.FC = () => {
     } catch {
       setConn("error");
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     mountedRef.current = true;
+    if (!isAuthenticated) return;
     const interval = setInterval(() => {
       tick();
     }, POLL_MS);
@@ -259,11 +262,14 @@ export const ExecutionConsole: React.FC = () => {
     document.addEventListener("visibilitychange", onVisibility);
     tick();
     return () => {
-      mountedRef.current = false;
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [tick]);
+  }, [isAuthenticated, tick]);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const healthDot =
     conn === "ok" ? "bg-emerald-400" : conn === "error" ? "bg-rose-500" : "bg-zinc-600";

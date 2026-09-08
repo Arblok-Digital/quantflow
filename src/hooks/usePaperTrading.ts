@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ClosedTrade, Portfolio, Position, MarketType, Timeframe } from "../types";
-import { authFetch } from "./useAuth";
+import { authFetch, useAuth } from "./useAuth";
 
 // ---------------------------------------------------------------------------
 // usePaperTrading — reader murni dari BE (roadmap 3.6)
@@ -205,8 +205,11 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
     }
   }, []);
 
+  const { isAuthenticated } = useAuth();
+
   useEffect(() => {
     mountedRef.current = true;
+    if (!isAuthenticated) return;
     load();
     const iv = setInterval(load, POLL_MS);
     const onVis = () => {
@@ -214,11 +217,14 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
     };
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVis);
     return () => {
-      mountedRef.current = false;
       clearInterval(iv);
       if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVis);
     };
-  }, [load]);
+  }, [isAuthenticated, load]);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // No-op mark-to-market: server is source of truth
   const processPriceTick = useCallback((_price: number) => {}, []);

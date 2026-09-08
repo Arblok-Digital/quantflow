@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { authFetch } from "../hooks/useAuth";
+import { authFetch, useAuth } from "../hooks/useAuth";
 import {
   ShieldCheck,
   ShieldAlert,
@@ -43,6 +43,7 @@ function fmtMoney(n: number): string {
 }
 
 export const GuardrailsPanel: React.FC = () => {
+  const { isAuthenticated } = useAuth();
   const [data, setData] = useState<GuardrailsSnapshot | null>(null);
   const [conn, setConn] = useState<"ok" | "error" | "hidden" | "loading">("loading");
   const [killBusy, setKillBusy] = useState(false);
@@ -53,6 +54,7 @@ export const GuardrailsPanel: React.FC = () => {
 
   const load = useCallback(async () => {
     if (!mountedRef.current) return;
+    if (!isAuthenticated) return;
     if (document.hidden) {
       setConn("hidden");
       return;
@@ -73,10 +75,11 @@ export const GuardrailsPanel: React.FC = () => {
     } catch {
       setConn("error");
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     mountedRef.current = true;
+    if (!isAuthenticated) return;
     const iv = setInterval(() => load(), POLL_MS);
     const onVis = () => {
       if (!document.hidden) load();
@@ -84,11 +87,14 @@ export const GuardrailsPanel: React.FC = () => {
     document.addEventListener("visibilitychange", onVis);
     load();
     return () => {
-      mountedRef.current = false;
       clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [load]);
+  }, [isAuthenticated, load]);
+
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Local countdown for cooldown
   useEffect(() => {

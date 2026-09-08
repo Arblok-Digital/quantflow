@@ -66,6 +66,7 @@ import {
   setKillSwitch,
 } from "./guardrails";
 import { runKeelQuantEngine, evaluateKeelRisk } from "./src/logic/keelAdapter";
+import { analyzeMTFLiquidity } from "./src/logic/liquidityHunt";
 import { fetchMarketData, fetchOHLCVWithFallback } from "./src/data/marketFetcher";
 
 dotenv.config();
@@ -980,14 +981,43 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
 });
 
 // Dedicated Keel Institutional Quant Engine Signal Endpoint
-app.post("/api/keel/signal", (req, res) => {
-  const { symbol, currentPrice, technicals, mtfLiquidity, orderBook } = req.body || {};
+// K2 FIX: async — fetch real orderBook + klines server-side when caller omits them,
+// so keel produces data-driven BUY/SELL/HOLD instead of always-HOLD from empty depth.
+// K3 FIX: requireAuth — consistent with /api/ai-decision and other protected routes.
+app.post("/api/keel/signal", requireAuth, async (req, res) => {
+  const { symbol, currentPrice, technicals, mtfLiquidity, orderBook: bodyOrderBook } = req.body || {};
+  const sym = String(symbol || "BTC/USDT");
+  const price = Number(currentPrice) || 64250;
+
+  // K2: Fetch REAL market data server-side when caller omits orderBook —
+  // fetchMarketData returns canonical OrderBook ({price,size,total}) from
+  // Binance/Vision fallback chain, plus real candles. Never fabricate: if only
+  // synthetic (success:false) is available, fall through with null depth so the
+  // keel fails closed honestly (discardedReason) instead of hallucinating.
+  let orderBook = bodyOrderBook;
+  let mtf = mtfLiquidity;
+  let fetchedPrice = price;
+  if (!orderBook || !mtf) {
+    try {
+      const market = await fetchMarketData(sym);
+      if (market && market.success !== false && market.orderBook) {
+        if (!orderBook) orderBook = market.orderBook;
+        if (!mtf && Array.isArray(market.candles15m) && Array.isArray(market.candles4h) && market.candles15m.length > 0 && market.candles4h.length > 0) {
+          fetchedPrice = Number(market.currentPrice) || price;
+          mtf = analyzeMTFLiquidity(market.candles15m, market.candles4h, fetchedPrice, "SPOT", market.orderBook);
+        }
+      }
+    } catch (e: any) {
+      console.error(`[keel] market data fetch failed (will use null depth): ${e?.message}`);
+    }
+  }
+
   try {
     const result = runKeelQuantEngine({
-      symbol: String(symbol || "BTC/USDT"),
-      currentPrice: Number(currentPrice) || 64250,
+      symbol: sym,
+      currentPrice: price,
       technicals,
-      mtfLiquidity,
+      mtfLiquidity: mtf,
       orderBook,
     });
     const currentEquity = (() => { try { return getPaperAccount().equity; } catch { return 10000; } })();

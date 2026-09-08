@@ -11,6 +11,7 @@ import { AuditLedgerModal } from "./components/AuditLedgerModal";
 import { ArchitectureModal } from "./components/ArchitectureModal";
 import { KeyVaultModal } from "./components/KeyVaultModal";
 import { BrokerModal } from "./components/BrokerModal";
+import { KeelEnginePanel, KeelAnalysisResult } from "./components/KeelEnginePanel";
 
 import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
 import { PaperTradingPanel } from "./components/PaperTradingPanel";
@@ -51,6 +52,8 @@ export default function App() {
   const [isAuditLedgerOpen, setIsAuditLedgerOpen] = useState<boolean>(false);
   const [isKeyVaultOpen, setIsKeyVaultOpen] = useState<boolean>(false);
   const [isBrokerOpen, setIsBrokerOpen] = useState<boolean>(false);
+  const [keelResult, setKeelResult] = useState<KeelAnalysisResult | null>(null);
+  const [keelLoading, setKeelLoading] = useState<boolean>(false);
 
   // --- Risk Config (cross-cutting, diedit via RiskManagementPanel) ---
   const [riskConfig, setRiskConfig] = useState<RiskConfig>({
@@ -157,6 +160,7 @@ export default function App() {
   }, [symbol, market.currentPrice]);
 
   const runKeelSignal = useCallback(async () => {
+    setKeelLoading(true);
     try {
       const res = await authFetch("/api/keel/signal", {
         method: "POST",
@@ -165,8 +169,30 @@ export default function App() {
       });
       const data = await res.json();
       if (data?.decision) {
-        // Render hasil keel ke panel decision (bukan cuma alert) — mapping ke LLMDecision
         const d = data.decision;
+        setKeelResult({
+          action: String(d.action ?? "HOLD"),
+          confidence: Number(d.confidence ?? 0),
+          targetPrice: d.targetPrice != null ? Number(d.targetPrice) : undefined,
+          stopLoss: d.stopLoss != null ? Number(d.stopLoss) : undefined,
+          takeProfit: d.takeProfit != null ? Number(d.takeProfit) : undefined,
+          positionSizePercent: d.positionSizePercent != null ? Number(d.positionSizePercent) : undefined,
+          reasoning: d.reasoning ? String(d.reasoning) : undefined,
+          rawSignal: data.rawSignal
+            ? {
+                signal: data.rawSignal.signal ? String(data.rawSignal.signal?.action ?? data.rawSignal.signal) : null,
+                discardedReason: data.rawSignal.discardedReason ? String(data.rawSignal.discardedReason) : undefined,
+                compositeScore: data.rawSignal.compositeScore != null ? Number(data.rawSignal.compositeScore) : data.rawSignal.confluence?.score != null ? Number(data.rawSignal.confluence.score) : undefined,
+                smartMoneyFlow: data.rawSignal.smartMoneyFlow ? String(data.rawSignal.smartMoneyFlow) : undefined,
+                liquidityDepthUsd: data.rawSignal.liquidityDepthUsd != null ? Number(data.rawSignal.liquidityDepthUsd) : undefined,
+              }
+            : undefined,
+          riskGate: data.riskGate ? { passed: Boolean(data.riskGate.passed), reasons: Array.isArray(data.riskGate.reasons) ? data.riskGate.reasons.map(String) : undefined } : undefined,
+          liquidityHuntAnalysis: data.liquidityHuntAnalysis || d.liquidityHuntAnalysis || undefined,
+          source: String(d.source || data.source || "keel-institutional-quant"),
+          inferenceLatencyMs: Number(data.inferenceLatencyMs ?? d.inferenceLatencyMs ?? 0) || undefined,
+          promptSummary: data.promptSummary ? String(data.promptSummary) : d.promptSummary ? String(d.promptSummary) : `policy=keel-quant symbol=${symbol} price=${market.currentPrice}`,
+        });
         pipeline.injectDecision({
           action: d.action,
           confidence: Number(d.confidence ?? 0),
@@ -182,14 +208,12 @@ export default function App() {
           onChainContext: data.onChainContext,
           macroContext: data.macroContext,
         } as any);
-        alert(`[Keel Engine] Signal: ${d.action}\nConfidence: ${d.confidence}%\nReasoning: ${d.reasoning}`);
-      } else {
-        alert(`[Keel Engine] ${data?.message || "Tidak ada decision (mungkin data tidak cukup)"}`);
       }
       console.log("Full Keel Analysis:", data);
     } catch (err) {
       console.error("Keel signal error:", err);
-      alert(`[Keel Engine] Error: ${(err as Error).message}`);
+    } finally {
+      setKeelLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, market.currentPrice, pipeline.injectDecision]);
@@ -475,6 +499,7 @@ export default function App() {
               onSimulateTradeEntry={paper.simulateTradeEntry}
               actionableRunKeel={runKeelSignal}
             />
+            <KeelEnginePanel result={keelResult} loading={keelLoading} onAnalyze={runKeelSignal} />
 
             <TradeJournalPanel />
           </>
@@ -565,6 +590,8 @@ export default function App() {
                 onRefresh={() => setMacroSummary(fetchMacroCalendar())}
               />
             </div>
+
+            <KeelEnginePanel result={keelResult} loading={keelLoading} onAnalyze={runKeelSignal} />
 
             <ReconciliationPanel />
 
