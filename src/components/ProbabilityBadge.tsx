@@ -4,12 +4,12 @@ import { Percent, Target, Shield, TrendingUp, TrendingDown, Info, Sparkles } fro
 
 interface ProbabilityBadgeProps {
   currentPrice: number;
-  /** Optional precomputed input for calibrated probability. */
   probInput?: Partial<ProbInput>;
-  /** Entry price to compute TP1/TP2/SL from (defaults to currentPrice). */
   entryPrice?: number;
   side?: "LONG" | "SHORT";
   compact?: boolean;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
 }
 
 /**
@@ -22,6 +22,8 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
   entryPrice = currentPrice,
   side = "LONG",
   compact = false,
+  stopLoss = null,
+  takeProfit = null,
 }) => {
   const [result, setResult] = useState<ProbResult | null>(() =>
     coldProb(entryPrice, 0.021, 0.009)
@@ -63,6 +65,11 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
 
   const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
   const isLong = side === "LONG";
+  const hasLiveLevels = stopLoss != null && takeProfit != null && isFinite(stopLoss) && isFinite(takeProfit) && stopLoss > 0 && takeProfit > 0;
+  const pctLabel = (absPrice: number): string => {
+    if (!isFinite(absPrice) || entryPrice === 0) return "–";
+    return `${(((absPrice - entryPrice) / entryPrice) * 100).toFixed(2)}%`;
+  };
 
   if (compact) {
     return (
@@ -115,39 +122,38 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
         {result.ev >= 0 ? "+" : ""}{(result.ev * 100).toFixed(2)}% EV
       </div>
 
-      {/* TP1 / TP2 / SL grid */}
       <div className="grid grid-cols-3 gap-2 mt-2.5">
         <div className="bg-zinc-950/80 rounded-lg p-2 border border-emerald-500/20">
           <div className="flex items-center gap-1 text-[9px] text-emerald-400 font-bold uppercase">
-            <TrendingUp className="w-2.5 h-2.5" /> TP1
+            <TrendingUp className="w-2.5 h-2.5" /> {hasLiveLevels ? "TP (live)" : "TP1 — default est."}
           </div>
           <div className="text-xs font-bold text-emerald-300 mt-0.5">
-            ${isLong ? Math.max(result.tp1, result.tp2 * 0.98) : Math.min(result.tp1 / 1.5, result.tp2)}</div>
-          <div className="text-[9px] text-zinc-500">+2.1%</div>
+            ${hasLiveLevels ? Number(takeProfit).toFixed(2) : isLong ? Math.max(result.tp1, result.tp2 * 0.98).toFixed(2) : Math.min(result.tp1 / 1.5, result.tp2).toFixed(2)}</div>
+          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(takeProfit)) : "+2.1% default est."}</div>
         </div>
         <div className="bg-zinc-950/80 rounded-lg p-2 border border-amber-500/20">
           <div className="flex items-center gap-1 text-[9px] text-amber-400 font-bold uppercase">
-            <Target className="w-2.5 h-2.5" /> TP2
+            <Target className="w-2.5 h-2.5" /> {hasLiveLevels ? "TP2 — default est." : "TP2 — default est."}
           </div>
           <div className="text-xs font-bold text-amber-300 mt-0.5">
-            ${isLong ? result.tp2 : result.tp1}</div>
-          <div className="text-[9px] text-zinc-500">+3.15%</div>
+            ${isLong ? result.tp2.toFixed(2) : result.tp1.toFixed(2)}</div>
+          <div className="text-[9px] text-zinc-500">+3.15% default est.</div>
         </div>
         <div className="bg-zinc-950/80 rounded-lg p-2 border border-rose-500/20">
           <div className="flex items-center gap-1 text-[9px] text-rose-400 font-bold uppercase">
-            <Shield className="w-2.5 h-2.5" /> SL
+            <Shield className="w-2.5 h-2.5" /> {hasLiveLevels ? "SL (live)" : "SL — default est."}
           </div>
           <div className="text-xs font-bold text-rose-300 mt-0.5">
-            ${isLong ? result.sl : entryPrice * 1.009}</div>
-          <div className="text-[9px] text-zinc-500">-0.9%</div>
+            ${hasLiveLevels ? Number(stopLoss).toFixed(2) : isLong ? result.sl.toFixed(2) : (entryPrice * 1.009).toFixed(2)}</div>
+          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(stopLoss)) : "-0.9% default est."}</div>
         </div>
       </div>
 
       <div className="mt-2 text-[9px] text-zinc-600 border-t border-zinc-800 pt-1.5 flex items-center gap-1">
         <Info className="w-2.5 h-2.5" />
         {result.prior
-          ? "Belum ada riwayat outcome — memakai prior Laplace (P=0.52)."
-          : `Calibrated dari ${result.n} outcome trade.`}
+          ? `Belum ada riwayat outcome — memakai prior Laplace (P=0.52). prior (${result.bucket}) • ${hasLiveLevels ? "TP/SL live dari posisi" : "TP/SL default est."}`
+          : `Calibrated ${result.bucket} • ${hasLiveLevels ? "TP/SL live dari posisi" : "TP1/TP2/SL default est."}`}
       </div>
     </div>
   );

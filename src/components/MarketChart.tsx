@@ -12,8 +12,9 @@ interface MarketChartProps {
   mtfLiquidity: MTFLiquidityAnalysis;
   timeframe: Timeframe;
   onSelectTimeframe?: (tf: Timeframe) => void;
-  /** Per-timeframe candle series — real data for the 4TF confluence matrix. */
   candlesByTimeframe?: Partial<Record<Timeframe, Candle[]>>;
+  feedMode?: import("../types").FeedMode;
+  exchangeStatus?: import("../types").ExchangeFeedStatus;
 }
 
 const ALL_TIMEFRAMES: { id: Timeframe; label: string; tag?: string; desc: string }[] = [
@@ -37,6 +38,8 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   timeframe,
   onSelectTimeframe,
   candlesByTimeframe,
+  feedMode,
+  exchangeStatus,
 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
@@ -248,6 +251,22 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                 <Flame className="h-3 w-3 text-amber-400" />
                 {timeframe === "15m" ? "AI Anchor 15m (Active)" : `Manual View (${timeframe})`}
               </span>
+              {feedMode && (
+                <span
+                  className={`px-2 py-0.5 rounded border text-[10px] font-bold font-mono ${
+                    feedMode === "WS_LIVE"
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : feedMode === "INTERPOLATED"
+                      ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                      : feedMode === "REST_POLL"
+                      ? "bg-sky-500/15 text-sky-300 border-sky-500/30"
+                      : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                  }`}
+                  title={exchangeStatus ? `${exchangeStatus.source} • ${exchangeStatus.latencyMs}ms • ${exchangeStatus.activeEndpoint}` : feedMode}
+                >
+                  {feedMode === "WS_LIVE" ? "WS LIVE" : feedMode === "INTERPOLATED" ? "INTERPOLATED" : feedMode === "REST_POLL" ? "REST POLL" : "SIMULATED"}
+                </span>
+              )}
             </div>
             <p className="text-[10px] font-mono text-zinc-500 uppercase tracking-wide">
               BSL (Buy-Side Liq) &bull; SSL (Sell-Side Liq) &bull; Stop-Loss Hunt Clusters

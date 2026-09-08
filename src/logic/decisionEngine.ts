@@ -41,10 +41,9 @@ export async function evaluateTradingDecision(
   const startTime = Date.now();
 
   try {
-    // /api/ai-decision is currently NOT protected (no requireAuth in server.ts),
-    // keep using plain fetch so it stays public. If server adds auth later,
-    // swap to authFetch here — authFetch will still work for public routes too.
-    const res = await fetch("/api/ai-decision", {
+    // F-04: /api/ai-decision di server sekarang requireAuth → wajib pakai authFetch
+    // supaya Authorization header (Bearer token) ikut terkirim.
+    const res = await authFetch("/api/ai-decision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

@@ -23,6 +23,8 @@ import {
 // Init rehydrates OPEN positions from DB. All fills measured against real ccxt data.
 
 export const TAKER_FEE_RATE = 0.0004;
+
+let warnedDefaultSecret = false;
 export const INITIAL_PAPER_CASH = 10000;
 export const MAINTENANCE_MARGIN_RATE = 0.005;
 export const MAX_LEVERAGE = 50;
@@ -158,17 +160,40 @@ let bookInitialized = false;
 // Shared mark cache dari server tick (task 6.3): satu sumber kebenaran harga
 // untuk posisi/margin. Diisi oleh WS Binance proxy (server.ts) atau REST,
 // dikonsumsi refreshPaperMarks & bracket monitor sebelum turun ke ccxt.
-const sharedMarkCache = new Map<string, { mark: number; ts: number }>();
+// F-02/P1: selain mark, cache juga jendela range 1m (high/low rolling 60 detik)
+// dari setiap tick WS — jadi bracket SL/TP/liq dievaluasi terhadap range asli,
+// bukan last-price doang (wick yang tembus lalu balik tetap ter-catch).
+interface MarkCacheEntry {
+  mark: number;
+  ts: number;
+  bucketStart: number;
+  high: number;
+  low: number;
+}
+const MARK_BUCKET_MS = 60_000; // jendela 1 menit
+const sharedMarkCache = new Map<string, MarkCacheEntry>();
 
 export function updatePaperMarkCache(symbol: string, mark: number): void {
-  if (isFinite(mark) && mark > 0) {
-    sharedMarkCache.set(symbol, { mark, ts: Date.now() });
+  if (!isFinite(mark) || mark <= 0) return;
+  const now = Date.now();
+  const cached = sharedMarkCache.get(symbol);
+  if (cached && now - cached.bucketStart < MARK_BUCKET_MS) {
+    // masih dalam bucket 1m yang sama → update rolling high/low + mark
+    cached.mark = mark;
+    cached.ts = now;
+    cached.high = Math.max(cached.high, mark);
+    cached.low = Math.min(cached.low, mark);
+    return;
   }
+  // bucket baru (atau symbol baru): reset jendela high/low ke tick ini
+  sharedMarkCache.set(symbol, { mark, ts: now, bucketStart: now, high: mark, low: mark });
 }
 
-function freshMarkFromCache(symbol: string, maxAgeMs = MARK_TTL_MS): { mark: number; ts: number } | null {
+function freshMarkFromCache(symbol: string, maxAgeMs = MARK_TTL_MS): { mark: number; ts: number; high: number; low: number } | null {
   const cached = sharedMarkCache.get(symbol);
-  if (cached && Date.now() - cached.ts < maxAgeMs) return cached;
+  if (cached && Date.now() - cached.ts < maxAgeMs) {
+    return { mark: cached.mark, ts: cached.ts, high: cached.high, low: cached.low };
+  }
   return null;
 }
 
@@ -187,93 +212,103 @@ function freshState(): PaperBookState {
 // ------------------------------------------------------------------
 // DB helpers
 // ------------------------------------------------------------------
+// F-01 (P1): writer DB helpers bersifat fail-closed — error menulis DILONTAR
+// (tidak diswallow), sehingga pemanggil dalam beginTx() bisa rollbackTx()
+// seluruh transaksi. Pemanggil luar transaksi wajib menangkapnya secara toleran.
 function persistSnapshot(): void {
-  try {
-    const open = state.positions.filter((p) => p.status === "OPEN");
-    const marginLocked = open.reduce((sum, p) => sum + p.marginUSD, 0);
-    const unrealized = open.reduce((sum, p) => sum + unrealizedPnlFor(p), 0);
-    const equity = state.cash + marginLocked + unrealized;
-    saveSnapshotDb({
-      ts: Date.now(),
-      cash: r2(state.cash),
-      margin_used: r2(marginLocked),
-      equity: r2(equity),
-      unrealized_pnl: r2(unrealized),
-    });
-  } catch (err) {
-    console.warn(`[paperBook] Gagal persist snapshot: ${(err as Error).message}`);
-  }
+  const open = state.positions.filter((p) => p.status === "OPEN");
+  const marginLocked = open.reduce((sum, p) => sum + p.marginUSD, 0);
+  const unrealized = open.reduce((sum, p) => sum + unrealizedPnlFor(p), 0);
+  const equity = state.cash + marginLocked + unrealized;
+  saveSnapshotDb({
+    ts: Date.now(),
+    cash: r2(state.cash),
+    margin_used: r2(marginLocked),
+    equity: r2(equity),
+    unrealized_pnl: r2(unrealized),
+  });
 }
 
 function dbSavePosition(pos: PaperPosition): void {
-  try {
-    savePositionDb({
-      id: pos.id,
-      symbol: pos.symbol,
-      side: pos.side,
-      entry_price: pos.entryPrice,
-      amount: pos.qty,
-      leverage: pos.leverage,
-      stop_loss: pos.stopLoss ?? null,
-      take_profit: pos.takeProfit ?? null,
-      liq_price: pos.liquidationPrice ?? null,
-      status: pos.status,
-      opened_at: pos.openedAt,
-      closed_at: pos.closedAt ?? null,
-      close_price: pos.exitPrice ?? null,
-      realized_pnl_usd: pos.realizedPnlUSD ?? null,
-      fees_usd: pos.feesPaidUSD ?? null,
-    });
-  } catch (err) {
-    console.warn(`[paperBook] Gagal save position ${pos.id}: ${(err as Error).message}`);
-  }
+  savePositionDb({
+    id: pos.id,
+    symbol: pos.symbol,
+    side: pos.side,
+    entry_price: pos.entryPrice,
+    amount: pos.qty,
+    leverage: pos.leverage,
+    stop_loss: pos.stopLoss ?? null,
+    take_profit: pos.takeProfit ?? null,
+    liq_price: pos.liquidationPrice ?? null,
+    status: pos.status,
+    opened_at: pos.openedAt,
+    closed_at: pos.closedAt ?? null,
+    close_price: pos.exitPrice ?? null,
+    realized_pnl_usd: pos.realizedPnlUSD ?? null,
+    fees_usd: pos.feesPaidUSD ?? null,
+  });
 }
 
 function dbSaveOrder(order: PaperOrderReceipt): void {
-  try {
-    // price = fillPrice, stop_loss/take_profit not directly in receipt — try to find linked position
-    let sl: number | null = null;
-    let tp: number | null = null;
-    if (order.positionId) {
-      const linked = state.positions.find((p) => p.id === order.positionId);
-      if (linked) {
-        sl = linked.stopLoss ?? null;
-        tp = linked.takeProfit ?? null;
-      }
+  // price = fillPrice, stop_loss/take_profit not directly in receipt — try to find linked position
+  let sl: number | null = null;
+  let tp: number | null = null;
+  if (order.positionId) {
+    const linked = state.positions.find((p) => p.id === order.positionId);
+    if (linked) {
+      sl = linked.stopLoss ?? null;
+      tp = linked.takeProfit ?? null;
     }
-    saveOrderDb({
-      id: order.id,
+  }
+  saveOrderDb({
+    id: order.id,
+    symbol: order.symbol,
+    side: order.side,
+    type: order.type,
+    status: order.status,
+    amount: order.amount,
+    price: order.fillPrice ?? null,
+    stop_loss: sl,
+    take_profit: tp,
+    leverage: order.leverage ?? null,
+    slippage_bps: order.slippageBps ?? null,
+    mode: order.mode ?? null,
+    created_at: order.timestamp,
+    closed_at: null,
+    realized_pnl_usd: null,
+  });
+  // also save fills row
+  if (order.fillPrice != null) {
+    const fillId = `fill-${order.id}`;
+    saveFillDb({
+      id: fillId,
+      order_id: order.id,
       symbol: order.symbol,
       side: order.side,
-      type: order.type,
-      status: order.status,
+      price: order.fillPrice,
       amount: order.amount,
-      price: order.fillPrice ?? null,
-      stop_loss: sl,
-      take_profit: tp,
-      leverage: order.leverage ?? null,
-      slippage_bps: order.slippageBps ?? null,
-      mode: order.mode ?? null,
+      fee_usd: order.feeUSD,
       created_at: order.timestamp,
-      closed_at: null,
-      realized_pnl_usd: null,
     });
-    // also save fills row
-    if (order.fillPrice != null) {
-      const fillId = `fill-${order.id}`;
-      saveFillDb({
-        id: fillId,
-        order_id: order.id,
-        symbol: order.symbol,
-        side: order.side,
-        price: order.fillPrice,
-        amount: order.amount,
-        fee_usd: order.feeUSD,
-        created_at: order.timestamp,
-      });
-    }
+  }
+}
+
+// F-01: pemanggil di LUAR transaksi (startup, bracket monitor, update posisi)
+// memakai varian toleran — kalau persist gagal, warn & lanjut, karena di luar
+// beginTx() tidak ada rollback; error tidak boleh membawa crash startup/loop.
+function persistSnapshotTolerant(): void {
+  try {
+    persistSnapshot();
   } catch (err) {
-    console.warn(`[paperBook] Gagal save order ${order.id}: ${(err as Error).message}`);
+    console.warn(`[paperBook] Gagal persist snapshot (non-tx): ${(err as Error).message}`);
+  }
+}
+
+function dbSavePositionTolerant(pos: PaperPosition): void {
+  try {
+    dbSavePosition(pos);
+  } catch (err) {
+    console.warn(`[paperBook] Gagal save position (non-tx) ${pos.id}: ${(err as Error).message}`);
   }
 }
 
@@ -398,11 +433,11 @@ export function initPaperBook(): void {
 
     console.log(`[paperBook] Rehydrated ${state.positions.length} OPEN positions, ${state.orders.length} orders dari SQLite (cash ${state.cash}, realized ${state.realizedPnl})`);
     // Ensure at least one snapshot exists for stats
-    if (!latestSnap) persistSnapshot();
+    if (!latestSnap) persistSnapshotTolerant();
   } catch (err) {
     console.warn(`[paperBook] Gagal rehydrate dari DB, mulai dari state kosong: ${(err as Error).message}`);
     state = freshState();
-    persistSnapshot();
+    persistSnapshotTolerant();
   }
 }
 
@@ -492,7 +527,20 @@ export function normalizeSymbol(rawSymbol: string): string {
 }
 
 export function signPayload(payload: string): { signature: string; payloadHash: string } {
-  const secret = process.env.BROKER_EVENT_SECRET || "paper-dev-secret";
+  // F-06: fail-closed di production — jangan pernah default ke secret dev saat NODE_ENV=production.
+  const rawSecret = process.env.BROKER_EVENT_SECRET;
+  if (!rawSecret) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "BROKER_EVENT_SECRET wajib disetel di production — menolak menandatangani event broker (fail-closed)."
+      );
+    }
+    if (!warnedDefaultSecret) {
+      console.warn("[paperBook] BROKER_EVENT_SECRET belum disetel — memakai default 'paper-dev-secret' (DEV ONLY).");
+      warnedDefaultSecret = true;
+    }
+  }
+  const secret = rawSecret || "paper-dev-secret";
   const payloadHash = createHash("sha256").update(payload, "utf-8").digest("hex");
   const signature = createHmac("sha256", secret).update(payload, "utf-8").digest("hex");
   return { signature, payloadHash };
@@ -781,18 +829,18 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     dbSavePosition(position);
     dbSaveOrder(order);
     persistSnapshot();
-    try {
-      appendAudit("order", {
-        id: order.id,
-        symbol: order.symbol,
-        side: order.side,
-        amount: order.amount,
-        fillPrice: order.fillPrice,
-        status: order.status,
-        reason: "PAPER_OPEN",
-        timestamp: Date.now(),
-      });
-    } catch {}
+    // F-01: jangan swallow error audit di dalam tx — kalau appendAudit gagal,
+    // tangkap di catch luar → rollbackTx() seluruh transaksi (fail-closed).
+    appendAudit("order", {
+      id: order.id,
+      symbol: order.symbol,
+      side: order.side,
+      amount: order.amount,
+      fillPrice: order.fillPrice,
+      status: order.status,
+      reason: "PAPER_OPEN",
+      timestamp: Date.now(),
+    });
     commitTx();
   } catch (err) {
     rollbackTx();
@@ -947,19 +995,19 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
     dbSaveOrder(result.order);
     // also need to update the open position row's status already via dbSavePosition, and ensure fill for exit
     persistSnapshot();
-    try {
-      appendAudit("order", {
-        id: result.order.id,
-        symbol: result.order.symbol,
-        side: result.order.side,
-        amount: result.order.amount,
-        fillPrice: result.order.fillPrice,
-        status: result.order.status,
-        realizedPnlUSD: r2(realizedPnl),
-        reason: "PAPER_CLOSE",
-        timestamp: Date.now(),
-      });
-    } catch {}
+    // F-01: jangan swallow error audit di dalam tx — error apa pun (termasuk
+    // appendAudit) → rollbackTx() seluruh transaksi (fail-closed).
+    appendAudit("order", {
+      id: result.order.id,
+      symbol: result.order.symbol,
+      side: result.order.side,
+      amount: result.order.amount,
+      fillPrice: result.order.fillPrice,
+      status: result.order.status,
+      realizedPnlUSD: r2(realizedPnl),
+      reason: "PAPER_CLOSE",
+      timestamp: Date.now(),
+    });
     commitTx();
   } catch (err) {
     rollbackTx();
@@ -1010,8 +1058,10 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
     takeProfit: pos.takeProfit,
     breakEven: input.breakEven === true,
   });
-  dbSavePosition(pos);
-  persistSnapshot();
+  // F-01: di luar transaksi — pakai varian toleran (update SL/TP di memori tetap
+  // berlaku walau persist ke SQLite gagal; log warning, bukan crash).
+  dbSavePositionTolerant(pos);
+  persistSnapshotTolerant();
   return { ...pos };
 }
 
@@ -1030,13 +1080,15 @@ async function fetchMarkTicker(symbol: string): Promise<{
   const t0 = Date.now();
   // Preferensi WS cache (server tick = single source of truth, task 6.3).
   // Kalau cache fresh, pakai langsung — harga real dari Binance WS, bukan
-  // round-trip ccxt tambahan.
+  // round-trip ccxt tambahan. F-02/P1: high1m/low1m = jendela range 1m rolling
+  // dari tick WS (bukan alias mark), sehingga bracket SL/TP/liq dinilai jujur.
   const cached = freshMarkFromCache(symbol);
   if (cached) {
+    const hasRealWindow = isFinite(cached.high) && isFinite(cached.low) && cached.high > 0 && cached.low > 0;
     return {
       mark: cached.mark,
-      high1m: cached.mark,
-      low1m: cached.mark,
+      high1m: hasRealWindow ? cached.high : cached.mark,
+      low1m: hasRealWindow ? cached.low : cached.mark,
       ok: true,
       latencyMs: Date.now() - t0,
       source: "WS_CACHE",
@@ -1045,11 +1097,17 @@ async function fetchMarkTicker(symbol: string): Promise<{
   // Use robust fallback chain: Binance Vision → Gate.io → Bybit → Binance → CCXT → Synthetic
   const result = await fetchTickerPrice(symbol);
   if (result.ok && isFinite(result.price) && result.price > 0) {
-    // For high1m/low1m we use mark as approximation (could add OHLCV fetch later)
+    // Prefer window asli dari cache (jika ada) vs mark approx — jangan pernah
+    // mengecilkan range: wick yang menembus SL/TP harus tetap ter-catch.
+    const cachedWin = freshMarkFromCache(symbol, MARK_TTL_MS);
+    const winHigh =
+      cachedWin && isFinite(cachedWin.high) && cachedWin.high > 0 ? Math.max(cachedWin.high, result.price) : result.price;
+    const winLow =
+      cachedWin && isFinite(cachedWin.low) && cachedWin.low > 0 ? Math.min(cachedWin.low, result.price) : result.price;
     return {
       mark: result.price,
-      high1m: result.price,
-      low1m: result.price,
+      high1m: winHigh,
+      low1m: winLow,
       ok: true,
       latencyMs: Date.now() - t0,
       source: "FALLBACK_CHAIN",
@@ -1078,7 +1136,7 @@ export async function refreshPaperMarks(force = false): Promise<void> {
     if (force || age >= MARK_TTL_MS) staleSymbols.add(pos.symbol);
   }
   if (staleSymbols.size === 0) {
-    if (changed) persistSnapshot();
+    if (changed) persistSnapshotTolerant();
     return;
   }
   const results = await Promise.all([...staleSymbols].map(async (symbol) => ({ symbol, ...(await fetchMarkTicker(symbol)) })));
@@ -1091,7 +1149,7 @@ export async function refreshPaperMarks(force = false): Promise<void> {
       changed = true;
     }
   }
-  if (changed) persistSnapshot();
+  if (changed) persistSnapshotTolerant();
 }
 
 const lastErrorLoggedAt = new Map<string, number>();
@@ -1165,6 +1223,9 @@ export async function runBracketMonitorPass(): Promise<void> {
         try {
           const result = await closePaperPosition(pos.id, triggered);
           console.log(`[paperBook] Bracket monitor closed ${pos.id} (${pos.symbol} ${triggered}) @ ${result.exitFillPrice}, realized ${result.realizedPnlUSD}`);
+          // F-01: jangan swallow error audit — kalau appendAudit gagal, warn &
+          // catat event ERROR (closePaperPosition sudah sukses & ter-audit di
+          // dalam tx-nya sendiri, jadi ini cuma audit pelengkap non-fatal).
           try {
             appendAudit("exit", {
               positionId: pos.id,
@@ -1175,14 +1236,16 @@ export async function runBracketMonitorPass(): Promise<void> {
               realizedPnlUSD: result.realizedPnlUSD,
               source: "bracket-monitor",
             });
-          } catch {}
+          } catch (auditErr) {
+            console.warn(`[paperBook] Bracket monitor gagal audit exit ${pos.id}: ${(auditErr as Error).message}`);
+          }
         } catch (err) {
           console.warn(`[paperBook] Bracket monitor gagal menutup ${pos.id}: ${(err as Error).message}`);
           appendEvent("ERROR", { positionId: pos.id, symbol: pos.symbol, message: (err as Error).message, source: "bracket-monitor-close" });
         }
       }
     }
-    if (persisted) persistSnapshot();
+    if (persisted) persistSnapshotTolerant();
   } finally {
     monitorPassRunning = false;
   }

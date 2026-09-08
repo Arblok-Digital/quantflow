@@ -207,6 +207,8 @@ async function tryGateIO(symbol: string): Promise<FetchResult<any>> {
             low: parseFloat(ticker.low_24h || currentPrice * 0.98),
             priceChangePercent: parseFloat(ticker.change_percentage || "0.0"),
             volumeUSD: parseFloat(ticker.quote_volume || "50000000"),
+            // F-09: kalau field 24h tidak tersedia, nilai fallback adalah ESTIMASI, bukan fakta.
+            estimated: !ticker.high_24h || !ticker.low_24h || !ticker.quote_volume,
           },
           candles15m,
           candles4h,
@@ -256,6 +258,8 @@ async function tryBybit(symbol: string): Promise<FetchResult<any>> {
             low: parseFloat(ticker.lowPrice24h || currentPrice * 0.98),
             priceChangePercent: parseFloat(ticker.price24hPcnt || "0.0") * 100,
             volumeUSD: parseFloat(ticker.turnover24h || "50000000"),
+            // F-09: kalau field 24h tidak tersedia, nilai fallback adalah ESTIMASI, bukan fakta.
+            estimated: !ticker.highPrice24h || !ticker.lowPrice24h || !ticker.turnover24h,
           },
           candles15m,
           candles4h,
@@ -320,7 +324,8 @@ function generateSynthetic(symbol: string): FetchResult<any> {
   return {
     data: {
       currentPrice: basePrice,
-      ticker24h: { high: basePrice * 1.02, low: basePrice * 0.98, priceChangePercent: 0, volumeUSD: 50000000 },
+      // F-09: seluruh bidikan sintetis adalah ESTIMASI, bukan fakta pasar.
+      ticker24h: { high: basePrice * 1.02, low: basePrice * 0.98, priceChangePercent: 0, volumeUSD: 50000000, estimated: true },
       candles15m: candles(40, 0.005),
       candles4h: candles(40, 0.01),
     },
@@ -350,9 +355,11 @@ export async function fetchMarketData(symbol: string): Promise<any> {
   }
 
   // All failed - return synthetic
+  // F-09: data sintetis/hallucinated BUKAN data valid → success:false.
+  // Frontend harus menampilkan peringatan "data simulasi" bukan data pasar nyata.
   const synthetic = generateSynthetic(symbol);
   console.warn("[MarketFetcher] All live sources failed, using synthetic data");
-  return { success: true, ...synthetic.data, source: synthetic.source, timestamp: Date.now(), message: synthetic.error };
+  return { success: false, ...synthetic.data, source: synthetic.source, timestamp: Date.now(), message: synthetic.error };
 }
 
 /**

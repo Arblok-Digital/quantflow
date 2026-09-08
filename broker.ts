@@ -573,7 +573,9 @@ export async function fetchBrokerBalance(): Promise<NormalizedBalance[]> {
 }
 
 // --- 3. Order Execution (paper simulation di atas harga CCXT real) ---
-const DEFAULT_TAKER_FEE = 0.001; // 0.1% asumsi spot
+// F-08: source of truth tunggal — TAKER_FEE_RATE dipakai paperBook.ts (0.04% spot).
+// Jangan definisikan ulang tarif fee di sini.
+import { TAKER_FEE_RATE } from "./paperBook";
 
 export async function placeBrokerOrder(req: BrokerOrderRequest) {
   const symbol = String(req.symbol || "BTC/USDT").toUpperCase();
@@ -605,7 +607,7 @@ export async function placeBrokerOrder(req: BrokerOrderRequest) {
     }
 
     const cost = fillPrice * amount;
-    const fee = cost * DEFAULT_TAKER_FEE;
+    const fee = cost * TAKER_FEE_RATE;
     const leverage = req.leverage && req.leverage > 0 ? Math.min(50, req.leverage) : 1;
     const margin = cost / leverage;
 

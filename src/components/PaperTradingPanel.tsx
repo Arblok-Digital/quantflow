@@ -71,15 +71,15 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   const isNetPositive = netTotalCashflow >= 0;
   const isUnrealizedPositive = totalUnrealizedPnl >= 0;
 
-  // Potential Cashflow Projections if all positions hit TP vs CL
   const totalPotentialProfitUSD = positions.reduce((acc, p) => acc + (p.potentialProfitUSD || (p.qty * Math.abs(p.takeProfit - p.entryPrice))), 0);
   const totalPotentialLossUSD = positions.reduce((acc, p) => acc + (p.potentialLossUSD || (p.qty * Math.abs(p.entryPrice - p.stopLoss))), 0);
-  const projectedRRRatio = totalPotentialLossUSD > 0 ? (totalPotentialProfitUSD / totalPotentialLossUSD).toFixed(2) : "3.00";
+  const projectedRRRatio = totalPotentialLossUSD > 0 ? (totalPotentialProfitUSD / totalPotentialLossUSD).toFixed(2) : "—";
+  const hasAnyTradeHistory = closedTrades.length > 0 || portfolio.totalTrades > 0;
 
-  // Performance calculations
   const totalTradesCount = closedTrades.length + (portfolio.totalTrades > 0 ? portfolio.totalTrades : 0);
   const winCount = closedTrades.filter((t) => t.pnlUSD > 0).length + portfolio.winCount;
-  const winRate = totalTradesCount > 0 ? ((winCount / totalTradesCount) * 100).toFixed(1) : "71.4";
+  const winRateDisplay = totalTradesCount > 0 ? `${((winCount / totalTradesCount) * 100).toFixed(1)}%` : "—";
+  const winRateSubLabel = totalTradesCount > 0 ? `${winCount} Wins • ${totalTradesCount - winCount} Losses` : "belum ada trade";
 
   return (
     <div className="space-y-4 font-sans">
@@ -210,7 +210,7 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
             </div>
             <div className="text-[11px] font-mono text-zinc-400 mt-1 flex items-center justify-between">
               <span>Projected R:R:</span>
-              <span className="text-amber-400 font-bold">1 : {projectedRRRatio}</span>
+              <span className="text-amber-400 font-bold">{hasAnyTradeHistory || positions.length > 0 ? `1 : ${projectedRRRatio}` : "— (belum ada trade)"}</span>
             </div>
           </div>
           <div className="text-[10px] text-zinc-500 font-mono pt-2 border-t border-zinc-800 flex items-center justify-between">
@@ -229,10 +229,10 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
           </div>
           <div className="my-2">
             <div className="text-2xl sm:text-3xl font-black font-mono text-purple-400">
-              {winRate}%
+              {winRateDisplay}
             </div>
             <div className="text-xs font-mono text-zinc-400 mt-1">
-              {winCount} Wins &bull; {totalTradesCount - winCount} Losses
+              {winRateSubLabel}
             </div>
           </div>
           <div className="text-[10px] text-zinc-500 font-mono pt-2 border-t border-zinc-800 flex items-center justify-between">
@@ -303,7 +303,8 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
                   </button>
                   <button
                     onClick={async () => {
-                      const res = await fetch("/api/keel/signal", {
+                      const { authFetch: _af } = await import("../hooks/useAuth");
+                      const res = await _af("/api/keel/signal", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ symbol, currentPrice }),

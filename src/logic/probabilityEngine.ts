@@ -64,14 +64,14 @@ export async function loadOutcomesFromServer(): Promise<void> {
   if (now - lastLoadAt < CACHE_TTL_MS) return;
 
   try {
-    const res = await fetch("/api/ledger/stats");
+    const { authFetch } = await import("../hooks/useAuth");
+    const res = await authFetch("/api/ledger/stats");
     const data = await res.json().catch(() => null);
     if (!data?.success || !Array.isArray(data.closedTrades)) {
       lastLoadAt = now;
       return;
     }
 
-    // Rebuild bucket counts from closed trades
     const newStore = new Map<string, OutcomeBucket>();
     let gWins = 0;
     let gTotal = 0;
@@ -86,15 +86,21 @@ export async function loadOutcomesFromServer(): Promise<void> {
       const pnl = Number(trade.realizedPnlUsd ?? 0);
       if (pnl > 0) gWins++;
 
-      // Try to reconstruct bucket from trade metadata
-      // Use a simplified bucket: NEUTRAL:mid:mid:nowall as default
-      const bucket = "__global__";
-      const existing = newStore.get(bucket);
+      const poolRaw = String(trade.targetLiquidityPool ?? "").toUpperCase();
+      const poolBucket = poolRaw.includes("BSL") ? "BSL" : poolRaw.includes("SSL") ? "SSL" : "__global__";
+      const reasonBucket = (() => {
+        const r = String(trade.entryReasoning ?? "");
+        if (/SSL|bullish/i.test(r)) return "BULLISH";
+        if (/BSL|bearish/i.test(r)) return "BEARISH";
+        return "__global__";
+      })();
+      const bucketForTrade = poolBucket !== "__global__" ? poolBucket : reasonBucket !== "__global__" ? reasonBucket : "__global__";
+      const existing = newStore.get(bucketForTrade);
       if (existing) {
         existing.total++;
         if (pnl > 0) existing.wins++;
       } else {
-        newStore.set(bucket, { wins: pnl > 0 ? 1 : 0, total: 1 });
+        newStore.set(bucketForTrade, { wins: pnl > 0 ? 1 : 0, total: 1 });
       }
     }
 
@@ -103,7 +109,6 @@ export async function loadOutcomesFromServer(): Promise<void> {
     globalTotal = gTotal;
     lastLoadAt = now;
   } catch {
-    // Server unavailable — keep previous state
     lastLoadAt = now;
   }
 }
@@ -115,38 +120,57 @@ export async function loadOutcomesFromServer(): Promise<void> {
 export async function calibratedProb(
   input: ProbInput,
   currentPrice: number,
-  tpPct: number = 0.021,    // 2.1% default TP
-  slPctAbs: number = 0.009  // 0.9% default SL
+  tpPct: number = 0.021,
+  slPctAbs: number = 0.009
 ): Promise<ProbResult> {
-  // Ensure outcomes are loaded
   await loadOutcomesFromServer();
 
   const bucket = bucketOf(input);
 
-  // Try bucket-specific data first
+  const tryPoolBucket = (): { wins: number; total: number; bucket: string } | null => {
+    const poolKey = input.flow === "BULLISH" ? "BSL" : input.flow === "BEARISH" ? "SSL" : null;
+    if (!poolKey) return null;
+    const d = outcomeStore.get(poolKey);
+    if (d && d.total >= 10) return { wins: d.wins, total: d.total, bucket: poolKey };
+    return null;
+  };
+
   const bucketData = outcomeStore.get(bucket);
   let wins = bucketData?.wins ?? 0;
   let total = bucketData?.total ?? 0;
   let prior = false;
+  let effectiveBucket = bucket;
 
-  if (total < 15) {
-    // Fallback to global
-    if (globalTotal >= 10) {
-      wins = globalWins;
-      total = globalTotal;
+  if (total >= 10) {
+    effectiveBucket = bucket;
+  } else {
+    const pool = tryPoolBucket();
+    if (pool) {
+      wins = pool.wins;
+      total = pool.total;
+      effectiveBucket = pool.bucket;
+    } else if (globalTotal >= 10) {
+      const g = outcomeStore.get("__global__");
+      if (g && g.total >= 10) {
+        wins = g.wins;
+        total = g.total;
+        effectiveBucket = "__global__";
+      } else {
+        wins = globalWins;
+        total = globalTotal;
+        effectiveBucket = "__global__";
+      }
     } else {
-      // Cold start: Laplace smoothing around prior
       prior = true;
       const pSmooth = (wins + COLD_PRIOR_P * COLD_N) / (total + COLD_N);
       const ev = pSmooth * tpPct - (1 - pSmooth) * slPctAbs;
       const tp1 = currentPrice * (1 + tpPct);
       const tp2 = currentPrice * (1 + tpPct * 1.5);
       const sl = currentPrice * (1 - slPctAbs);
-      return { p: pSmooth, n: total, prior, ev, tp1, tp2, sl, bucket };
+      return { p: pSmooth, n: total, prior, ev, tp1, tp2, sl, bucket: prior ? `${bucket} (prior n=${total})` : bucket };
     }
   }
 
-  // Wilson lower-bound style shrinkage
   const raw = total > 0 ? wins / total : COLD_PRIOR_P;
   const shrink = Math.min(1, total / 80);
   const p = raw * shrink + 0.5 * (1 - shrink) * 0.15;
@@ -155,7 +179,7 @@ export async function calibratedProb(
   const tp2 = currentPrice * (1 + tpPct * 1.5);
   const sl = currentPrice * (1 - slPctAbs);
 
-  return { p, n: total, prior, ev, tp1, tp2, sl, bucket };
+  return { p, n: total, prior, ev, tp1, tp2, sl, bucket: prior ? `${effectiveBucket} (prior n=${total})` : `${effectiveBucket} (n=${total})` };
 }
 
 /**

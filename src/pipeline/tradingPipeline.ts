@@ -19,6 +19,10 @@ import { evaluateRiskGate } from "../logic/riskGatekeeper";
 import { executeBrokerOrder } from "./brokerService";
 import { sha256Hex } from "../utils/crypto";
 
+// F-13: ledger client (hash-chain ini) hanya untuk tampilan real-time;
+// server /api/ledger (HMAC sinkron dengan appendAudit di db.ts) adalah sumber otoritatif.
+let warnedClientLedgerDisplayOnly = false;
+
 export interface PipelineCycleInput {
   symbol: string;
   currentPrice: number;
@@ -165,6 +169,13 @@ export async function runTradingPipelineCycle(
   };
 
   // Step 5: Cryptographic Hash Block Generation for Audit Ledger
+  // F-13: client ledger display-only — server /api/ledger adalah sumber otoritatif.
+  if (!warnedClientLedgerDisplayOnly) {
+    console.warn(
+      "[tradingPipeline] client ledger is display-only; server /api/ledger is authoritative"
+    );
+    warnedClientLedgerDisplayOnly = true;
+  }
   const logId = `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const blockData = JSON.stringify({
     id: logId,

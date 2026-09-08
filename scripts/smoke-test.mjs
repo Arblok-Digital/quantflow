@@ -75,9 +75,22 @@ async function main() {
     record("GET /api/health", false, err?.message);
   }
 
-  // 2) AI decision (mock): 200 via Gemini, atau 503 fallback "unavailable" = route hidup
+  // 2) Login → dapat token untuk route yang butuh auth (/api/ai-decision & /api/broker/*)
+  let token = null;
+  try {
+    const login = await http("POST", "/api/auth/login", { body: { passcode: AUTH_PASSCODE } });
+    token = login.json?.token || null;
+    const ok = login.status === 200 && !!token;
+    record("POST /api/auth/login", ok, ok ? "token OK" : `HTTP ${login.status}`);
+  } catch (err) {
+    record("POST /api/auth/login", false, err?.message);
+  }
+
+  // 3) AI decision (mock): 200 via Gemini, atau 503 fallback "unavailable" = route hidup.
+  //    Route ini requireAuth (F-04), jadi wajib kirim token. Tanpa token → 401.
   try {
     const { status, json } = await http("POST", "/api/ai-decision", {
+      token,
       body: {
         symbol: "BTC/USDT",
         currentPrice: 100000,
@@ -87,15 +100,16 @@ async function main() {
         macroCalendar: {},
       },
     });
+    const unauthorized = status === 401;
     const ok =
       (status === 200 && json?.success === true) ||
       (status === 503 && json?.source === "unavailable");
-    record("POST /api/ai-decision", ok, ok ? `HTTP ${status} source=${json?.source ?? "ok"}` : `HTTP ${status}`);
+    record("POST /api/ai-decision (dengan auth)", ok, ok ? `HTTP ${status} source=${json?.source ?? "ok"}` : (unauthorized ? "401 without token (auth gate ok)" : `HTTP ${status}`));
   } catch (err) {
-    record("POST /api/ai-decision", false, err?.message);
+    record("POST /api/ai-decision (dengan auth)", false, err?.message);
   }
 
-  // 3) Auth gate: tanpa token → 401
+  // 4) Auth gate: tanpa token → 401
   try {
     const { status, json } = await http("GET", "/api/broker/status");
     const ok = status === 401;
@@ -104,12 +118,10 @@ async function main() {
     record("GET /api/broker/status (tanpa auth) → 401", false, err?.message);
   }
 
-  // 4) Dengan login (dummy token via passcode) → 200 paper
+  // 5) Dengan login (token dari langkah 2) → 200 paper
   try {
-    const login = await http("POST", "/api/auth/login", { body: { passcode: AUTH_PASSCODE } });
-    const token = login.json?.token;
-    if (login.status !== 200 || !token) {
-      record("GET /api/broker/status (dengan auth) → 200", false, `login HTTP ${login.status}`);
+    if (!token) {
+      record("GET /api/broker/status (dengan auth) → 200", false, "login gagal di langkah 2");
     } else {
       const { status, json } = await http("GET", "/api/broker/status", { token });
       const ok = status === 200 && json?.success === true;

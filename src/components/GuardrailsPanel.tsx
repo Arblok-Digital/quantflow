@@ -36,7 +36,7 @@ interface GuardrailsSnapshot {
   };
 }
 
-const POLL_MS = 4000;
+const POLL_MS = 5000;
 
 function fmtMoney(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

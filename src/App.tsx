@@ -156,10 +156,9 @@ export default function App() {
     setOnChainMetrics(fetchOnChainMetrics(symbol, market.currentPrice));
   }, [symbol, market.currentPrice]);
 
-  // Manual trigger Keel Quant Engine untuk testing decision logic langsung di UI
   const runKeelSignal = useCallback(async () => {
     try {
-      const res = await fetch("/api/keel/signal", {
+      const res = await authFetch("/api/keel/signal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ symbol, currentPrice: market.currentPrice }),
@@ -487,6 +486,8 @@ export default function App() {
               timeframe={timeframe}
               onSelectTimeframe={handleSelectTimeframe}
               candlesByTimeframe={market.candlesByTimeframe}
+              feedMode={market.feedMode}
+              exchangeStatus={market.exchangeStatus}
             />
 
             {/* MTF Liquidity Hunt Radar Panel */}
@@ -523,6 +524,8 @@ export default function App() {
                 imbalance: market.technicals.orderBookImbalance,
               }}
               side="LONG"
+              stopLoss={paper.positions[0]?.stopLoss ?? pipeline.latestDecision?.stopLoss ?? null}
+              takeProfit={paper.positions[0]?.takeProfit ?? pipeline.latestDecision?.takeProfit ?? null}
             />
 
             {/* Legacy RiskManagementPanel kept below as secondary card */}

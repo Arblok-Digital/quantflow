@@ -18,7 +18,7 @@ import {
   Droplets,
 } from "lucide-react";
 
-const POLL_MS = 15_000;
+const POLL_MS = 20_000;
 const MAX_ROWS = 20;
 
 interface ScannerPanelProps {

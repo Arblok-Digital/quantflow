@@ -28,24 +28,19 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
   const symbol = input.symbol || "BTC/USDT";
   const entryPrice = input.currentPrice;
 
-  // Map orderBook format to Keel NormalizedDepth
   const bids: DepthLevel[] = (input.orderBook?.bids || []).map((b) => ({ price: b.price, qty: b.size }));
   const asks: DepthLevel[] = (input.orderBook?.asks || []).map((a) => ({ price: a.price, qty: a.size }));
+  const hasRealDepth = bids.length > 0 && asks.length > 0;
+  const depth: NormalizedDepth | null = hasRealDepth
+    ? { symbol, venue: "BINANCE_SPOT", bids, asks, tsServerMs: Date.now() }
+    : null;
 
-  const depth: NormalizedDepth = {
-    symbol,
-    venue: "BINANCE_SPOT",
-    bids: bids.length > 0 ? bids : [{ price: entryPrice * 0.999, qty: 5.0 }],
-    asks: asks.length > 0 ? asks : [{ price: entryPrice * 1.001, qty: 5.0 }],
-    tsServerMs: Date.now(),
-  };
-
-  // Determine MTF bias vector from MTFLiquidityAnalysis if present
   let biasVal: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
   if (input.mtfLiquidity) {
-    if (input.mtfLiquidity.activeState.includes("SWEPT_SSL") || input.mtfLiquidity.activeState.includes("BSL")) {
+    const s = String(input.mtfLiquidity.activeState);
+    if (s === "SWEPT_SSL" || s === "HUNTING_BSL" || s === "BSL") {
       biasVal = "BULLISH";
-    } else if (input.mtfLiquidity.activeState.includes("SWEPT_BSL") || input.mtfLiquidity.activeState.includes("SSL")) {
+    } else if (s === "SWEPT_BSL" || s === "HUNTING_SSL" || s === "SSL") {
       biasVal = "BEARISH";
     }
   }
@@ -57,34 +52,53 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
     d1: biasVal,
   };
 
-  const recentTrades: NormalizedTrade[] = [
-    {
+  if (!hasRealDepth) {
+    const holdDecision: LLMDecision = {
+      action: "HOLD",
+      confidence: 50,
+      targetPrice: entryPrice,
+      stopLoss: Number((entryPrice * 0.985).toFixed(2)),
+      takeProfit: Number((entryPrice * 1.03).toFixed(2)),
+      positionSizePercent: 0,
+      reasoning: "[Keel Engine] HOLD — no real depth: orderBook kosong, skip fail-closed (tidak fabricate depth).",
+      source: "keel-institutional-quant",
+      inferenceLatencyMs: 1,
+      liquidityHuntAnalysis: {
+        targetPool: "BSL",
+        targetZonePrice: Number((entryPrice * 1.03).toFixed(2)),
+        sweepTriggered: false,
+        mtfBias: biasVal === "BULLISH" ? "BULLISH_REVERSAL" : biasVal === "BEARISH" ? "BEARISH_REVERSAL" : "NEUTRAL",
+        confluenceScore: 0,
+        invalidationLevel: Number((entryPrice * 0.985).toFixed(2)),
+      },
+    };
+    const emptyResult = generateSignal({
       symbol,
       venue: "BINANCE_SPOT",
-      price: entryPrice,
-      qty: 0.5,
-      notionalUsd: entryPrice * 0.5,
-      isBuyerMaker: false,
-      tsServerMs: Date.now() - 500,
-    },
-    {
-      symbol,
-      venue: "BINANCE_SPOT",
-      price: entryPrice * 1.0001,
-      qty: 1.2,
-      notionalUsd: entryPrice * 1.2,
-      isBuyerMaker: true,
-      tsServerMs: Date.now() - 100,
-    },
-  ];
+      depth: null,
+      recentTrades: [],
+      mtfBias,
+      narrativeVelocity: 0,
+      entryPrice,
+      detectedAtServerMs: Date.now(),
+      strategy: "SWING",
+    });
+    return { decision: holdDecision, rawSignalResult: emptyResult };
+  }
+
+  // F-03: only the real order book depth is wired into the adapter input —
+  // there is NO real recentTrades / order-flow stream available. Do NOT
+  // fabricate trade prints: pass empty trades and narrativeVelocity 0 so the
+  // signal generator runs purely on the REAL depth (serbuk jujur, fail-closed).
+  const recentTrades: NormalizedTrade[] = [];
 
   const buildInput: SignalBuildInput = {
     symbol,
     venue: "BINANCE_SPOT",
-    depth,
+    depth: depth as NormalizedDepth,
     recentTrades,
     mtfBias,
-    narrativeVelocity: 1.2,
+    narrativeVelocity: 0,
     entryPrice,
     detectedAtServerMs: Date.now(),
     strategy: "SWING",
@@ -138,6 +152,12 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
   return { decision, rawSignalResult: signalResult };
 }
 
+let keelHwm: number | null = null;
+
+export function _resetKeelHwmForTest(): void {
+  keelHwm = null;
+}
+
 /**
  * Keel Risk Gate Evaluation — evaluates trade candidate against Keel's institutional risk limits.
  */
@@ -155,8 +175,11 @@ export function evaluateKeelRisk(candidate: RiskCandidate, currentEquityUsd: num
   };
 
   const killSwitch = lastKillSwitchEvent();
-  const hwm = new IntradayHighWaterMark(currentEquityUsd);
-  const drawdownPct = hwm.observe(currentEquityUsd).drawdownPct;
+  if (keelHwm === null || !isFinite(keelHwm)) keelHwm = currentEquityUsd;
+  else keelHwm = Math.max(keelHwm, currentEquityUsd);
+  const hwmInst = new IntradayHighWaterMark(keelHwm);
+  const drawdownPct = hwmInst.observe(currentEquityUsd).drawdownPct;
+  keelHwm = hwmInst.current();
 
   const snapshot: RiskSnapshot = {
     openPositions: openPositions().length,

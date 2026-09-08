@@ -20,7 +20,7 @@ export interface UsePaperTradingOptions {
 }
 
 const INITIAL_PAPER_CASH = 10000;
-const POLL_MS = 3500;
+const POLL_MS = 5000;
 
 function isSimPositionId(id?: string): boolean {
   return typeof id === "string" && id.startsWith("pos_sim_");

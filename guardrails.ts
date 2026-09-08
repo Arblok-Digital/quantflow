@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { getPaperPositions } from "./paperBook";
+import { getPaperPositions, getPaperAccount } from "./paperBook";
 
 const GUARD_FILE = path.join(process.cwd(), ".guardrails.json");
 
@@ -137,6 +137,23 @@ function todayStartMs(): number {
   return d.getTime();
 }
 
+// F-11: baseline equity real (paper account equity), bukan hardcode 10000.
+// Env override GUARD_EQUITY_BASELINE tetap menang kalau disetel.
+function baselineEquityUSD(mode: "paper" | "live"): number {
+  const envOverride = Number(process.env.GUARD_EQUITY_BASELINE || 0);
+  if (isFinite(envOverride) && envOverride > 0) return envOverride;
+  if (mode === "paper") {
+    try {
+      const account = getPaperAccount();
+      if (isFinite(account.equity) && account.equity > 0) return account.equity;
+    } catch {
+      // account belum init — fallback di bawah
+    }
+  }
+  // live (dan fallback): denominator 10000 sampai equity tracking live tersedia
+  return 10000;
+}
+
 function computePaperDailyRealizedPnl(): { realizedPnlUSD: number; lossPercent: number } {
   const start = todayStartMs();
   const positions = getPaperPositions();
@@ -147,7 +164,7 @@ function computePaperDailyRealizedPnl(): { realizedPnlUSD: number; lossPercent: 
     }
   }
   // Also need to consider orders that are closes? But positions cover.
-  const initial = 10000; // INITIAL_PAPER_CASH
+  const initial = baselineEquityUSD("paper"); // equity real paper, bukan INITIAL_PAPER_CASH
   const loss = sum < 0 ? Math.abs(sum) : 0;
   const lossPercent = initial > 0 ? (loss / initial) * 100 : 0;
   return { realizedPnlUSD: Number(sum.toFixed(2)), lossPercent: Number(lossPercent.toFixed(4)) };
@@ -158,7 +175,7 @@ function computeLiveDailyRealizedPnl(): { realizedPnlUSD: number; lossPercent: n
   const key = dateKey(Date.now());
   const entry = s.liveRealizedLedger[key];
   const sum = entry ? Number(entry.realizedPnlUSD) : 0;
-  const initial = 10000; // use same denominator for live until real equity tracking
+  const initial = baselineEquityUSD("live"); // env override, atau 10000 sampai equity tracking live ada
   const loss = sum < 0 ? Math.abs(sum) : 0;
   const lossPercent = initial > 0 ? (loss / initial) * 100 : 0;
   return { realizedPnlUSD: Number(sum.toFixed(2)), lossPercent: Number(lossPercent.toFixed(4)) };

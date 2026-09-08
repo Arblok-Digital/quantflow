@@ -56,7 +56,7 @@ interface PositionsPanelProps {
   onServerPositions?: (openServerIds: string[]) => void;
 }
 
-const POLL_MS = 3500;
+const POLL_MS = 5000;
 const fmtMoney = (n: number): string =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtNum = (n: number): string => n.toLocaleString("en-US", { maximumFractionDigits: 4 });

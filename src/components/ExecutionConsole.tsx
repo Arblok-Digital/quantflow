@@ -49,7 +49,7 @@ interface PositionsLite {
   account?: { openCount: number } | null;
 }
 
-const POLL_MS = 3000;
+const POLL_MS = 5000;
 const MAX_CLIENT_EVENTS = 50;
 
 const fmtNum = (v: unknown): string => Number(v).toLocaleString("en-US", { maximumFractionDigits: 4 });

@@ -599,7 +599,8 @@ app.get("/api/onchain/bitcoin", async (_req, res) => {
 });
 
 // 1. LLM Decision Engine Route (MTF Liquidation Hunt, On-Chain Analysis & Macro Calendar Integration)
-app.post("/api/ai-decision", async (req, res) => {
+// F-04: route menulis agent_decisions + appendAudit → wajib requireAuth (bukan public).
+app.post("/api/ai-decision", requireAuth, async (req, res) => {
   const startTime = Date.now();
   const {
     symbol,
@@ -634,18 +635,18 @@ Konteks Pasar & MTF Liquidation Hunt:
 - Recent Sweep: ${mtfLiquidity?.recentSweep ? `${mtfLiquidity.recentSweep.type} dengan ${mtfLiquidity.recentSweep.wickRejectionPercent}% wick absorption. Invalidation: $${mtfLiquidity.recentSweep.invalidationPrice}` : "Belum ada sweep terbaru"}
 
 Analisa On-Chain (Smart Money & Whale Dynamics):
-- Netflow Bursa 24 Jam: ${onChainMetrics?.exchangeNetflow24hUSD ? (onChainMetrics.exchangeNetflow24hUSD > 0 ? `+$${onChainMetrics.exchangeNetflow24hUSD}M (Net Inflow / Potensi Jual)` : `-$${Math.abs(onChainMetrics.exchangeNetflow24hUSD)}M (Net Outflow / Akumulasi Whale ke Cold Storage)`) : "Netflow Outflow -$142M (Akumulasi)"}
-- Status Netflow: ${onChainMetrics?.netflowStatus || "STRONG_OUTFLOW_ACCUMULATION"}
-- Smart Money Bias: ${onChainMetrics?.smartMoneyBias || "BULLISH_ACCUMULATION"} (Confidence: ${onChainMetrics?.onChainConfidence || 85}%)
-- MVRV Z-Score: ${onChainMetrics?.mvrvZScore || 1.84} (${onChainMetrics?.mvrvTerritory || "FAIR_VALUE"})
-- SOPR: ${onChainMetrics?.sopr || 1.014} (${onChainMetrics?.soprStatus || "RESET_TO_SUPPORT"})
-- Whale Alerts: ${onChainMetrics?.whaleAlerts?.[0] ? `${onChainMetrics.whaleAlerts[0].type} $${(onChainMetrics.whaleAlerts[0].usdValue / 1e6).toFixed(1)}M (${onChainMetrics.whaleAlerts[0].from} -> ${onChainMetrics.whaleAlerts[0].to})` : "Whale transfer to cold storage"}
+- Netflow Bursa 24 Jam: ${onChainMetrics?.exchangeNetflow24hUSD != null ? (onChainMetrics.exchangeNetflow24hUSD > 0 ? `+$${onChainMetrics.exchangeNetflow24hUSD}M (Net Inflow / Potensi Jual)` : `-$${Math.abs(onChainMetrics.exchangeNetflow24hUSD)}M (Net Outflow / Akumulasi Whale ke Cold Storage)`) : "No data"}
+- Status Netflow: ${onChainMetrics?.netflowStatus || "No data"}
+- Smart Money Bias: ${onChainMetrics?.smartMoneyBias || "No data"} (Confidence: ${onChainMetrics?.onChainConfidence != null ? `${onChainMetrics.onChainConfidence}%` : "No data"})
+- MVRV Z-Score: ${onChainMetrics?.mvrvZScore != null ? `${onChainMetrics.mvrvZScore} (${onChainMetrics.mvrvTerritory || "unknown"})` : "No data"}
+- SOPR: ${onChainMetrics?.sopr != null ? `${onChainMetrics.sopr} (${onChainMetrics.soprStatus || "unknown"})` : "No data"}
+- Whale Alerts: ${onChainMetrics?.whaleAlerts?.[0] ? `${onChainMetrics.whaleAlerts[0].type} $${(onChainMetrics.whaleAlerts[0].usdValue / 1e6).toFixed(1)}M (${onChainMetrics.whaleAlerts[0].from} -> ${onChainMetrics.whaleAlerts[0].to})` : "No whale alert data"}
 
 Kalender Makroekonomi (Macro Knowledge & Catalysts):
-- Sikap Moneter The Fed: ${macroCalendar?.fedPolicyStance || "DOVISH_PIVOT"}
-- Indeks Risiko Makro: ${macroCalendar?.macroRiskIndex ?? 35}/100
-- Event Terdekat: ${macroCalendar?.nearestEvent ? `${macroCalendar.nearestEvent.name} (${macroCalendar.nearestEvent.relativeTime}) - Impact: ${macroCalendar.nearestEvent.impact}. Implikasi: ${macroCalendar.nearestEvent.implicationNotes}` : "FOMC Rate Decision upcoming"}
-- Panduan Risiko Makro: ${macroCalendar?.macroTradingAdvice || "Kondisi makro kondusif untuk swing trading"}
+- Sikap Moneter The Fed: ${macroCalendar?.fedPolicyStance || "No data"}
+- Indeks Risiko Makro: ${macroCalendar?.macroRiskIndex != null ? `${macroCalendar.macroRiskIndex}/100` : "No data"}
+- Event Terdekat: ${macroCalendar?.nearestEvent ? `${macroCalendar.nearestEvent.name} (${macroCalendar.nearestEvent.relativeTime}) - Impact: ${macroCalendar.nearestEvent.impact}. Implikasi: ${macroCalendar.nearestEvent.implicationNotes}` : "No macro event data"}
+- Panduan Risiko Makro: ${macroCalendar?.macroTradingAdvice || "No data"}
 
 Indikator Teknikal Pendukung:
 - RSI (14): ${technicals?.rsi ?? 50}
@@ -1401,7 +1402,9 @@ app.get("/api/ledger", requireAuth, (req, res) => {
 
 app.get("/api/ledger/verify", requireAuth, (_req, res) => {
   const result = verifyLedger();
-  res.json({ success: true, ...result });
+  // F-13: ledger server (HMAC, appendAudit di db.ts) adalah otoritatif.
+  // Ledger client (hash-chain SHA-256, tampilan real-time di UI) hanya display-only.
+  res.json({ success: true, ...result, clientLedgerNote: "Server ledger (HMAC) is authoritative; client SHA-256 ledger is display-only." });
 });
 
 app.get("/api/ledger/stats", requireAuth, (_req, res) => {
