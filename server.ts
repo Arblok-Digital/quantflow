@@ -65,9 +65,11 @@ import {
   recordOrderPlaced,
   setKillSwitch,
 } from "./guardrails";
-import { runKeelQuantEngine, evaluateKeelRisk } from "./src/logic/keelAdapter";
+import { runKeelQuantEngine, evaluateKeelRisk, FuturesAnalysis } from "./src/logic/keelAdapter";
 import { analyzeMTFLiquidity } from "./src/logic/liquidityHunt";
 import { fetchMarketData, fetchRecentTrades, fetchOHLCVWithFallback, RecentTrade, fetchFuturesMetrics, FuturesMetrics } from "./src/data/marketFetcher";
+import { calculateRSI, calculateEMA, calculateMACD } from "./src/logic/indicators";
+import type { Candle, OrderBook, MTFLiquidityAnalysis, OnChainMetrics, MacroSummary } from "./src/types";
 
 dotenv.config();
 
@@ -1064,6 +1066,282 @@ app.post("/api/keel/signal", requireAuth, async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || "Keel signal failed." });
   }
+});
+
+// ========================================================================
+// AI ADVISOR — insight naratif (Keel + MTF + On-chain + Macro).
+// AI = PENASIHAT, BUKAN eksekutor. Tidak ada jalur order dari endpoint ini.
+// Fail-closed jujur: tanpa GEMINI_API_KEY → mode "keel" dengan insight
+// deterministik dari data keel. Tidak pernah fabricate data pasar.
+// ========================================================================
+
+interface AiAdvisorBody {
+  symbol?: string;
+  currentPrice?: number;
+  onChainMetrics?: OnChainMetrics | null;
+  macroCalendar?: MacroSummary | null;
+}
+
+// Derivasikan technicals (satu set datar) dari candles + orderBook — pola sama
+// dengan pipeline (calculateRSI/EMA/MACD + order book imbalance).
+function deriveTechnicals(
+  candles: Candle[],
+  orderBook: OrderBook | null
+): { rsi: number; ema20: number; ema50: number; macd: { macdLine: number; signalLine: number; histogram: number }; orderBookImbalance: number; volatility: string } {
+  const closes = candles.map((c) => c.close);
+  const bidTotal = (orderBook?.bids || []).reduce((s, l) => s + l.size, 0);
+  const askTotal = (orderBook?.asks || []).reduce((s, l) => s + l.size, 0);
+  const imbalance = askTotal > 0 ? bidTotal / askTotal : 1;
+  return {
+    rsi: calculateRSI(closes, 14),
+    ema20: calculateEMA(closes, 20),
+    ema50: calculateEMA(closes, 50),
+    macd: calculateMACD(closes),
+    orderBookImbalance: Number(imbalance.toFixed(2)),
+    volatility: "MEDIUM",
+  };
+}
+
+app.post("/api/ai-advisor", requireAuth, async (req, res) => {
+  const startTime = Date.now();
+  const body: AiAdvisorBody = req.body || {};
+  const sym = String(body.symbol || "BTC/USDT");
+  const price = Number(body.currentPrice) || 64250;
+
+  // (a) Fetch keel-context server-side — fail-closed: setiap bagian gagal → kosong.
+  let market: any = null;
+  try {
+    const m = await fetchMarketData(sym);
+    if (m && m.success !== false) market = m;
+  } catch (e: any) {
+    console.warn(`[ai-advisor] market fetch failed: ${e?.message}`);
+  }
+
+  const orderBook: OrderBook | null = market?.orderBook || null;
+  const candles15m: Candle[] = Array.isArray(market?.candles15m) ? market.candles15m : [];
+  const candles4h: Candle[] = Array.isArray(market?.candles4h) ? market.candles4h : [];
+  const livePrice = market?.currentPrice ? Number(market.currentPrice) : price;
+
+  let recentTrades: RecentTrade[] = [];
+  try {
+    const tr = await fetchRecentTrades(sym, 60);
+    if (tr.success) recentTrades = tr.trades;
+  } catch (e: any) {
+    console.warn(`[ai-advisor] recent trades fetch failed: ${e?.message}`);
+  }
+
+  let futures: FuturesMetrics = { success: false, source: "NONE" };
+  try {
+    futures = await fetchFuturesMetrics(sym);
+  } catch (e: any) {
+    console.warn(`[ai-advisor] futures metrics fetch failed: ${e?.message}`);
+  }
+
+  // technicals/mtf: pakai dari body kalau ada; kalau tidak, derivasi dari candles.
+  let technicals = (req.body && req.body.technicals) || (candles15m.length > 0 ? deriveTechnicals(candles15m, orderBook) : undefined);
+  let mtfLiquidity = (req.body && req.body.mtfLiquidity) || undefined;
+  if (!mtfLiquidity && candles15m.length > 0 && candles4h.length > 0) {
+    mtfLiquidity = analyzeMTFLiquidity(candles15m, candles4h, livePrice, "SPOT", orderBook || { bids: [], asks: [], spread: 0 });
+  }
+
+  // (b) Jalankan keel engine.
+  let keelDecision: any = null;
+  let rawSignal: any = null;
+  try {
+    const result = runKeelQuantEngine({
+      symbol: sym,
+      currentPrice: livePrice,
+      technicals,
+      mtfLiquidity,
+      orderBook: orderBook || undefined,
+      recentTrades,
+      futures,
+    });
+    keelDecision = result.decision;
+    rawSignal = result.rawSignalResult;
+  } catch (e: any) {
+    console.warn(`[ai-advisor] keel engine failed: ${e?.message}`);
+  }
+
+  // (c) Bangun keelSummary terverifikasi.
+  const fa: FuturesAnalysis | undefined = keelDecision?.futuresAnalysis;
+  const mtf: MTFLiquidityAnalysis | undefined = mtfLiquidity;
+  const liquidityDepthUsd =
+    rawSignal && typeof rawSignal.liquidityDepthUsd === "number" ? rawSignal.liquidityDepthUsd : null;
+
+  const keelSummary = {
+    action: String(keelDecision?.action ?? "HOLD"),
+    confidence: Number(keelDecision?.confidence ?? 50),
+    flow: rawSignal?.smartMoneyFlow ?? "NEUTRAL",
+    futuresBias: fa?.bias ?? "NEUTRAL",
+    fundingBps: fa?.fundingBps ?? null,
+    openInterestUsd: fa?.openInterestUsd ?? null,
+    lsrTaker: fa?.lsrTaker ?? null,
+    confluenceScore: rawSignal?.confluence?.score ?? keelDecision?.liquidityHuntAnalysis?.confluenceScore ?? null,
+    liquidityDepthUsd,
+    reasoning: String(keelDecision?.reasoning ?? "Tidak ada reasoning dari keel."),
+    discardedReason: rawSignal?.discardedReason ?? null,
+    mtfState: mtf
+      ? {
+          activeState: mtf.activeState,
+          nearestBSL: mtf.nearestBSL ? { midPrice: mtf.nearestBSL.midPrice, estimatedVolumeUSD: mtf.nearestBSL.estimatedVolumeUSD } : null,
+          nearestSSL: mtf.nearestSSL ? { midPrice: mtf.nearestSSL.midPrice, estimatedVolumeUSD: mtf.nearestSSL.estimatedVolumeUSD } : null,
+          recentSweep: mtf.recentSweep
+            ? { type: mtf.recentSweep.type, wickRejectionPercent: mtf.recentSweep.wickRejectionPercent, invalidationPrice: mtf.recentSweep.invalidationPrice }
+            : null,
+        }
+      : null,
+  };
+
+  const client = getGeminiClient();
+
+  // (d) Mode AI kalau Gemini tersedia.
+  if (client && keelDecision) {
+    const oc = body.onChainMetrics;
+    const mc = body.macroCalendar;
+    const prompt = `Anda adalah PENASIHAT finansial (advisor) dalam agent trading. Peran Anda: beri INSIGHT NARATIF untuk membantu manusia mengambil keputusan. Anda BUKAN eksekutor — jangan pernah memerintahkan eksekusi order, tidak ada trade yang dieksekusi dari output Anda.
+
+Aset: ${sym} | Harga saat ini: $${livePrice}
+
+RINGKASAN KEEL QUANT ENGINE (rule-based, sumber utama):
+- Aksi: ${keelSummary.action} | Confidence: ${keelSummary.confidence}%
+- Order flow (smart money): ${keelSummary.flow}
+- Bias futures: ${keelSummary.futuresBias} | Funding: ${keelSummary.fundingBps != null ? keelSummary.fundingBps.toFixed(2) + " bps" : "N/A"}
+- Open Interest: ${keelSummary.openInterestUsd != null ? "$" + (keelSummary.openInterestUsd / 1e6).toFixed(0) + "M" : "N/A"} | LSR Taker: ${keelSummary.lsrTaker ?? "N/A"}
+- Confluence: ${keelSummary.confluenceScore ?? "N/A"}% | Liquidity depth: ${keelSummary.liquidityDepthUsd != null ? "$" + (keelSummary.liquidityDepthUsd / 1000).toFixed(0) + "k" : "N/A"}
+- Reasoning keel: ${keelSummary.reasoning}
+- Filtered/discarded: ${keelSummary.discardedReason || "tidak ada"}
+
+MTF LIQUIDITY:
+- State: ${keelSummary.mtfState?.activeState || "N/A"}
+- BSL terdekat: ${keelSummary.mtfState?.nearestBSL ? "$" + keelSummary.mtfState.nearestBSL.midPrice : "N/A"}
+- SSL terdekat: ${keelSummary.mtfState?.nearestSSL ? "$" + keelSummary.mtfState.nearestSSL.midPrice : "N/A"}
+- Sweep terakhir: ${keelSummary.mtfState?.recentSweep ? keelSummary.mtfState.recentSweep.type + " (rejeksi " + keelSummary.mtfState.recentSweep.wickRejectionPercent + "%, invalidation $" + keelSummary.mtfState.recentSweep.invalidationPrice + ")" : "belum ada"}
+
+ON-CHAIN:
+- Netflow bursa 24h USD: ${oc?.exchangeNetflow24hUSD != null ? oc.exchangeNetflow24hUSD : "N/A"}
+- Smart money bias: ${oc?.smartMoneyBias || "N/A"} (confidence ${oc?.onChainConfidence ?? "N/A"}%)
+- MVRV Z-score: ${oc?.mvrvZScore ?? "N/A"} (${oc?.mvrvTerritory || "N/A"})
+- SOPR: ${oc?.sopr ?? "N/A"} (${oc?.soprStatus || "N/A"})
+- Whale: ${oc?.whaleAlerts?.[0] ? oc.whaleAlerts[0].type + " $" + (oc.whaleAlerts[0].usdValue / 1e6).toFixed(1) + "M" : "N/A"}
+
+MAKRO:
+- Sikap Fed: ${mc?.fedPolicyStance || "N/A"}
+- Indeks risiko makro: ${mc?.macroRiskIndex ?? "N/A"}/100
+- Event terdekat: ${mc?.nearestEvent ? mc.nearestEvent.name + " (" + mc.nearestEvent.relativeTime + ", impact " + mc.nearestEvent.impact + ")" : "N/A"}
+
+TUGAS:
+1. Beri INSIGHT NARATIF (3-6 kalimat Bahasa Indonesia): kenapa kondisi ini terjadi, apa risiko utama, dan level apa yang masuk akal untuk SL/TP serta apa yang harus user perhatikan.
+2. Sintesis keel + MTF + on-chain + makro menjadi satu narasi mudah dipahami, bukan baris data mentah.
+3. JANGAN perintah eksekusi/order. Ini murni pertimbangan buat user.
+
+Jawab HANYA JSON valid tanpa markdown wrapper:
+{
+  "insight": "string naratif 3-6 kalimat Bahasa Indonesia",
+  "suggestedBias": "BULLISH" | "BEARISH" | "NEUTRAL",
+  "keyLevels": { "entry": number|null, "stopLoss": number|null, "takeProfit": number|null },
+  "risks": ["string", "string", "string"] (1-3 item),
+  "caveat": "string"
+}`;
+
+    // Zod schema — semua optional kecuali insight.
+    const advisorSchema = z.object({
+      insight: z.string().min(5),
+      suggestedBias: z.enum(["BULLISH", "BEARISH", "NEUTRAL"]).optional(),
+      keyLevels: z
+        .object({
+          entry: z.number().nullable().optional(),
+          stopLoss: z.number().nullable().optional(),
+          takeProfit: z.number().nullable().optional(),
+        })
+        .optional(),
+      risks: z.array(z.string()).max(3).optional(),
+      caveat: z.string().optional(),
+    });
+
+    const candidateModels = ["gemini-2.0-flash", "gemini-1.5-flash"];
+    let responseText = "";
+    let usedModel = "";
+    let lastErr: any = null;
+    for (const model of candidateModels) {
+      try {
+        const aiResponse = await client.models.generateContent({
+          model,
+          contents: prompt,
+          config: { responseMimeType: "application/json", temperature: 0.3 },
+        });
+        if (aiResponse && aiResponse.text) {
+          responseText = aiResponse.text;
+          usedModel = model;
+          break;
+        }
+        lastErr = new Error(`model ${model} returned empty response`);
+      } catch (modelErr: any) {
+        lastErr = modelErr;
+        const msg = String(modelErr?.message || "");
+        if (/INVALID_MODEL|not found|does not exist|404/i.test(msg)) {
+          console.warn(`Gemini advisor model ${model} tidak valid, coba fallback...`);
+          continue;
+        }
+        throw modelErr;
+      }
+    }
+
+    if (responseText) {
+      try {
+        const parsed = JSON.parse(responseText);
+        const validation = advisorSchema.safeParse(parsed);
+        if (validation.success) {
+          const ai = validation.data;
+          return res.json({
+            success: true,
+            mode: "ai",
+            geminiConfigured: true,
+            model: usedModel,
+            timestamp: Date.now(),
+            keelSummary,
+            ai: {
+              insight: ai.insight,
+              suggestedBias: ai.suggestedBias,
+              keyLevels: ai.keyLevels,
+              risks: ai.risks || [],
+              caveat: ai.caveat || "",
+            },
+            latencyMs: Date.now() - startTime,
+          });
+        }
+        console.warn(`[ai-advisor] Gemini output gagal validasi: ${validation.error.message}`);
+      } catch (parseErr: any) {
+        console.warn(`[ai-advisor] Gemini output tidak valid JSON: ${parseErr?.message}`);
+      }
+    } else if (lastErr) {
+      console.warn(`[ai-advisor] Gemini gagal: ${lastErr?.message}`);
+    }
+
+    // Fallback ke mode keel jika Gemini gagal/respons invalid.
+  }
+
+  // (e) Mode keel: tanpa Gemini — insight deterministik singkat & jujur.
+  const connFlow = String(keelSummary.flow || "NEUTRAL");
+  const bias = String(keelSummary.futuresBias || "NEUTRAL");
+  const insightKeel =
+    keelSummary.action === "HOLD"
+      ? `Keel belum menemukan sinyal kuat. Flow ${connFlow}, bias futures ${bias}. ${keelSummary.discardedReason || "Belum ada konvergensi institusional."} Saran: tunggu, jangan paksa entry.`
+      : `Keel cenderung ${keelSummary.action} dengan confidence ${keelSummary.confidence}% (flow ${connFlow}, bias futures ${bias}). Tapi eksekusi TETAP keputusan Anda — periksa level SL/TP dan konfirmasi harga sebelum bertindak.`;
+
+  return res.json({
+    success: true,
+    mode: "keel",
+    geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"),
+    timestamp: Date.now(),
+    keelSummary,
+    ai: {
+      insight: `Mode AI nonaktif (GEMINI_API_KEY belum di-set). Berikut ringkasan data keel: ${insightKeel}`,
+      suggestedBias: keelSummary.action === "BUY" ? "BULLISH" : keelSummary.action === "SELL" ? "BEARISH" : "NEUTRAL",
+      risks: [],
+    },
+    latencyMs: Date.now() - startTime,
+  });
 });
 
 // Keel Context — satu sumber kebenaran server-side untuk mode KEEL local.

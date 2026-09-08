@@ -13,6 +13,7 @@ import { ArchitectureModal } from "./components/ArchitectureModal";
 import { KeyVaultModal } from "./components/KeyVaultModal";
 import { BrokerModal } from "./components/BrokerModal";
 import { KeelEnginePanel, KeelAnalysisResult } from "./components/KeelEnginePanel";
+import { AiAdvisorPanel } from "./components/AiAdvisorPanel";
 
 import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
 import { PaperTradingPanel } from "./components/PaperTradingPanel";
@@ -531,6 +532,17 @@ export default function App() {
             exchangeStatus={market.exchangeStatus}
             feedMode={market.feedMode}
             messageRate={market.messageRate}
+          />
+        )}
+
+        {/* 🧭 AI ADVISOR — insight naratif (keel+MTF+on-chain+macro); eksekusi tetap manual oleh user */}
+        {activeTab === "advisor" && (
+          <AiAdvisorPanel
+            symbol={symbol}
+            currentPrice={market.currentPrice}
+            onChainMetrics={onChainMetrics}
+            macroSummary={macroSummary}
+            geminiActive={geminiActive}
           />
         )}
       </main>

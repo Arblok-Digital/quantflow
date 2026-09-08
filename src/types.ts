@@ -4,15 +4,16 @@ export type MarketType = "FUTURES" | "SPOT";
 export type Timeframe = "1s" | "1m" | "5m" | "15m" | "1h" | "4h" | "1D" | "1W";
 
 /** Navigation tabs — each renders its panels exactly once (no cross-tab duplication). */
-export type ModuleTab = "dashboard" | "paper" | "analytics" | "feed";
+export type ModuleTab = "dashboard" | "paper" | "analytics" | "feed" | "advisor";
 
-export const MODULE_TABS: ModuleTab[] = ["dashboard", "paper", "analytics", "feed"];
+export const MODULE_TABS: ModuleTab[] = ["dashboard", "paper", "analytics", "feed", "advisor"];
 
 export const MODULE_TAB_LABELS: Record<ModuleTab, string> = {
   dashboard: "Dashboard",
   paper: "Paper",
   analytics: "Analytics",
   feed: "1s Feed",
+  advisor: "Advisor",
 };
 
 export interface Candle {

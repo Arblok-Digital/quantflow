@@ -29,6 +29,7 @@ const TAB_ACCENT: Record<ModuleTab, string> = {
   paper: "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40",
   analytics: "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40",
   feed: "bg-purple-500/20 text-purple-300 border border-purple-500/40",
+  advisor: "bg-teal-500/20 text-teal-300 border border-teal-500/40",
 };
 
 export const Header: React.FC<HeaderProps> = ({
