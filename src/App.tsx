@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Header } from "./components/Header";
+import { SubBar } from "./components/SubBar";
 import { MarketChart } from "./components/MarketChart";
 import { DecisionStream } from "./components/DecisionStream";
 import { LiquidityHuntPanel } from "./components/LiquidityHuntPanel";
@@ -17,11 +18,10 @@ import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
 import { PaperTradingPanel } from "./components/PaperTradingPanel";
 import { ExecutionConsole } from "./components/ExecutionConsole";
 import { PositionsPanel } from "./components/PositionsPanel";
-import { ScannerPanel } from "./components/ScannerPanel";
 import { ProbabilityBadge } from "./components/ProbabilityBadge";
 import { ReconciliationPanel } from "./components/ReconciliationPanel";
 
-import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig } from "./types";
+import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig, ModuleTab } from "./types";
 import { generateCandlesForTimeframe } from "./logic/indicators";
 
 import { fetchOnChainMetrics } from "./data/onchainData";
@@ -37,8 +37,6 @@ import { GuardrailsPanel } from "./components/GuardrailsPanel";
 import { useLiveMode } from "./hooks/useLiveMode";
 import { TradeJournalPanel } from "./components/TradeJournalPanel";
 
-type ModuleTab = "overview" | "paper" | "stream1s" | "onchain" | "macro";
-
 export default function App() {
   const auth = useAuth();
   const live = useLiveMode(auth.isAuthenticated);
@@ -46,7 +44,7 @@ export default function App() {
   const [symbol, setSymbol] = useState<string>("BTC/USDT");
   const [marketType, setMarketType] = useState<MarketType>("FUTURES");
   const [timeframe, setTimeframe] = useState<Timeframe>("15m");
-  const [activeTab, setActiveTab] = useState<ModuleTab>("overview");
+  const [activeTab, setActiveTab] = useState<ModuleTab>("dashboard");
   const [geminiActive, setGeminiActive] = useState<boolean>(true);
   const [isArchitectureOpen, setIsArchitectureOpen] = useState<boolean>(false);
   const [isAuditLedgerOpen, setIsAuditLedgerOpen] = useState<boolean>(false);
@@ -330,26 +328,9 @@ export default function App() {
           </span>
         </div>
       )}
-      {/* Top Bento Header with MarketType and Timeframe Controls */}
+
+      {/* Slim header: brand, exchange status, tabs, price, modal menu, live badge, logout */}
       <Header
-        symbol={symbol}
-        onSelectSymbol={setSymbol}
-        marketType={marketType}
-        onSelectMarketType={handleSelectMarketType}
-        timeframe={timeframe}
-        onSelectTimeframe={handleSelectTimeframe}
-        isAutoPilot={pipeline.isAutoPilot}
-        onToggleAutoPilot={pipeline.toggleAutoPilot}
-        onTriggerManualCycle={pipeline.runTradingCycle}
-        isEmergencyStop={riskConfig.isEmergencyStopActive}
-        onToggleEmergencyStop={() =>
-          setRiskConfig((prev) => ({ ...prev, isEmergencyStopActive: !prev.isEmergencyStopActive }))
-        }
-        onOpenArchitecture={() => setIsArchitectureOpen(true)}
-        onOpenAuditLedger={() => setIsAuditLedgerOpen(true)}
-        onOpenKeyVault={() => setIsKeyVaultOpen(true)}
-        onOpenBroker={() => setIsBrokerOpen(true)}
-        isAnalyzing={pipeline.isAnalyzing}
         geminiActive={geminiActive}
         currentPrice={market.currentPrice}
         priceDelta={market.priceDelta}
@@ -364,115 +345,105 @@ export default function App() {
         isLiveArmed={live.armedForLive}
         liveMode={live.mode}
         liveEquity={live.equity}
+        onOpenArchitecture={() => setIsArchitectureOpen(true)}
+        onOpenAuditLedger={() => setIsAuditLedgerOpen(true)}
+        onOpenKeyVault={() => setIsKeyVaultOpen(true)}
+        onOpenBroker={() => setIsBrokerOpen(true)}
         onLogout={auth.logout}
       />
 
-      {/* Main Content Bento Grid */}
+      {/* Contextual sub-bar: pair, market type, timeframe, scan/auto/kill */}
+      <SubBar
+        symbol={symbol}
+        onSelectSymbol={setSymbol}
+        marketType={marketType}
+        onSelectMarketType={handleSelectMarketType}
+        timeframe={timeframe}
+        onSelectTimeframe={handleSelectTimeframe}
+        isAutoPilot={pipeline.isAutoPilot}
+        onToggleAutoPilot={pipeline.toggleAutoPilot}
+        onTriggerManualCycle={pipeline.runTradingCycle}
+        isEmergencyStop={riskConfig.isEmergencyStopActive}
+        onToggleEmergencyStop={() =>
+          setRiskConfig((prev) => ({ ...prev, isEmergencyStopActive: !prev.isEmergencyStopActive }))
+        }
+        isAnalyzing={pipeline.isAnalyzing}
+      />
+
+      {/* Main Content — each tab renders its panels exactly once */}
       <main className="flex-1 p-3 sm:p-5 max-w-7xl w-full mx-auto space-y-4">
-        {/* Knowledge & Data Feeder Status Bar */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 sm:gap-3">
-          {/* 1s Micro Stream Pillar (For ML Features) */}
-          <div
-            onClick={() => setActiveTab("stream1s")}
-            className={`bg-zinc-900/80 hover:bg-zinc-900 border rounded-xl p-3 flex items-center justify-between cursor-pointer transition ${
-              activeTab === "stream1s" ? "border-amber-500/80 bg-zinc-900" : "border-zinc-800 hover:border-amber-500/40"
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
-              <div className="min-w-0">
-                <span className="text-[10px] uppercase font-mono text-zinc-400 block font-semibold truncate">
-                  1s Feed &bull; ML Features
-                </span>
-                <span className="text-xs font-mono font-bold text-amber-400 truncate block">
-                  {market.microTicks.length} Ticks &bull; 1000ms
-                </span>
-              </div>
-            </div>
-            <span className="text-[10px] font-mono text-zinc-400 ml-1 shrink-0">&rarr;</span>
-          </div>
+        {/* 📊 DASHBOARD */}
+        {activeTab === "dashboard" && (
+          <>
+            {/* Real-time MTF Feeder Chart with Liquidation Hunt Bands */}
+            <MarketChart
+              candles={activeDisplayCandles}
+              symbol={symbol}
+              technicals={market.technicals}
+              orderBook={market.orderBook}
+              currentPrice={market.currentPrice}
+              mtfLiquidity={market.mtfLiquidity}
+              timeframe={timeframe}
+              onSelectTimeframe={handleSelectTimeframe}
+              candlesByTimeframe={market.candlesByTimeframe}
+              feedMode={market.feedMode}
+              exchangeStatus={market.exchangeStatus}
+            />
 
-          {/* Paper Trading & Cashflow Pillar */}
-          <div
-            onClick={() => setActiveTab("paper")}
-            className={`bg-zinc-900/80 hover:bg-zinc-900 border rounded-xl p-3 flex items-center justify-between cursor-pointer transition ${
-              activeTab === "paper" ? "border-emerald-500/80 bg-zinc-900" : "border-zinc-800 hover:border-emerald-500/40"
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  floatingPnl >= 0 ? "bg-emerald-400" : "bg-rose-500"
-                }`}
+            {/* Decision Engine Stream + LIVE Guardrails (server truth): 2-col */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <DecisionStream
+                decision={pipeline.latestDecision}
+                technicals={market.technicals}
+                currentPrice={market.currentPrice}
+                symbol={symbol}
+                isAnalyzing={pipeline.isAnalyzing}
+                mtfLiquidity={market.mtfLiquidity}
               />
-              <div className="min-w-0">
-                <span className="text-[10px] uppercase font-mono text-zinc-400 block font-semibold truncate">
-                  Paper Mode &bull; {openPositionsCount} Pos
-                </span>
-                <span
-                  className={`text-xs font-mono font-bold truncate block ${
-                    floatingPnl >= 0 ? "text-emerald-400" : "text-rose-400"
-                  }`}
-                >
-                  Float {floatingPnl >= 0 ? "+" : ""}${floatingPnl.toFixed(2)}
-                </span>
-              </div>
+              <GuardrailsPanel />
             </div>
-            <span className="text-[10px] font-mono text-zinc-400 ml-1 shrink-0">&rarr;</span>
-          </div>
 
-          {/* On-Chain Whale Pillar */}
-          <div
-            onClick={() => setActiveTab("onchain")}
-            className={`bg-zinc-900/80 hover:bg-zinc-900 border rounded-xl p-3 flex items-center justify-between cursor-pointer transition ${
-              activeTab === "onchain" ? "border-emerald-500/80 bg-zinc-900" : "border-zinc-800 hover:border-emerald-500/40"
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0" />
-              <div className="min-w-0">
-                <span className="text-[10px] uppercase font-mono text-zinc-400 block font-semibold truncate">
-                  On-Chain Whale Netflow
-                </span>
-                <span className="text-xs font-mono font-bold text-emerald-400 truncate block">
-                  {onChainMetrics.smartMoneyBias.replace("_", " ")} ({onChainMetrics.exchangeNetflow24hUSD > 0 ? "+" : ""}
-                  {onChainMetrics.exchangeNetflow24hUSD}M)
-                </span>
-              </div>
-            </div>
-            <span className="text-[10px] font-mono text-zinc-400 ml-1 shrink-0">&rarr;</span>
-          </div>
+            {/* Institutional Quant Engine (full width) */}
+            <KeelEnginePanel result={keelResult} loading={keelLoading} onAnalyze={runKeelSignal} />
 
-          {/* Macro Catalyst Pillar */}
-          <div
-            onClick={() => setActiveTab("macro")}
-            className={`bg-zinc-900/80 hover:bg-zinc-900 border rounded-xl p-3 flex items-center justify-between cursor-pointer transition ${
-              activeTab === "macro" ? "border-blue-500/80 bg-zinc-900" : "border-zinc-800 hover:border-blue-500/40"
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  macroSummary.macroRiskIndex > 70 ? "bg-rose-500" : "bg-amber-400"
-                }`}
+            {/* Risk Management + Probability Badge: 2-col */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <RiskManagementPanel
+                config={riskConfig}
+                onChangeConfig={setRiskConfig}
+                lastEvaluation={pipeline.lastRiskEvaluation}
+                currentDrawdown={paper.portfolio.currentDrawdownPercent}
               />
-              <div className="min-w-0">
-                <span className="text-[10px] uppercase font-mono text-zinc-400 block font-semibold truncate">
-                  Macro ({macroSummary.nearestEvent?.relativeTime})
-                </span>
-                <span className="text-xs font-mono font-bold text-zinc-100 truncate block">
-                  {macroSummary.nearestEvent?.name}
-                </span>
-              </div>
+              <ProbabilityBadge
+                currentPrice={market.currentPrice}
+                probInput={{
+                  confluenceScore: market.mtfLiquidity.confluenceScore / 100,
+                  absorptionScore: 50,
+                  wallAction: "NONE",
+                  spreadPct: market.orderBook.spread,
+                  imbalance: market.technicals.orderBookImbalance,
+                }}
+                side="LONG"
+                stopLoss={paper.positions[0]?.stopLoss ?? pipeline.latestDecision?.stopLoss ?? null}
+                takeProfit={paper.positions[0]?.takeProfit ?? pipeline.latestDecision?.takeProfit ?? null}
+              />
             </div>
-            <span className="text-[10px] font-mono text-zinc-400 ml-1 shrink-0">&rarr;</span>
-          </div>
-        </div>
 
-        {/* Dynamic Views according to Active Tab */}
+            {/* Swing Execution Metrics & Modular Pipeline Telemetry */}
+            <ExecutionMetrics
+              portfolio={paper.portfolio}
+              positions={paper.positions}
+              latestLatency={pipeline.latestLatency}
+              onClosePosition={paper.closePosition}
+              averageSlippageBps={typeof avgSlippageDisplay === "number" ? avgSlippageDisplay : 0}
+              closedTrades={paper.closedTrades}
+            />
+          </>
+        )}
+
+        {/* 💰 PAPER TRADING */}
         {activeTab === "paper" && (
           <>
-            {/* Server-backed execution & positions (roadmap 1.7-1.9) */}
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-xs font-mono uppercase tracking-wider text-amber-400 font-semibold">
                 Server-Backed Execution &amp; Positions
@@ -499,13 +470,38 @@ export default function App() {
               onSimulateTradeEntry={paper.simulateTradeEntry}
               actionableRunKeel={runKeelSignal}
             />
-            <KeelEnginePanel result={keelResult} loading={keelLoading} onAnalyze={runKeelSignal} />
 
             <TradeJournalPanel />
           </>
         )}
 
-        {activeTab === "stream1s" && (
+        {/* 📈 ANALYTICS (on-chain + macro merged) */}
+        {activeTab === "analytics" && (
+          <>
+            {/* MTF Liquidity Hunt Radar Panel (full width) */}
+            <LiquidityHuntPanel
+              mtfLiquidity={market.mtfLiquidity}
+              currentPrice={market.currentPrice}
+              marketType={marketType}
+              timeframe={timeframe}
+              orderBook={market.orderBook}
+            />
+
+            {/* On-Chain + Macro: 2-col */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <OnChainPanel metrics={onChainMetrics} onRefresh={() => handleRefreshOnChain()} />
+              <MacroCalendarPanel
+                macro={macroSummary}
+                onRefresh={() => setMacroSummary(fetchMacroCalendar())}
+              />
+            </div>
+
+            <ReconciliationPanel />
+          </>
+        )}
+
+        {/* ⚡ 1s FEED */}
+        {activeTab === "feed" && (
           <Realtime1sMLFeed
             ticks={market.microTicks}
             currentPrice={market.currentPrice}
@@ -515,150 +511,11 @@ export default function App() {
             messageRate={market.messageRate}
           />
         )}
-
-        {activeTab === "overview" && (
-          <>
-            {/* Real-time MTF Feeder Chart with Liquidation Hunt Bands */}
-            <MarketChart
-              candles={activeDisplayCandles}
-              symbol={symbol}
-              technicals={market.technicals}
-              orderBook={market.orderBook}
-              currentPrice={market.currentPrice}
-              mtfLiquidity={market.mtfLiquidity}
-              timeframe={timeframe}
-              onSelectTimeframe={handleSelectTimeframe}
-              candlesByTimeframe={market.candlesByTimeframe}
-              feedMode={market.feedMode}
-              exchangeStatus={market.exchangeStatus}
-            />
-
-            {/* MTF Liquidity Hunt Radar Panel */}
-            <LiquidityHuntPanel
-              mtfLiquidity={market.mtfLiquidity}
-              currentPrice={market.currentPrice}
-              marketType={marketType}
-              timeframe={timeframe}
-              orderBook={market.orderBook}
-            />
-
-            <ScannerPanel currentSymbol={symbol} onSelectSymbol={setSymbol} />
-
-            {/* Decision Engine Stream + LIVE Guardrails (server truth) */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <DecisionStream
-                decision={pipeline.latestDecision}
-                technicals={market.technicals}
-                currentPrice={market.currentPrice}
-                symbol={symbol}
-                isAnalyzing={pipeline.isAnalyzing}
-                mtfLiquidity={market.mtfLiquidity}
-              />
-
-              <GuardrailsPanel />
-            </div>
-            <ProbabilityBadge
-              currentPrice={market.currentPrice}
-              probInput={{
-                confluenceScore: market.mtfLiquidity.confluenceScore / 100,
-                absorptionScore: 50,
-                wallAction: "NONE",
-                spreadPct: market.orderBook.spread,
-                imbalance: market.technicals.orderBookImbalance,
-              }}
-              side="LONG"
-              stopLoss={paper.positions[0]?.stopLoss ?? pipeline.latestDecision?.stopLoss ?? null}
-              takeProfit={paper.positions[0]?.takeProfit ?? pipeline.latestDecision?.takeProfit ?? null}
-            />
-
-            {/* Legacy RiskManagementPanel kept below as secondary card */}
-            <RiskManagementPanel
-              config={riskConfig}
-              onChangeConfig={setRiskConfig}
-              lastEvaluation={pipeline.lastRiskEvaluation}
-              currentDrawdown={paper.portfolio.currentDrawdownPercent}
-            />
-
-            {/* Integrated On-Chain & Macro Side-by-Side Bento Row */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <OnChainPanel
-                metrics={onChainMetrics}
-                onRefresh={() => handleRefreshOnChain()}
-              />
-              <MacroCalendarPanel
-                macro={macroSummary}
-                onRefresh={() => setMacroSummary(fetchMacroCalendar())}
-              />
-            </div>
-
-            <KeelEnginePanel result={keelResult} loading={keelLoading} onAnalyze={runKeelSignal} />
-
-            <ReconciliationPanel />
-
-            {/* Swing Execution Metrics & Modular Pipeline Telemetry */}
-            <ExecutionMetrics
-              portfolio={paper.portfolio}
-              positions={paper.positions}
-              latestLatency={pipeline.latestLatency}
-              onClosePosition={paper.closePosition}
-              averageSlippageBps={typeof avgSlippageDisplay === "number" ? avgSlippageDisplay : 0}
-              closedTrades={paper.closedTrades}
-            />
-
-            <TradeJournalPanel />
-          </>
-        )}
-
-        {activeTab === "onchain" && (
-          <div className="space-y-4">
-            <OnChainPanel
-              metrics={onChainMetrics}
-              onRefresh={() => handleRefreshOnChain()}
-            />
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <DecisionStream
-                decision={pipeline.latestDecision}
-                technicals={market.technicals}
-                currentPrice={market.currentPrice}
-                symbol={symbol}
-                isAnalyzing={pipeline.isAnalyzing}
-                mtfLiquidity={market.mtfLiquidity}
-              />
-              <LiquidityHuntPanel
-                mtfLiquidity={market.mtfLiquidity}
-                currentPrice={market.currentPrice}
-                marketType={marketType}
-                timeframe={timeframe}
-                orderBook={market.orderBook}
-              />
-            </div>
-          </div>
-        )}
-
-        {activeTab === "macro" && (
-          <div className="space-y-4">
-            <MacroCalendarPanel
-              macro={macroSummary}
-              onRefresh={() => setMacroSummary(fetchMacroCalendar())}
-            />
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <DecisionStream
-                decision={pipeline.latestDecision}
-                technicals={market.technicals}
-                currentPrice={market.currentPrice}
-                symbol={symbol}
-                isAnalyzing={pipeline.isAnalyzing}
-                mtfLiquidity={market.mtfLiquidity}
-              />
-              <GuardrailsPanel />
-            </div>
-          </div>
-        )}
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-zinc-800/80 bg-zinc-950 px-4 py-3 text-center text-xs font-mono text-zinc-400">
-        AI Trading Agent Pipeline &bull; Gemini 3.8 Flash Decision Engine &bull; MTF Liquidity Hunt Indicator &bull; Non-custodial AES-GCM Vault &bull; SHA-256 Tamper-evident Audit Ledger
+      <footer className="border-t border-zinc-800/80 bg-zinc-950 px-4 py-2 text-center text-xs font-mono text-zinc-400">
+        AI Trading Agent Pipeline • Gemini 3.8 Flash • MTF Liquidity Hunt • Non-custodial AES-GCM Vault • SHA-256 Audit Ledger
       </footer>
 
       {/* Interactive Modals */}
