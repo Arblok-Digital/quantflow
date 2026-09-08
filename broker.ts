@@ -392,10 +392,16 @@ export async function clearBrokerCredentials(): Promise<void> {
 
 export async function setLiveArmed(armed: boolean): Promise<void> {
   if (process.env.TRADING_MODE !== "live") {
-    throw Object.assign(new Error("ARM_REQUIRES_LIVE_AND_CREDENTIALS: TRADING_MODE must be 'live' and credentials configured to arm."), { code: "ARM_REQUIRES_LIVE_AND_CREDENTIALS" });
-  }
-  if (!hasBrokerCredentials()) {
-    throw Object.assign(new Error("ARM_REQUIRES_LIVE_AND_CREDENTIALS: credentials not configured."), { code: "ARM_REQUIRES_LIVE_AND_CREDENTIALS" });
+    // PAPER MODE: arm/disarm adalah simulasi — boleh set flag (tidak mengirim order real).
+    // `canPlaceLiveOrders` tetap false karena mode !== live; jadi ini aman.
+    if (armed && !hasBrokerCredentials()) {
+      // Di paper, credentials tidak wajib untuk arm simulasi. Log saja.
+      console.warn("[vault] ARM di paper mode (simulasi) — tanpa credentials live. Amankan: tidak ada order real dikirim.");
+    }
+  } else {
+    if (armed && !hasBrokerCredentials()) {
+      throw Object.assign(new Error("ARM_REQUIRES_LIVE_AND_CREDENTIALS: credentials not configured."), { code: "ARM_REQUIRES_LIVE_AND_CREDENTIALS" });
+    }
   }
   const raw = loadSecretsFileRaw();
   // If no vault file exists yet but credentials are from env, we still need to persist liveArmed
@@ -411,7 +417,11 @@ export async function setLiveArmed(armed: boolean): Promise<void> {
   } catch {}
   if (armed) {
     console.log("\n" + "=".repeat(60));
-    console.log("🔴 LIVE TRADING ARMED — orders will go to the exchange");
+    if (process.env.TRADING_MODE === "live") {
+      console.log("🔴 LIVE TRADING ARMED — orders will go to the exchange");
+    } else {
+      console.log("🟡 PAPER SIMULATION ARMED — orders go to paper book (aman)");
+    }
     console.log("=".repeat(60) + "\n");
   } else {
     console.log("[vault] Live trading disarmed.");
