@@ -718,9 +718,9 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
       });
 
       // Coba model primary, lalu fallback pada INVALID_MODEL (4.2).
-      const candidateModels = ["gemini-2.0-flash", "gemini-1.5-flash"];
+      const candidateModels = ["gemini-3-flash-preview", "gemini-3.5-flash-lite"];
       let responseText: string = "{}";
-      let usedModel = "gemini-2.0-flash";
+      let usedModel = "gemini-3-flash-preview";
       let lastErr: any = null;
       for (const model of candidateModels) {
         try {
@@ -1259,7 +1259,7 @@ Jawab HANYA JSON valid tanpa markdown wrapper:
       caveat: z.string().optional(),
     });
 
-    const candidateModels = ["gemini-2.0-flash", "gemini-1.5-flash"];
+    const candidateModels = ["gemini-3-flash-preview", "gemini-3.5-flash-lite"];
     let responseText = "";
     let usedModel = "";
     let lastErr: any = null;
