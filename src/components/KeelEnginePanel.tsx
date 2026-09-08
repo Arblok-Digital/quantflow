@@ -96,6 +96,74 @@ export const KeelEnginePanel: React.FC<KeelEnginePanelProps> = ({ result, loadin
               )}
             </div>
 
+            {/* KESIMPULAN / VERDICT */}
+            {(() => {
+              const a = String(result.action || "HOLD").toUpperCase();
+              const isLong = a === "BUY" || a === "LONG";
+              const isShort = a === "SELL" || a === "SHORT";
+              const isHold = a === "HOLD" || (!isLong && !isShort);
+              const dirLabel = isLong ? "LONG" : isShort ? "SHORT" : "NETRAL";
+              const dirColor = isLong ? "emerald" : isShort ? "rose" : "amber";
+              const riskPassed = result.riskGate?.passed !== false;
+              const riskBlocked = !!(result.riskGate && !result.riskGate.passed);
+              const conf = Math.round(Number(result.confidence || 0));
+
+              let recLabel: string;
+              let recCls: string;
+              if (isHold) {
+                recLabel = "TUNGGU SINYAL";
+                recCls = "bg-amber-500/15 text-amber-400 border-amber-500/30";
+              } else if (riskBlocked) {
+                recLabel = "JANGAN EKSEKUSI";
+                recCls = "bg-rose-500/15 text-rose-400 border-rose-500/30";
+              } else {
+                recLabel = "SIAP EKSEKUSI";
+                recCls = "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
+              }
+
+              const entry = result.targetPrice ?? ((result.stopLoss ?? 0) + (result.takeProfit ?? 0)) / 2;
+              const rPct = result.stopLoss != null && entry > 0 ? Math.abs(entry - result.stopLoss) / entry * 100 : null;
+              const vPct = result.takeProfit != null && entry > 0 ? Math.abs(result.takeProfit - entry) / entry * 100 : null;
+
+              const fmtP = (n: number) => `$${Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+              let conclusion: string;
+              if (isHold) {
+                const flow = result.rawSignal?.smartMoneyFlow ?? "tidak diketahui";
+                const liq = result.rawSignal?.liquidityDepthUsd != null ? `$${(Number(result.rawSignal.liquidityDepthUsd) / 1000).toFixed(1)}k` : "tidak diketahui";
+                const discarded = result.rawSignal?.discardedReason ?? "tidak ada sinyal spesifik";
+                conclusion = `Belum ada sinyal institusional yang kuat. Flow ${flow}, kedalaman likuiditas ${liq}. ${discarded}. Saran: tunggu, jangan paksa entry.`;
+              } else {
+                const dir = isLong ? "LONG" : "SHORT";
+                const slStr = result.stopLoss != null ? fmtP(result.stopLoss) : "—";
+                const tpStr = result.takeProfit != null ? fmtP(result.takeProfit) : "—";
+                const rStr = rPct != null ? `-${rPct.toFixed(1)}%` : "";
+                const vStr = vPct != null ? `+${vPct.toFixed(1)}%` : "";
+                const riskWord = riskPassed ? "lolos" : "DIBLOKIR";
+                const reasoningShort = result.reasoning ? (result.reasoning.length > 120 ? result.reasoning.slice(0, 117) + "..." : result.reasoning) : "";
+                conclusion = `Cenderung ${dir} dengan confidence ${conf}%. Masuk sekitar ${fmtP(entry)}, Stop Loss ${slStr} ${rStr}, Target ${tpStr} ${vStr}. Risk gate ${riskWord}.${reasoningShort ? " " + reasoningShort : ""}`;
+              }
+
+              const bdr: Record<string, string> = { emerald: "border-emerald-500/30", rose: "border-rose-500/30", amber: "border-amber-500/30" };
+              const txt: Record<string, string> = { emerald: "text-emerald-400", rose: "text-rose-400", amber: "text-amber-400" };
+
+              return (
+                <div className={`rounded-xl bg-zinc-950/70 border ${bdr[dirColor]} p-4 space-y-3`}>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className={`text-4xl font-black font-mono ${txt[dirColor]}`}>{dirLabel}</span>
+                    <span className={`inline-flex items-center px-3 py-1.5 rounded-lg border text-xs font-bold font-mono ${recCls}`}>{recLabel}</span>
+                    <span className="text-xs font-mono text-zinc-500 ml-auto">{conf}% confidence</span>
+                  </div>
+                  {riskBlocked && result.riskGate?.reasons && result.riskGate.reasons.length > 0 && (
+                    <div className="px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs font-mono">
+                      {result.riskGate.reasons.join("; ")}
+                    </div>
+                  )}
+                  <p className="text-sm text-zinc-300 leading-relaxed font-sans">{conclusion}</p>
+                </div>
+              );
+            })()}
+
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs">
               <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
                 <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Target Price</span>

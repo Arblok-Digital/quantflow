@@ -191,21 +191,6 @@ export default function App() {
           inferenceLatencyMs: Number(data.inferenceLatencyMs ?? d.inferenceLatencyMs ?? 0) || undefined,
           promptSummary: data.promptSummary ? String(data.promptSummary) : d.promptSummary ? String(d.promptSummary) : `policy=keel-quant symbol=${symbol} price=${market.currentPrice}`,
         });
-        pipeline.injectDecision({
-          action: d.action,
-          confidence: Number(d.confidence ?? 0),
-          targetPrice: Number(d.targetPrice ?? market.currentPrice),
-          stopLoss: Number(d.stopLoss ?? 0),
-          takeProfit: Number(d.takeProfit ?? 0),
-          positionSizePercent: Number(d.positionSizePercent ?? 0),
-          reasoning: String(d.reasoning ?? ""),
-          source: d.source || "keel-institutional-quant",
-          inferenceLatencyMs: Number(data.inferenceLatencyMs ?? 0),
-          promptSummary: data.promptSummary || `policy=keel-quant symbol=${symbol} price=${market.currentPrice}`,
-          liquidityHuntAnalysis: data.liquidityHuntAnalysis,
-          onChainContext: data.onChainContext,
-          macroContext: data.macroContext,
-        } as any);
       }
       console.log("Full Keel Analysis:", data);
     } catch (err) {
@@ -214,7 +199,7 @@ export default function App() {
       setKeelLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, market.currentPrice, pipeline.injectDecision]);
+  }, [symbol, market.currentPrice]);
 
   // --- Health & Gemini status ---
   useEffect(() => {
