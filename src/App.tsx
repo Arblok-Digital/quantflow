@@ -165,7 +165,24 @@ export default function App() {
       });
       const data = await res.json();
       if (data?.decision) {
-        alert(`[Keel Engine] Signal: ${data.decision.action}\nConfidence: ${data.decision.confidence}%\nReasoning: ${data.decision.reasoning}`);
+        // Render hasil keel ke panel decision (bukan cuma alert) — mapping ke LLMDecision
+        const d = data.decision;
+        pipeline.injectDecision({
+          action: d.action,
+          confidence: Number(d.confidence ?? 0),
+          targetPrice: Number(d.targetPrice ?? market.currentPrice),
+          stopLoss: Number(d.stopLoss ?? 0),
+          takeProfit: Number(d.takeProfit ?? 0),
+          positionSizePercent: Number(d.positionSizePercent ?? 0),
+          reasoning: String(d.reasoning ?? ""),
+          source: d.source || "keel-institutional-quant",
+          inferenceLatencyMs: Number(data.inferenceLatencyMs ?? 0),
+          promptSummary: data.promptSummary || `policy=keel-quant symbol=${symbol} price=${market.currentPrice}`,
+          liquidityHuntAnalysis: data.liquidityHuntAnalysis,
+          onChainContext: data.onChainContext,
+          macroContext: data.macroContext,
+        } as any);
+        alert(`[Keel Engine] Signal: ${d.action}\nConfidence: ${d.confidence}%\nReasoning: ${d.reasoning}`);
       } else {
         alert(`[Keel Engine] ${data?.message || "Tidak ada decision (mungkin data tidak cukup)"}`);
       }
@@ -174,7 +191,8 @@ export default function App() {
       console.error("Keel signal error:", err);
       alert(`[Keel Engine] Error: ${(err as Error).message}`);
     }
-  }, [symbol, market.currentPrice]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, market.currentPrice, pipeline.injectDecision]);
 
   // --- Health & Gemini status ---
   useEffect(() => {

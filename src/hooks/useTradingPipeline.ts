@@ -123,11 +123,18 @@ export function useTradingPipeline(options: UseTradingPipelineOptions) {
     setIsAutoPilot((v) => !v);
   }, []);
 
+  // External injection: hasil analisis (mis. Keel Engine/OC) bisa di-render
+  // ke panel tanpa harus lewat full pipeline cycle.
+  const injectDecision = useCallback((d: LLMDecision) => {
+    setLatestDecision(d);
+  }, []);
+
   return {
     isAnalyzing,
     isAutoPilot,
     toggleAutoPilot,
     latestDecision,
+    injectDecision,
     lastRiskEvaluation,
     latestLatency,
     runTradingCycle,
