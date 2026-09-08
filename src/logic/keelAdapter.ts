@@ -115,11 +115,45 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
     }
   }
 
+  // LIMITATION: `TechnicalIndicators` (src/types.ts) TIDAK punya field per-timeframe
+  // (hanya satu set datar: rsi/ema20/ema50/macd/orderBookImbalance). Karena itu kita
+  // TIDAK bisa membaca bias independent per-TF dari technicals. Strategi yang dipakai
+  // agar confluence-matrix tidak "bias total 100%" secara artifisial:
+  //   - m15 & h1  → bias konteks likuiditas (mtfLiquidity.activeState) — frame yang
+  //                 sedang "hunting/sweep" (konteks 15m futures / 4h spot).
+  //   - h4  & d1  → bias teknis dari satu set technicals datar (RSI/EMA/MACD/orderbook)
+  //                 sebagai proxy arah trend makro. Bukan fabricate per-TF: ini derivasi
+  //                 jujur dari indikator riil, hanya tidak bisa dibedakan per-frame.
+  //
+  // Jadi m15/h1 vs h4/d1 memang punya basis data berbeda → skor confluence tidak lagi
+  // selalu 100% (bug), tanpa mengarang angka yang tak ada di input.
+
+  // Bias teknis makro untuk frame tinggi (h4/d1) — RSI/EMA cross/trend/MACD/orderbook.
+  let techBias: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
+  if (input.technicals) {
+    const t = input.technicals;
+    let score = 0;
+    if (t.rsi < 30) score += 1;
+    else if (t.rsi > 70) score -= 1;
+    else if (t.rsi < 45) score += 1;
+    else if (t.rsi > 55) score -= 1;
+    if (t.ema20 != null && t.ema50 != null) {
+      if (t.ema20 > t.ema50) score += 1;
+      else if (t.ema20 < t.ema50) score -= 1;
+    }
+    if (t.macd && t.macd.histogram > 0) score += 1;
+    else if (t.macd && t.macd.histogram < 0) score -= 1;
+    if (t.orderBookImbalance > 1) score += 1;
+    else if (t.orderBookImbalance < 1) score -= 1;
+    if (score >= 2) techBias = "BULLISH";
+    else if (score <= -2) techBias = "BEARISH";
+  }
+
   const mtfBias: MtfVector = {
     m15: biasVal,
     h1: biasVal,
-    h4: biasVal,
-    d1: biasVal,
+    h4: techBias,
+    d1: techBias,
   };
 
   if (!hasRealDepth) {

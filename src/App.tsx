@@ -21,7 +21,7 @@ import { PositionsPanel } from "./components/PositionsPanel";
 import { ProbabilityBadge } from "./components/ProbabilityBadge";
 import { ReconciliationPanel } from "./components/ReconciliationPanel";
 
-import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig, ModuleTab } from "./types";
+import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig, ModuleTab, OrderBook } from "./types";
 import { generateCandlesForTimeframe } from "./logic/indicators";
 
 import { fetchOnChainMetrics } from "./data/onchainData";
@@ -32,10 +32,12 @@ import { usePaperTrading } from "./hooks/usePaperTrading";
 import { useMarketData } from "./hooks/useMarketData";
 import { useTradingPipeline } from "./hooks/useTradingPipeline";
 import { useAuth, authFetch } from "./hooks/useAuth";
+import { evaluateTradingDecision } from "./logic/decisionEngine";
 import { LoginGate } from "./components/LoginGate";
 import { GuardrailsPanel } from "./components/GuardrailsPanel";
 import { useLiveMode } from "./hooks/useLiveMode";
 import { TradeJournalPanel } from "./components/TradeJournalPanel";
+import type { RecentTrade, FuturesMetrics } from "./data/marketFetcher";
 
 export default function App() {
   const auth = useAuth();
@@ -52,6 +54,41 @@ export default function App() {
   const [isBrokerOpen, setIsBrokerOpen] = useState<boolean>(false);
   const [keelResult, setKeelResult] = useState<KeelAnalysisResult | null>(null);
   const [keelLoading, setKeelLoading] = useState<boolean>(false);
+
+  // Keel Context — data order-flow + futures yang di-fetch server-side (endpoint
+  // /api/market/keel-context), di-refresh per-menit / saat symbol berubah.
+  // Hanya dibutuhkan mode KEEL (gemini non-aktif); AI mode tidak memakainya.
+  const [keelContext, setKeelContext] = useState<{
+    orderBook?: OrderBook;
+    recentTrades?: RecentTrade[];
+    futures?: FuturesMetrics;
+  }>({});
+
+  const refreshKeelContext = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/market/keel-context?symbol=${encodeURIComponent(symbol)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setKeelContext({
+        orderBook: data.orderBook ?? undefined,
+        recentTrades: data.recentTrades ?? undefined,
+        futures: data.futures ?? undefined,
+      });
+    } catch (err) {
+      // Fail-closed jujur: kalau fetch gagal, lanjut tanpa data (keel HOLD).
+      console.warn("Keel context fetch failed:", err);
+    }
+  }, [symbol]);
+
+  // Refresh saat symbol berubah + tiap menit ketika mode KEEL aktif. Pipeline
+  // 5s-tick tetap bebas fetch (data sedikit stale ok — keel toleran).
+  useEffect(() => {
+    if (!geminiActive) {
+      refreshKeelContext();
+      const iv = setInterval(refreshKeelContext, 60000);
+      return () => clearInterval(iv);
+    }
+  }, [symbol, geminiActive, refreshKeelContext]);
 
   // --- Risk Config (cross-cutting, diedit via RiskManagementPanel) ---
   const [riskConfig, setRiskConfig] = useState<RiskConfig>({
@@ -149,6 +186,9 @@ export default function App() {
     onPositionOpened: paper.addPosition,
     onPortfolioUpdated: paper.commitPortfolio,
     orderBook: market.orderBook,
+    recentTrades: keelContext.recentTrades,
+    futures: keelContext.futures,
+    aiEnabled: geminiActive,
   });
 
   // Tombol "Sinkronisasi" OnChainPanel: refetch snapshot real lalu rebuild metrics.
@@ -160,42 +200,38 @@ export default function App() {
   const runKeelSignal = useCallback(async () => {
     setKeelLoading(true);
     try {
-      const res = await authFetch("/api/keel/signal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, currentPrice: market.currentPrice }),
+      const decision = await evaluateTradingDecision({
+        symbol,
+        currentPrice: market.currentPrice,
+        candles: timeframe === "4h" ? market.candles4h : market.candles15m,
+        technicals: market.technicals,
+        mtfLiquidity: market.mtfLiquidity,
+        onChainMetrics,
+        macroCalendar: macroSummary,
+        activePositions: paper.positions,
+        portfolioEquity: paper.portfolio.equity,
+        riskConfig,
+        aiEnabled: geminiActive,
+        orderBook: market.orderBook,
+        recentTrades: keelContext.recentTrades,
+        futures: keelContext.futures,
       });
-      const data = await res.json();
-      if (data?.decision) {
-        const d = data.decision;
-        setKeelResult({
-          action: String(d.action ?? "HOLD"),
-          confidence: Number(d.confidence ?? 0),
-          targetPrice: d.targetPrice != null ? Number(d.targetPrice) : undefined,
-          stopLoss: d.stopLoss != null ? Number(d.stopLoss) : undefined,
-          takeProfit: d.takeProfit != null ? Number(d.takeProfit) : undefined,
-          positionSizePercent: d.positionSizePercent != null ? Number(d.positionSizePercent) : undefined,
-          reasoning: d.reasoning ? String(d.reasoning) : undefined,
-          rawSignal: data.rawSignal
-            ? {
-                signal: data.rawSignal.signal ? String(data.rawSignal.signal?.action ?? data.rawSignal.signal) : null,
-                discardedReason: data.rawSignal.discardedReason ? String(data.rawSignal.discardedReason) : undefined,
-                compositeScore: data.rawSignal.compositeScore != null ? Number(data.rawSignal.compositeScore) : data.rawSignal.confluence?.score != null ? Number(data.rawSignal.confluence.score) : undefined,
-                smartMoneyFlow: data.rawSignal.smartMoneyFlow ? String(data.rawSignal.smartMoneyFlow) : undefined,
-                liquidityDepthUsd: data.rawSignal.liquidityDepthUsd != null ? Number(data.rawSignal.liquidityDepthUsd) : undefined,
-              }
-            : undefined,
-          riskGate: data.riskGate ? { passed: Boolean(data.riskGate.passed), reasons: Array.isArray(data.riskGate.reasons) ? data.riskGate.reasons.map(String) : undefined } : undefined,
-          liquidityHuntAnalysis: data.liquidityHuntAnalysis || d.liquidityHuntAnalysis || undefined,
-          futuresAnalysis: d.futuresAnalysis || undefined,
-          source: String(d.source || data.source || "keel-institutional-quant"),
-          inferenceLatencyMs: Number(data.inferenceLatencyMs ?? d.inferenceLatencyMs ?? 0) || undefined,
-          promptSummary: data.promptSummary ? String(data.promptSummary) : d.promptSummary ? String(d.promptSummary) : `policy=keel-quant symbol=${symbol} price=${market.currentPrice}`,
-        });
-      }
-      console.log("Full Keel Analysis:", data);
+      setKeelResult({
+        action: String(decision.action ?? "HOLD"),
+        confidence: Number(decision.confidence ?? 0),
+        targetPrice: decision.targetPrice != null ? Number(decision.targetPrice) : undefined,
+        stopLoss: decision.stopLoss != null ? Number(decision.stopLoss) : undefined,
+        takeProfit: decision.takeProfit != null ? Number(decision.takeProfit) : undefined,
+        positionSizePercent: decision.positionSizePercent != null ? Number(decision.positionSizePercent) : undefined,
+        reasoning: decision.reasoning ? String(decision.reasoning) : undefined,
+        liquidityHuntAnalysis: decision.liquidityHuntAnalysis || undefined,
+        futuresAnalysis: decision.futuresAnalysis || undefined,
+        source: String(decision.source || "keel-institutional-quant"),
+        inferenceLatencyMs: decision.inferenceLatencyMs ? Number(decision.inferenceLatencyMs) : undefined,
+        promptSummary: `policy=${decision.source ?? "router"} symbol=${symbol} price=${market.currentPrice}`,
+      });
     } catch (err) {
-      console.error("Keel signal error:", err);
+      console.error("Decision engine error:", err);
     } finally {
       setKeelLoading(false);
     }

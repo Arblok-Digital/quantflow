@@ -68,7 +68,7 @@ export const KeelEnginePanel: React.FC<KeelEnginePanelProps> = ({ result, loadin
                 Keel Engine
                 <span className="px-2 py-0.5 rounded border text-[10px] font-mono font-bold bg-amber-500/15 text-amber-300 border-amber-500/30">INSTITUTIONAL QUANT</span>
               </h2>
-              <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono">Analisis sinyal + risk gate + liquidity hunt — server /api/keel/signal</p>
+              <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono">Decision Engine Router — AI server atau Keel quant lokal</p>
             </div>
           </div>
           <button
@@ -85,7 +85,7 @@ export const KeelEnginePanel: React.FC<KeelEnginePanelProps> = ({ result, loadin
           <div className="flex flex-col items-center justify-center py-8 text-center bg-zinc-950/60 rounded-xl border border-dashed border-zinc-800">
             <Activity className="w-7 h-7 text-zinc-600 mb-2" />
             <p className="text-xs font-mono text-zinc-400">Belum ada hasil analisis — tekan Evaluasi Keel Engine untuk menjalankan quant engine.</p>
-            <p className="text-[10px] font-mono text-zinc-600 mt-1">Hasil dari /api/keel/signal akan tampil di sini (decision + rawSignal + riskGate)</p>
+            <p className="text-[10px] font-mono text-zinc-600 mt-1">Satu decision engine (router dua-mode) — hasil dari AI server atau Keel quant lokal (source label menandai yang decide)</p>
           </div>
         )}
 

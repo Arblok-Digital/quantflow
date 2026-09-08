@@ -10,7 +10,16 @@ import type {
   MacroSummary,
   RiskConfig,
   TechnicalIndicators,
+  OrderBook,
+  LLMDecision,
 } from "../types";
+
+vi.mock("./keelAdapter", () => ({
+  runKeelQuantEngine: vi.fn(),
+}));
+import * as keelAdapter from "./keelAdapter";
+
+const runKeelMock = vi.mocked(keelAdapter.runKeelQuantEngine);
 
 // --- helpers ---
 
@@ -137,28 +146,58 @@ function input(over: Partial<DecisionEngineInput> = {}): DecisionEngineInput {
   };
 }
 
-const sslSweepInput = (over: Partial<DecisionEngineInput> = {}) =>
-  input({
-    currentPrice: 100.5,
-    mtfLiquidity: mtf({
-      activeState: "SWEPT_SSL",
-      confluenceScore: 88,
-      recentSweep: {
-        zone: zone("SSL", 99.88),
-        timestamp: 1,
-        wickRejectionPercent: 57.1,
-        type: "BULLISH_SSL_SWEEP",
-        invalidationPrice: 99.3,
-      },
-      nearestBSL: zone("BSL", 103.13),
-      huntingTarget: { targetType: "BSL", targetPrice: 103.13, potentialPnlPercent: 2.6 },
-    }),
-    ...over,
-  });
+function realOrderBook(): OrderBook {
+  return {
+    bids: [
+      { price: 99.9, size: 2.5, total: 2.5 },
+      { price: 99.8, size: 3.0, total: 5.5 },
+    ],
+    asks: [
+      { price: 100.1, size: 2.2, total: 2.2 },
+      { price: 100.2, size: 2.8, total: 5.0 },
+    ],
+    spread: 0.2,
+  };
+}
 
-describe("evaluateTradingDecision fallback", () => {
+function keelResult(over: Partial<LLMDecision> = {}): ReturnType<typeof keelAdapter.runKeelQuantEngine> {
+  return {
+    decision: {
+      action: "BUY",
+      confidence: 82,
+      targetPrice: 102,
+      stopLoss: 98.5,
+      takeProfit: 105,
+      positionSizePercent: 6,
+      reasoning: "Keel institutional signal (mock)",
+      source: "keel-institutional-quant",
+      inferenceLatencyMs: 2,
+      liquidityHuntAnalysis: {
+        targetPool: "BSL",
+        targetZonePrice: 105,
+        sweepTriggered: false,
+        mtfBias: "BULLISH_REVERSAL",
+        confluenceScore: 72,
+        invalidationLevel: 98.5,
+      },
+      ...over,
+    },
+    rawSignalResult: {} as never,
+  };
+}
+
+function mockJsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// --- routing tests ---
+
+describe("evaluateTradingDecision — MODE KEEL", () => {
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("server offline")));
+    runKeelMock.mockReset();
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -167,149 +206,173 @@ describe("evaluateTradingDecision fallback", () => {
     vi.restoreAllMocks();
   });
 
-  it("SWEPT_SSL + recentSweep → BUY, SL = invalidation, confidence + bonus whale", async () => {
-    const d = await evaluateTradingDecision(
-      sslSweepInput({ onChainMetrics: onChain({ smartMoneyBias: "STRONG_BULLISH", exchangeNetflow24hUSD: -500 }) })
-    );
+  it("aiEnabled=false → runKeelQuantEngine dipanggil local, source=keel-institutional-quant, TANPA /api/ai-decision", async () => {
+    runKeelMock.mockReturnValue(keelResult());
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: false }));
+
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(d.action).toBe("BUY");
-    expect(d.stopLoss).toBe(99.3);
-    expect(d.takeProfit).toBeCloseTo(103.13, 2);
-    expect(d.confidence).toBeCloseTo(78 + 88 / 10 + 6, 5);
-    expect(d.source).toBe("algorithmic-mtf-hunter");
+    expect(d.source).toBe("keel-institutional-quant");
+    expect(d.liquidityHuntAnalysis).toBeDefined();
   });
 
-  it("tanpa konfirmasi whale (bias netral, inflow) → confidence 78 + confluence/10", async () => {
-    const d = await evaluateTradingDecision(
-      sslSweepInput({
-        onChainMetrics: onChain({ smartMoneyBias: "NEUTRAL", exchangeNetflow24hUSD: 5 }),
+  it("aiEnabled=false + HOLD fail-closed dari keel (orderBook kosong) → decision HOLD jujur", async () => {
+    runKeelMock.mockReturnValue(
+      keelResult({
+        action: "HOLD",
+        confidence: 50,
+        positionSizePercent: 0,
+        reasoning: "[Keel Engine] HOLD — no real depth: orderBook kosong, skip fail-closed.",
       })
     );
-    expect(d.confidence).toBeCloseTo(86.8, 5);
-  });
 
-  it("SWEPT_BSL + recentSweep → SELL, SL = invalidation, target SSL", async () => {
     const d = await evaluateTradingDecision(
       input({
-        currentPrice: 101,
-        mtfLiquidity: mtf({
-          activeState: "SWEPT_BSL",
-          confluenceScore: 85,
-          recentSweep: {
-            zone: zone("BSL", 102.43),
-            timestamp: 1,
-            wickRejectionPercent: 37.5,
-            type: "BEARISH_BSL_SWEEP",
-            invalidationPrice: 103.6,
-          },
-          nearestSSL: zone("SSL", 99.28),
-          huntingTarget: { targetType: "SSL", targetPrice: 99.28, potentialPnlPercent: 1.7 },
-        }),
+        aiEnabled: false,
+        // orderBook/recentTrades/futures — semua kosong → keel fail-closed HOLD
       })
     );
+
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+    expect(d.action).toBe("HOLD");
+    expect(d.source).toBe("keel-institutional-quant");
+    expect(d.positionSizePercent).toBe(0);
+  });
+
+  it("keel menerima input lengkap (symbol, price, technicals, mtf, orderBook, recentTrades, futures)", async () => {
+    runKeelMock.mockReturnValue(keelResult());
+    const recentTrades = [{ price: 100.5, qty: 0.5, notionalUsd: 50, isBuyerMaker: false, timestamp: 1 }];
+
+    await evaluateTradingDecision(
+      input({
+        aiEnabled: false,
+        orderBook: realOrderBook(),
+        recentTrades,
+        futures: { success: true, source: "GATE_FUTURES", fundingRate: -0.0002, fundingBps: -0.2 },
+      })
+    );
+
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+    const keelInput = runKeelMock.mock.calls[0][0];
+    expect(keelInput.symbol).toBe("BTC/USDT");
+    expect(keelInput.currentPrice).toBe(100);
+    expect(keelInput.technicals.rsi).toBe(60);
+    expect(keelInput.mtfLiquidity.activeState).toBe("EQUILIBRIUM");
+    expect(keelInput.orderBook?.bids.length).toBe(2);
+    expect(keelInput.recentTrades).toEqual(recentTrades);
+    expect(keelInput.futures?.source).toBe("GATE_FUTURES");
+  });
+
+  it("env GEMINI_API_KEY kosong (tidak ada) + aiEnabled undefined → MODE KEEL local", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "");
+    runKeelMock.mockReturnValue(keelResult({ action: "HOLD" }));
+
+    const d = await evaluateTradingDecision(input());
+
+    expect(d.source).toBe("keel-institutional-quant");
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("evaluateTradingDecision — MODE AI", () => {
+  beforeEach(() => {
+    runKeelMock.mockReset();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("aiEnabled=true + fetch ok → POST /api/ai-decision, source=ai-decision-server, keel TIDAK dipanggil", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse({
+        action: "SELL",
+        confidence: 74,
+        targetPrice: 100,
+        stopLoss: 100.8,
+        takeProfit: 97.2,
+        positionSizePercent: 8,
+        reasoning: "AI server decision",
+        promptSummary: "symbol=BTC/USDT",
+        provenance: {
+          market: { source: "REAL", fetchedAt: 1 },
+        },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/ai-decision");
+    expect(runKeelMock).not.toHaveBeenCalled();
     expect(d.action).toBe("SELL");
-    expect(d.stopLoss).toBe(103.6);
-    expect(d.takeProfit).toBeCloseTo(99.28, 2);
-    expect(d.confidence).toBeCloseTo(86.5, 5);
+    expect(d.source).toBe("ai-decision-server");
   });
 
-  it("HUNTING_BSL + rsi<65 + imbalance>1.05 → BUY confidence 76", async () => {
-    const d = await evaluateTradingDecision(
-      input({
-        currentPrice: 101.6,
-        technicals: { ...baseTechnicals(), rsi: 55, orderBookImbalance: 1.2 },
-        mtfLiquidity: mtf({
-          activeState: "HUNTING_BSL",
-          confluenceScore: 78,
-          nearestBSL: zone("BSL", 102.13),
-          huntingTarget: { targetType: "BSL", targetPrice: 102.13, potentialPnlPercent: 0.52 },
-        }),
-      })
-    );
+  it("aiEnabled=true + fetch gagal → turun MODE KEEL local (bukan mtf-hunter)", async () => {
+    runKeelMock.mockReturnValue(keelResult({ action: "BUY" }));
+    const fetchMock = vi.fn().mockRejectedValue(new Error("server offline"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+    expect(d.source).toBe("keel-institutional-quant");
     expect(d.action).toBe("BUY");
-    expect(d.confidence).toBe(76);
   });
 
-  it("HUNTING_BSL tapi rsi >= 65 → turun ke HOLD equilibrium", async () => {
-    const d = await evaluateTradingDecision(
-      input({
-        currentPrice: 101.6,
-        technicals: { ...baseTechnicals(), rsi: 70, orderBookImbalance: 1.2 },
-        mtfLiquidity: mtf({
-          activeState: "HUNTING_BSL",
-          confluenceScore: 78,
-          nearestBSL: zone("BSL", 102.13),
-          huntingTarget: { targetType: "BSL", targetPrice: 102.13, potentialPnlPercent: 0.52 },
-        }),
-      })
+  it("aiEnabled=true + fetch respon tidak-ok → MODE KEEL local", async () => {
+    runKeelMock.mockReturnValue(keelResult({ action: "HOLD" }));
+    const fetchMock = vi.fn().mockResolvedValue(mockJsonResponse({ success: false }, 503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true }));
+
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+    expect(d.source).toBe("keel-institutional-quant");
+  });
+
+  it("env GEMINI_API_KEY ada (tanpa aiEnabled) → MODE AI", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse({ action: "BUY", confidence: 90, targetPrice: 100, stopLoss: 97, takeProfit: 104, positionSizePercent: 8 })
     );
-    expect(d.action).toBe("HOLD");
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input());
+
+    expect(d.source).toBe("ai-decision-server");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("EQUILIBRIUM → HOLD confidence 68, tanpa target hunting", async () => {
-    const d = await evaluateTradingDecision(input({ mtfLiquidity: mtf() }));
-    expect(d.action).toBe("HOLD");
-    expect(d.confidence).toBe(68);
-    expect(d.positionSizePercent).toBe(5);
-  });
-
-  it("fail-closed: tanpa macro → fedStance DATA_DEPENDENT & 'No macro data'", async () => {
-    const d = await evaluateTradingDecision(sslSweepInput());
-    expect(d.macroContext?.fedStance).toBe("DATA_DEPENDENT");
-    expect(d.macroContext?.nearestEventName).toBe("No macro data (fail-closed)");
-  });
-
-  it("macro real diteruskan, dan macroRiskIndex tinggi mengecilkan size", async () => {
-    const d = await evaluateTradingDecision(
-      input({
-        currentPrice: 100.5,
-        mtfLiquidity: mtf({
-          activeState: "SWEPT_SSL",
-          confluenceScore: 88,
-          recentSweep: {
-            zone: zone("SSL", 99.88),
-            timestamp: 1,
-            wickRejectionPercent: 57.1,
-            type: "BULLISH_SSL_SWEEP",
-            invalidationPrice: 99.3,
-          },
-          nearestBSL: zone("BSL", 103.13),
-          huntingTarget: { targetType: "BSL", targetPrice: 103.13, potentialPnlPercent: 2.6 },
-        }),
-        macroCalendar: macro({
-          fedPolicyStance: "HAWKISH_PAUSE",
-          macroRiskIndex: 80,
-          nearestEvent: {
-            ...macro().nearestEvent!,
-            name: "CPI Release",
-            volatilityRisk: "HIGH_ALERT",
-          },
-        }),
-      })
-    );
-    expect(d.action).toBe("BUY");
-    expect(d.positionSizePercent).toBe(5);
-    expect(d.macroContext?.fedStance).toBe("HAWKISH_PAUSE");
-    expect(d.macroContext?.nearestEventName).toBe("CPI Release");
-  });
-
-  it("provenance passthrough tidak merusak output & ikut dikirim ke server", async () => {
+  it("provenance dikirim ke /api/ai-decision pada MODE AI", async () => {
     const provenance = {
       market: { source: "REAL" as const, fetchedAt: 1, ageMinutes: 1 },
       liquidity: { source: "REAL" as const, fetchedAt: 1, ageMinutes: 0.5 },
       onChain: { source: "SIMULATED" as const, fetchedAt: 1 },
       macro: { source: "STALE" as const, fetchedAt: 1, ageMinutes: 5 },
     };
-    const d = await evaluateTradingDecision({ ...sslSweepInput(), provenance });
-    expect(d.provenance).toBeUndefined();
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse({ action: "HOLD", confidence: 70, targetPrice: 100, stopLoss: 98, takeProfit: 102, positionSizePercent: 8 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
 
-    const fetchMock = vi.mocked(fetch);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/ai-decision");
+    const d = await evaluateTradingDecision({ ...input({ aiEnabled: true }), provenance });
+
+    expect(d.source).toBe("ai-decision-server");
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse(String(init?.body));
     expect(body.provenance.market.source).toBe("REAL");
     expect(body.provenance.macro.source).toBe("STALE");
-    expect(body.mtfLiquidity.activeState).toBe("SWEPT_SSL");
+    expect(body.mtfLiquidity.activeState).toBe("EQUILIBRIUM");
   });
 });
 

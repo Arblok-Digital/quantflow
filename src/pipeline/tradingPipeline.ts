@@ -39,6 +39,12 @@ export interface PipelineCycleInput {
   macroCalendar?: import("../types").MacroSummary;
   /** Real order book (bids/asks) to estimate liquidation depth honestly. */
   orderBook?: OrderBook;
+  /** AI diaktifkan? Dari /api/health.geminiConfigured. Absen = cek env server. */
+  aiEnabled?: boolean;
+  /** Real order-flow (aggTrades) untuk keel quant engine (opsional). */
+  recentTrades?: import("../data/marketFetcher").RecentTrade[];
+  /** Futures institutional metrics untuk keel quant engine (opsional). */
+  futures?: import("../data/marketFetcher").FuturesMetrics;
 }
 
 export interface PipelineCycleOutput {
@@ -85,6 +91,10 @@ export async function runTradingPipelineCycle(
     activePositions: input.activePositions,
     portfolioEquity: input.portfolio.equity,
     riskConfig: input.riskConfig,
+    aiEnabled: input.aiEnabled,
+    orderBook: input.orderBook,
+    recentTrades: input.recentTrades,
+    futures: input.futures,
   });
   const inferenceMs = Date.now() - inferenceStart;
 

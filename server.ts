@@ -1066,6 +1066,48 @@ app.post("/api/keel/signal", requireAuth, async (req, res) => {
   }
 });
 
+// Keel Context — satu sumber kebenaran server-side untuk mode KEEL local.
+// Mengembalikan orderBook canonical, recentTrades (order flow), dan futures
+// (institutional metrics) agar jalur keel (manual + pipeline autopilot) mendapat
+// data lengkap tanpa fetch tiap tick. Fail-closed jujur: setiap bagian yang gagal
+// dikosongkan (tidak pernah fabricate).
+app.get("/api/market/keel-context", requireAuth, async (req, res) => {
+  const sym = String(req.query.symbol || "BTC/USDT");
+
+  let orderBook: any = undefined;
+  try {
+    const market = await fetchMarketData(sym);
+    if (market && market.success !== false && market.orderBook) {
+      orderBook = market.orderBook;
+    }
+  } catch (e: any) {
+    console.warn(`[keel-context] market fetch failed: ${e?.message}`);
+  }
+
+  let recentTrades: { success: boolean; trades: RecentTrade[]; source: string } = { success: false, trades: [], source: "NONE" };
+  try {
+    recentTrades = await fetchRecentTrades(sym, 60);
+  } catch (e: any) {
+    console.warn(`[keel-context] recent trades fetch failed: ${e?.message}`);
+  }
+
+  let futures: FuturesMetrics = { success: false, source: "NONE" };
+  try {
+    futures = await fetchFuturesMetrics(sym);
+  } catch (e: any) {
+    console.warn(`[keel-context] futures metrics fetch failed: ${e?.message}`);
+  }
+
+  res.json({
+    success: true,
+    symbol: sym,
+    timestamp: Date.now(),
+    orderBook: orderBook ?? null,
+    recentTrades: recentTrades.trades,
+    futures,
+  });
+});
+
 // ================= BROKER ROUTES (ccxt provider) =================
 
 // Status broker (mode paper/live + apakah live order bisa dipasang) — PROTECTED

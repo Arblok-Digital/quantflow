@@ -37,6 +37,12 @@ export interface UseTradingPipelineOptions {
   onPortfolioUpdated: (portfolio: Portfolio) => void;
   /** Real order book untuk estimasi likuiditas jujur (opsional, default kosong). */
   orderBook?: OrderBook;
+  /** Real order-flow (aggTrades) untuk keel quant engine (opsional). */
+  recentTrades?: import("../data/marketFetcher").RecentTrade[];
+  /** Futures institutional metrics untuk keel quant engine (opsional). */
+  futures?: import("../data/marketFetcher").FuturesMetrics;
+  /** AI diaktifkan? Dari /api/health.geminiConfigured (opsional). */
+  aiEnabled?: boolean;
 }
 
 const INITIAL_LATENCY: LatencyBreakdown = {
@@ -86,6 +92,9 @@ export function useTradingPipeline(options: UseTradingPipelineOptions) {
         onChainMetrics: s.onChainMetrics,
         macroCalendar: s.macroSummary,
         orderBook: s.orderBook,
+        recentTrades: s.recentTrades,
+        futures: s.futures,
+        aiEnabled: s.aiEnabled,
       });
 
       if (result.decision) {

@@ -301,22 +301,14 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
                   >
                     + Simulasikan Entry SHORT
                   </button>
-                  <button
-                    onClick={async () => {
-                      const { authFetch: _af } = await import("../hooks/useAuth");
-                      const res = await _af("/api/keel/signal", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ symbol, currentPrice }),
-                      });
-                      const data = await res.json();
-                      alert(`[Keel Engine] Signal: ${data.decision.action}\nConfidence: ${data.decision.confidence}%\nReasoning: ${data.decision.reasoning}`);
-                      console.log("Full Keel Analysis:", data);
-                    }}
-                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold font-mono transition"
-                  >
-                    ⚡ Evaluasi Keel Engine
-                  </button>
+                  {actionableRunKeel && (
+                    <button
+                      onClick={actionableRunKeel}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold font-mono transition"
+                    >
+                      ⚡ Evaluasi Keel Engine
+                    </button>
+                  )}
                 </div>
               </div>
             ) : (
