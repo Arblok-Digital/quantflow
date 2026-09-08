@@ -123,9 +123,18 @@ export interface FeatureRawRow {
 }
 
 let seq = 0;
+function safeRandomHex(): string {
+  // crypto.randomUUID hanya tersedia di secure-context (https/localhost modern)
+  // atau Node ≥14.17. Di browser non-secure / HTTP lama bisa undefined → fallback.
+  try {
+    const g = globalThis.crypto as Crypto | undefined;
+    if (g?.randomUUID) return g.randomUUID().slice(0, 8);
+  } catch { /* fallthrough */ }
+  return Math.random().toString(36).slice(2, 10);
+}
 export function nextId(): string {
   seq += 1;
-  return `${Date.now().toString(36)}-${seq.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+  return `${Date.now().toString(36)}-${seq.toString(36)}-${safeRandomHex()}`;
 }
 
 function defaultRiskLimits(): RiskLimitsRow {
