@@ -67,7 +67,7 @@ import {
 } from "./guardrails";
 import { runKeelQuantEngine, evaluateKeelRisk } from "./src/logic/keelAdapter";
 import { analyzeMTFLiquidity } from "./src/logic/liquidityHunt";
-import { fetchMarketData, fetchOHLCVWithFallback } from "./src/data/marketFetcher";
+import { fetchMarketData, fetchRecentTrades, fetchOHLCVWithFallback, RecentTrade } from "./src/data/marketFetcher";
 
 dotenv.config();
 
@@ -1012,6 +1012,16 @@ app.post("/api/keel/signal", requireAuth, async (req, res) => {
     }
   }
 
+  // K2: Wire REAL aggTrades (order flow) ke keel adapter. Fail-closed: kalau
+  // fetch gagal → [] → flow NEUTRAL → HOLD (TIDAK ada fabricate/synthetic).
+  let trades: { success: boolean; trades: RecentTrade[]; source: string } = { success: false, trades: [], source: "NONE" };
+  try {
+    trades = await fetchRecentTrades(sym, 60);
+  } catch (e: any) {
+    console.warn(`[keel] recent trades fetch failed: ${e?.message}`);
+  }
+  if (trades.success) console.log(`[keel] recentTrades: ${trades.trades.length} (${trades.source})`);
+
   try {
     const result = runKeelQuantEngine({
       symbol: sym,
@@ -1019,6 +1029,7 @@ app.post("/api/keel/signal", requireAuth, async (req, res) => {
       technicals,
       mtfLiquidity: mtf,
       orderBook,
+      recentTrades: trades.trades,
     });
     const currentEquity = (() => { try { return getPaperAccount().equity; } catch { return 10000; } })();
     const riskEval = evaluateKeelRisk(

@@ -474,3 +474,81 @@ export async function fetchOHLCVWithFallback(symbol: string, timeframe: string, 
 
   return []; // trigger client-side generator
 }
+
+// ---------------------------------------------------------------------------
+// Recent trades (order flow) — for Keel Engine institutional flow detection
+// Fallback chain: Binance Vision → Gate.io → Binance primary → Bybit
+// Fail-closed: semua sumber gagal → [] (NEVER fabricate/synthetic)
+// ---------------------------------------------------------------------------
+export interface RecentTrade {
+  price: number;
+  qty: number;
+  notionalUsd: number;
+  isBuyerMaker: boolean;
+  timestamp: number;
+}
+
+function recentTradeFromBinanceAgg(t: any): RecentTrade {
+  const price = parseFloat(t.p);
+  const qty = parseFloat(t.q);
+  const ts = Number(t.T) || Number(t.t) || Date.now();
+  return { price, qty, notionalUsd: price * qty, isBuyerMaker: t.m === true || String(t.m) === "true", timestamp: ts };
+}
+
+/**
+ * Fetch REAL recent aggregate trades (aggTrades) dari exchange untuk keel flow.
+ * Fail-closed jujur: kalau semua sumber gagal → { success:false, trades:[], source:"NONE" }.
+ */
+export async function fetchRecentTrades(symbol: string, limit = 60): Promise<{ success: boolean; trades: RecentTrade[]; source: string }> {
+  const parsed = parseMarketSymbol(symbol);
+  const rawSymbol = parsed.raw;
+  const gateSymbol = parsed.base + "_" + parsed.quote;
+
+  // 1. Binance Vision (data-api.binance.vision — paling sering terbuka)
+  try {
+    const res = await fetchWithTimeout(`https://data-api.binance.vision/api/v3/aggTrades?symbol=${rawSymbol}&limit=${limit}`);
+    if (Array.isArray(res) && res.length > 0) {
+      return { success: true, trades: res.map(recentTradeFromBinanceAgg), source: "BINANCE_VISION" };
+    }
+  } catch {}
+
+  // 2. Gate.io (side = taker side: buy → isBuyerMaker=false; sell → true)
+  try {
+    const res = await fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/trades?currency_pair=${gateSymbol}&limit=${limit}`);
+    if (Array.isArray(res) && res.length > 0) {
+      const trades = res.map((t: any) => {
+        const price = parseFloat(t.price);
+        const qty = parseFloat(t.amount);
+        const ts = typeof t.create_time_ms === "number" && t.create_time_ms > 0
+          ? t.create_time_ms
+          : (Number(t.create_time) || 0) * 1000;
+        return { price, qty, notionalUsd: price * qty, isBuyerMaker: String(t.side).toLowerCase() === "sell", timestamp: ts };
+      });
+      return { success: true, trades, source: "GATE_IO" };
+    }
+  } catch {}
+
+  // 3. Binance primary
+  try {
+    const res = await fetchWithTimeout(`https://api.binance.com/api/v3/aggTrades?symbol=${rawSymbol}&limit=${limit}`);
+    if (Array.isArray(res) && res.length > 0) {
+      return { success: true, trades: res.map(recentTradeFromBinanceAgg), source: "BINANCE_LIVE" };
+    }
+  } catch {}
+
+  // 4. Bybit (side "Sell" = buyer maker → isBuyerMaker=true; "Buy" → false)
+  try {
+    const res = await fetchWithTimeout(`https://api.bybit.com/v5/market/recent-trade?category=spot&symbol=${rawSymbol}&limit=${limit}`);
+    const list = res?.result?.list || [];
+    if (Array.isArray(list) && list.length > 0) {
+      const trades = list.map((t: any) => {
+        const price = parseFloat(t.price);
+        const qty = parseFloat(t.size);
+        return { price, qty, notionalUsd: price * qty, isBuyerMaker: String(t.side).toLowerCase() === "sell", timestamp: Number(t.time) || Date.now() };
+      });
+      return { success: true, trades, source: "BYBIT_FALLBACK" };
+    }
+  } catch {}
+
+  return { success: false, trades: [], source: "NONE" };
+}

@@ -3,6 +3,7 @@ import { evaluateRisk, RiskCandidate, RiskSnapshot } from "./keel/risk/gatekeepe
 import { IntradayHighWaterMark } from "./keel/risk/drawdown-monitor";
 import { store, openPositions, ordersLastHour, lastKillSwitchEvent } from "./keel/store";
 import { NormalizedDepth, NormalizedTrade, MtfVector, DepthLevel } from "./keel/types";
+import type { RecentTrade } from "../data/marketFetcher";
 import { LLMDecision, Candle, TechnicalIndicators, MTFLiquidityAnalysis, OrderBook } from "../types";
 
 export interface KeelAdapterInput {
@@ -13,6 +14,7 @@ export interface KeelAdapterInput {
   technicals?: TechnicalIndicators;
   mtfLiquidity?: MTFLiquidityAnalysis;
   orderBook?: OrderBook;
+  recentTrades?: RecentTrade[];
   portfolioEquity?: number;
 }
 
@@ -86,11 +88,20 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
     return { decision: holdDecision, rawSignalResult: emptyResult };
   }
 
-  // F-03: only the real order book depth is wired into the adapter input —
-  // there is NO real recentTrades / order-flow stream available. Do NOT
-  // fabricate trade prints: pass empty trades and narrativeVelocity 0 so the
-  // signal generator runs purely on the REAL depth (serbuk jujur, fail-closed).
-  const recentTrades: NormalizedTrade[] = [];
+  // Real order-flow stream (aggTrades) diwire dari input.recentTrades.
+  // Fail-closed jujur: kalau trades kosong/undefined → [] → flow NEUTRAL → HOLD.
+  // TIDAK pernah fabricate/synthetic trade prints.
+  const recentTrades: NormalizedTrade[] = (input.recentTrades && input.recentTrades.length > 0)
+    ? input.recentTrades.map((t) => ({
+        symbol,
+        venue: "BINANCE_SPOT",
+        price: t.price,
+        qty: t.qty,
+        notionalUsd: t.notionalUsd,
+        isBuyerMaker: t.isBuyerMaker,
+        tsServerMs: t.timestamp || Date.now(),
+      }))
+    : [];
 
   const buildInput: SignalBuildInput = {
     symbol,
