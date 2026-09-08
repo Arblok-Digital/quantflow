@@ -162,6 +162,26 @@ export interface LLMDecision {
     volatilityRisk: string;
     fedStance: string;
   };
+  futuresAnalysis?: {
+    fundingRate?: number;
+    fundingBps?: number;
+    markPrice?: number;
+    openInterest?: number;
+    openInterestUsd?: number;
+    lsrTaker?: number;
+    lsrAccount?: number;
+    longLiqUsd?: number;
+    shortLiqUsd?: number;
+    longLiqSize?: number;
+    shortLiqSize?: number;
+    topLongSize?: number;
+    topShortSize?: number;
+    topLsrSize?: number;
+    volume24hUsd?: number;
+    bias?: string;
+    biasReason?: string;
+    source?: string;
+  };
   /** Provenance per pilar (4.4): dari mana tiap angka decision berasal. */
   provenance?: {
     market?: DataProvenance;

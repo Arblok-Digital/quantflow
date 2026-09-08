@@ -187,6 +187,7 @@ export default function App() {
             : undefined,
           riskGate: data.riskGate ? { passed: Boolean(data.riskGate.passed), reasons: Array.isArray(data.riskGate.reasons) ? data.riskGate.reasons.map(String) : undefined } : undefined,
           liquidityHuntAnalysis: data.liquidityHuntAnalysis || d.liquidityHuntAnalysis || undefined,
+          futuresAnalysis: d.futuresAnalysis || undefined,
           source: String(d.source || data.source || "keel-institutional-quant"),
           inferenceLatencyMs: Number(data.inferenceLatencyMs ?? d.inferenceLatencyMs ?? 0) || undefined,
           promptSummary: data.promptSummary ? String(data.promptSummary) : d.promptSummary ? String(d.promptSummary) : `policy=keel-quant symbol=${symbol} price=${market.currentPrice}`,

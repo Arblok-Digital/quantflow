@@ -552,3 +552,97 @@ export async function fetchRecentTrades(symbol: string, limit = 60): Promise<{ s
 
   return { success: false, trades: [], source: "NONE" };
 }
+
+// ---------------------------------------------------------------------------
+// Futures metrics (Gate.io futures perp) — for Keel Engine institutional futures context
+// Source verified live: Gate.io USDT-margined perpetual futures API
+// Fail-closed jujur: kalau tickers/contract_stats gagal → { success:false, source:"NONE" }
+// TIDAK pernah fabricate/synthetic.
+// ---------------------------------------------------------------------------
+export interface FuturesMetrics {
+  success: boolean;
+  source: string;               // "GATE_FUTURES" | "NONE"
+  fundingRate?: number;         // decimal
+  fundingBps?: number;          // fundingRate * 10000 (untuk UI)
+  markPrice?: number;
+  openInterest?: number;        // contracts (dari contract_stats.open_interest atau tickers.total_size)
+  openInterestUsd?: number;     // derived: total_size × quanto_multiplier × mark_price (LABEL derived)
+  quantoMultiplier?: number;
+  lsrTaker?: number;
+  lsrAccount?: number;
+  longLiqUsd?: number;          // long_liq_usd_new
+  shortLiqUsd?: number;         // short_liq_usd_new
+  longLiqSize?: number;
+  shortLiqSize?: number;
+  topLongSize?: number;
+  topShortSize?: number;
+  topLsrSize?: number;
+  volume24hUsd?: number;        // volume_24h_quote
+  timestamp?: number;
+}
+
+function gateFuturesSymbol(symbol: string): string {
+  const parsed = parseMarketSymbol(symbol);
+  return parsed.base + "_" + parsed.quote; // BTC/USDT → BTC_USDT
+}
+
+/**
+ * Fetch REAL futures institutional metrics dari Gate.io (USDT perp):
+ * funding rate, open interest, long/short ratio, dan area likuidasi long/short.
+ * tickers + contract_stats di-fetch paralel; hasil digabung.
+ * Fail-closed jujur: kalau salah satu gagal → { success:false, source:"NONE" }.
+ */
+export async function fetchFuturesMetrics(symbol: string): Promise<FuturesMetrics> {
+  const contract = gateFuturesSymbol(symbol);
+
+  try {
+    const [tickerList, statsList] = await Promise.all([
+      fetchWithTimeout(`https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${contract}`),
+      fetchWithTimeout(`https://api.gateio.ws/api/v4/futures/usdt/contract_stats?contract=${contract}&limit=1&interval=5m`),
+    ]);
+
+    const ticker = Array.isArray(tickerList) ? tickerList[0] : tickerList?.[0];
+    const stats = Array.isArray(statsList) ? statsList[0] : statsList?.[0];
+
+    if (!ticker) {
+      return { success: false, source: "NONE" };
+    }
+
+    const totalSize = ticker.total_size != null ? parseFloat(ticker.total_size) : stats?.open_interest != null ? parseFloat(stats.open_interest) : undefined;
+    const quantoMultiplier = ticker.quanto_multiplier != null ? parseFloat(ticker.quanto_multiplier) : undefined;
+    const markPrice = ticker.mark_price != null ? parseFloat(ticker.mark_price) : stats?.mark_price != null ? parseFloat(stats.mark_price) : undefined;
+    const fundingRate = ticker.funding_rate != null ? parseFloat(ticker.funding_rate) : undefined;
+
+    const openInterestUsd =
+      totalSize != null && quantoMultiplier != null && markPrice != null
+        ? totalSize * quantoMultiplier * markPrice
+        : undefined;
+
+    const metrics: FuturesMetrics = {
+      success: true,
+      source: "GATE_FUTURES",
+      fundingRate,
+      fundingBps: fundingRate != null ? fundingRate * 10000 : undefined,
+      markPrice,
+      openInterest: totalSize,
+      openInterestUsd,
+      quantoMultiplier,
+      lsrTaker: stats?.lsr_taker != null ? parseFloat(stats.lsr_taker) : undefined,
+      lsrAccount: stats?.lsr_account != null ? parseFloat(stats.lsr_account) : undefined,
+      longLiqUsd: stats?.long_liq_usd_new != null ? parseFloat(stats.long_liq_usd_new) : undefined,
+      shortLiqUsd: stats?.short_liq_usd_new != null ? parseFloat(stats.short_liq_usd_new) : undefined,
+      longLiqSize: stats?.long_liq_size != null ? parseFloat(stats.long_liq_size) : undefined,
+      shortLiqSize: stats?.short_liq_size != null ? parseFloat(stats.short_liq_size) : undefined,
+      topLongSize: stats?.top_long_size != null ? parseFloat(stats.top_long_size) : undefined,
+      topShortSize: stats?.top_short_size != null ? parseFloat(stats.top_short_size) : undefined,
+      topLsrSize: stats?.top_lsr_size != null ? parseFloat(stats.top_lsr_size) : undefined,
+      volume24hUsd: ticker.volume_24h_quote != null ? parseFloat(ticker.volume_24h_quote) : undefined,
+      timestamp: Date.now(),
+    };
+
+    return metrics;
+  } catch (err: any) {
+    console.warn(`[MarketFetcher] Gate futures metrics failed for ${contract}: ${err?.message}`);
+    return { success: false, source: "NONE" };
+  }
+}

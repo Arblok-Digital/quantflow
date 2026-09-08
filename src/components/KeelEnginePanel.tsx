@@ -12,6 +12,26 @@ export interface KeelAnalysisResult {
   rawSignal?: { signal: string | null; discardedReason?: string; compositeScore?: number; smartMoneyFlow?: string; liquidityDepthUsd?: number };
   riskGate?: { passed: boolean; reasons?: string[] };
   liquidityHuntAnalysis?: { targetPool?: string; targetZonePrice?: number; sweepTriggered?: boolean; mtfBias?: string; confluenceScore?: number; invalidationLevel?: number };
+  futuresAnalysis?: {
+    fundingRate?: number;
+    fundingBps?: number;
+    markPrice?: number;
+    openInterest?: number;
+    openInterestUsd?: number;
+    lsrTaker?: number;
+    lsrAccount?: number;
+    longLiqUsd?: number;
+    shortLiqUsd?: number;
+    longLiqSize?: number;
+    shortLiqSize?: number;
+    topLongSize?: number;
+    topShortSize?: number;
+    topLsrSize?: number;
+    volume24hUsd?: number;
+    bias?: string;
+    biasReason?: string;
+    source?: string;
+  };
   source?: string;
   inferenceLatencyMs?: number;
   promptSummary?: string;
@@ -160,6 +180,86 @@ export const KeelEnginePanel: React.FC<KeelEnginePanelProps> = ({ result, loadin
                     </div>
                   )}
                   <p className="text-sm text-zinc-300 leading-relaxed font-sans">{conclusion}</p>
+                </div>
+              );
+            })()}
+
+            {/* FUTURES DERIVATIVES — konteks institusional Gate.io perp */}
+            {result.futuresAnalysis && (() => {
+              const fa = result.futuresAnalysis;
+              const fmtP = (n?: number) => n != null ? `$${Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—";
+              const fmtUsd = (n?: number) => n != null ? `$${Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—";
+              const bias = String(fa.bias || "NEUTRAL").toUpperCase();
+              const biasCls = bias === "BULLISH" ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" : bias === "BEARISH" ? "bg-rose-500/15 text-rose-400 border-rose-500/30" : "bg-amber-500/15 text-amber-400 border-amber-500/30";
+              const fundingBps = fa.fundingBps;
+              const fundingCls = fundingBps != null ? (fundingBps < 0 ? "text-emerald-400" : fundingBps > 0.5 ? "text-rose-400" : "text-amber-300") : "text-zinc-500";
+              const longLiq = Number(fa.longLiqUsd || 0);
+              const shortLiq = Number(fa.shortLiqUsd || 0);
+              const maxLiq = Math.max(longLiq, shortLiq, 1);
+              const longW = Math.max(6, Math.round(longLiq / maxLiq * 100));
+              const shortW = Math.max(6, Math.round(shortLiq / maxLiq * 100));
+              const liqMagnet = longLiq > shortLiq
+                ? { txt: "↑ Magnet likuidasi LONG di atas", cls: "text-emerald-400" }
+                : shortLiq > longLiq
+                  ? { txt: "↓ Magnet likuidasi SHORT di bawah", cls: "text-rose-400" }
+                  : { txt: "Likuidasi long/short seimbang", cls: "text-zinc-400" };
+              const oiUsd = fa.openInterestUsd;
+              const oiStr = oiUsd != null ? (oiUsd >= 1e9 ? `${(oiUsd / 1e9).toFixed(2)}B` : `$${(oiUsd / 1e6).toFixed(1)}M`) : "—";
+              const oiSub = fa.openInterest != null ? `contracts: ${Number(fa.openInterest).toLocaleString()}` : "";
+
+              return (
+                <div className="rounded-xl bg-zinc-950/70 border border-zinc-800 p-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 font-bold flex items-center gap-1">⚡ Futures Derivatives</p>
+                    <span className="px-1.5 py-0.5 rounded border border-cyan-500/30 bg-cyan-500/10 text-[10px] font-mono font-bold text-cyan-300">{String(fa.source || "GATE_FUTURES")}</span>
+                    <span title={fa.biasReason || "—"} className={`ml-auto inline-flex items-center px-2 py-0.5 rounded border text-[10px] font-mono font-black ${biasCls} cursor-help`}>{bias}</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs">
+                    <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                      <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Funding / 8h</span>
+                      <span className={`text-sm font-bold ${fundingCls}`}>{fundingBps != null ? `${fundingBps.toFixed(2)} bps` : "—"}</span>
+                      <span className="text-[10px] text-zinc-600 block">crowded long &gt;5bps</span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                      <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Open Interest</span>
+                      <span className="text-sm font-bold text-zinc-100">{oiStr}</span>
+                      {oiSub && <span className="text-[10px] text-zinc-600 block">{oiSub}</span>}
+                    </div>
+                    <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                      <span className="text-[10px] uppercase text-zinc-500 block font-semibold">LSR Taker</span>
+                      <span className="text-sm font-bold text-zinc-100">{fa.lsrTaker != null ? fa.lsrTaker.toFixed(2) : "—"}</span>
+                      <span className="text-[10px] text-zinc-600 block">acct: {fa.lsrAccount != null ? fa.lsrAccount.toFixed(2) : "—"}</span>
+                    </div>
+                    <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                      <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Mark Price</span>
+                      <span className="text-sm font-bold text-amber-300">{fmtP(fa.markPrice)}</span>
+                      <span className="text-[10px] text-zinc-600 block">vol 24h: {fa.volume24hUsd != null ? `$${(fa.volume24hUsd / 1e6).toFixed(0)}M` : "—"}</span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider">
+                      <span className="text-emerald-400 font-bold">Long Liq {fmtUsd(longLiq || undefined)}</span>
+                      <span className="text-zinc-600">area likuidasi</span>
+                      <span className="text-rose-400 font-bold">Short Liq {fmtUsd(shortLiq || undefined)}</span>
+                    </div>
+                    <div className="flex gap-1 h-2.5 rounded-full overflow-hidden bg-zinc-900 border border-zinc-800">
+                      <div className={`bg-gradient-to-r from-emerald-700 to-emerald-500 ${longW > 0 ? "" : "opacity-0"}`} style={{ width: `${longW}%` }} />
+                      <div className="w-px bg-zinc-700" />
+                      <div className={`bg-gradient-to-r from-rose-700 to-rose-500 ${shortW > 0 ? "" : "opacity-0"}`} style={{ width: `${shortW}%` }} />
+                    </div>
+                    <p className={`text-[10px] font-mono font-bold ${liqMagnet.cls}`}>{liqMagnet.txt}</p>
+                  </div>
+
+                  {(fa.topLongSize != null || fa.topShortSize != null) && (
+                    <div className="flex flex-wrap items-center gap-3 text-[10px] font-mono text-zinc-400">
+                      <span className="uppercase tracking-wider text-zinc-600">Top trader</span>
+                      <span>long: <strong className="text-emerald-400">{fa.topLongSize != null ? Number(fa.topLongSize).toLocaleString() : "—"}</strong></span>
+                      <span>short: <strong className="text-rose-400">{fa.topShortSize != null ? Number(fa.topShortSize).toLocaleString() : "—"}</strong></span>
+                      {fa.topLsrSize != null && <span>top LSR: <strong className="text-zinc-100">{fa.topLsrSize.toFixed(2)}</strong></span>}
+                    </div>
+                  )}
                 </div>
               );
             })()}

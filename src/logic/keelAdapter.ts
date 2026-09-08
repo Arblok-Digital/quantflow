@@ -3,7 +3,7 @@ import { evaluateRisk, RiskCandidate, RiskSnapshot } from "./keel/risk/gatekeepe
 import { IntradayHighWaterMark } from "./keel/risk/drawdown-monitor";
 import { store, openPositions, ordersLastHour, lastKillSwitchEvent } from "./keel/store";
 import { NormalizedDepth, NormalizedTrade, MtfVector, DepthLevel } from "./keel/types";
-import type { RecentTrade } from "../data/marketFetcher";
+import type { RecentTrade, FuturesMetrics } from "../data/marketFetcher";
 import { LLMDecision, Candle, TechnicalIndicators, MTFLiquidityAnalysis, OrderBook } from "../types";
 
 export interface KeelAdapterInput {
@@ -15,7 +15,74 @@ export interface KeelAdapterInput {
   mtfLiquidity?: MTFLiquidityAnalysis;
   orderBook?: OrderBook;
   recentTrades?: RecentTrade[];
+  futures?: FuturesMetrics;
   portfolioEquity?: number;
+}
+
+export interface FuturesAnalysis {
+  fundingRate?: number;
+  fundingBps?: number;
+  markPrice?: number;
+  openInterest?: number;
+  openInterestUsd?: number;
+  lsrTaker?: number;
+  lsrAccount?: number;
+  longLiqUsd?: number;
+  shortLiqUsd?: number;
+  longLiqSize?: number;
+  shortLiqSize?: number;
+  topLongSize?: number;
+  topShortSize?: number;
+  topLsrSize?: number;
+  volume24hUsd?: number;
+  bias?: "BULLISH" | "BEARISH" | "NEUTRAL";
+  biasReason?: string;
+  source?: string;
+}
+
+function buildFuturesAnalysis(fm: FuturesMetrics): FuturesAnalysis | undefined {
+  if (!fm || fm.success !== true) return undefined;
+
+  let total = 0;
+  const reasons: string[] = [];
+
+  if (fm.fundingRate != null) {
+    if (fm.fundingRate < 0) { total += 1; reasons.push("funding<0 (long murah)"); }
+    else if (fm.fundingRate > 0.0005) { total -= 1; reasons.push("funding>0.05% (long crowded)"); }
+  }
+  if (fm.lsrTaker != null) {
+    if (fm.lsrTaker < 0.9) { total += 1; reasons.push("LSR<0.9 (banyak short)"); }
+    else if (fm.lsrTaker > 1.1) { total -= 1; reasons.push("LSR>1.1 (banyak long)"); }
+  }
+  if (fm.longLiqUsd != null && fm.shortLiqUsd != null) {
+    if (fm.shortLiqUsd > 0 && fm.longLiqUsd > 3 * fm.shortLiqUsd) { total += 1; reasons.push("liq LONG magnet atas"); }
+    else if (fm.longLiqUsd > 0 && fm.shortLiqUsd > 3 * fm.longLiqUsd) { total -= 1; reasons.push("liq SHORT magnet bawah"); }
+  }
+
+  const bias: "BULLISH" | "BEARISH" | "NEUTRAL" =
+    total >= 1 ? "BULLISH" : total <= -1 ? "BEARISH" : "NEUTRAL";
+  const biasReason = reasons.length > 0 ? reasons.join("; ") : "tidak ada komponen ekstrem";
+
+  return {
+    fundingRate: fm.fundingRate,
+    fundingBps: fm.fundingBps,
+    markPrice: fm.markPrice,
+    openInterest: fm.openInterest,
+    openInterestUsd: fm.openInterestUsd,
+    lsrTaker: fm.lsrTaker,
+    lsrAccount: fm.lsrAccount,
+    longLiqUsd: fm.longLiqUsd,
+    shortLiqUsd: fm.shortLiqUsd,
+    longLiqSize: fm.longLiqSize,
+    shortLiqSize: fm.shortLiqSize,
+    topLongSize: fm.topLongSize,
+    topShortSize: fm.topShortSize,
+    topLsrSize: fm.topLsrSize,
+    volume24hUsd: fm.volume24hUsd,
+    bias,
+    biasReason,
+    source: fm.source,
+  };
 }
 
 /**
@@ -29,6 +96,7 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
 } {
   const symbol = input.symbol || "BTC/USDT";
   const entryPrice = input.currentPrice;
+  const futuresAnalysis = buildFuturesAnalysis(input.futures as FuturesMetrics | undefined);
 
   const bids: DepthLevel[] = (input.orderBook?.bids || []).map((b) => ({ price: b.price, qty: b.size }));
   const asks: DepthLevel[] = (input.orderBook?.asks || []).map((a) => ({ price: a.price, qty: a.size }));
@@ -73,6 +141,7 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
         confluenceScore: 0,
         invalidationLevel: Number((entryPrice * 0.985).toFixed(2)),
       },
+      futuresAnalysis: futuresAnalysis || undefined,
     };
     const emptyResult = generateSignal({
       symbol,
@@ -136,9 +205,14 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
     }
   }
 
-  const reasoning = signalResult.discardedReason
+  let reasoning = signalResult.discardedReason
     ? `[Keel Engine] Signal Filtered: ${signalResult.discardedReason} | Flow: ${signalResult.smartMoneyFlow} | Liquidity Depth: $${(signalResult.liquidityDepthUsd / 1000).toFixed(0)}k`
     : `[Keel Engine] Institutional Signal Approved | Flow: ${signalResult.smartMoneyFlow} | Wall Action: ${signalResult.wall?.action || "NONE"} | Confluence: ${signalResult.confluence.score}%`;
+
+  if (futuresAnalysis && futuresAnalysis.fundingBps != null) {
+    const fa = futuresAnalysis;
+    reasoning += ` | Futures: funding ${fa.fundingBps?.toFixed(2)}bps, OI $${((fa.openInterestUsd || 0) / 1e9).toFixed(1)}B, LSR ${fa.lsrTaker ?? "-"}, liq LONG $${((fa.longLiqUsd || 0) / 1000).toFixed(0)}k/SHORT $${((fa.shortLiqUsd || 0) / 1000).toFixed(0)}k → bias ${fa.bias}`;
+  }
 
   const decision: LLMDecision = {
     action,
@@ -158,6 +232,7 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
       confluenceScore: signalResult.confluence.score,
       invalidationLevel: stopLoss,
     },
+    futuresAnalysis: futuresAnalysis || undefined,
   };
 
   return { decision, rawSignalResult: signalResult };

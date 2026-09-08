@@ -67,7 +67,7 @@ import {
 } from "./guardrails";
 import { runKeelQuantEngine, evaluateKeelRisk } from "./src/logic/keelAdapter";
 import { analyzeMTFLiquidity } from "./src/logic/liquidityHunt";
-import { fetchMarketData, fetchRecentTrades, fetchOHLCVWithFallback, RecentTrade } from "./src/data/marketFetcher";
+import { fetchMarketData, fetchRecentTrades, fetchOHLCVWithFallback, RecentTrade, fetchFuturesMetrics, FuturesMetrics } from "./src/data/marketFetcher";
 
 dotenv.config();
 
@@ -1022,6 +1022,19 @@ app.post("/api/keel/signal", requireAuth, async (req, res) => {
   }
   if (trades.success) console.log(`[keel] recentTrades: ${trades.trades.length} (${trades.source})`);
 
+  // K7: Wire REAL futures institutional metrics (Gate.io perp) ke keel adapter.
+  // Fail-closed: kalau fetch gagal → { success:false, source:"NONE" } → futuresAnalysis undefined.
+  let futures: FuturesMetrics = { success: false, source: "NONE" };
+  try {
+    futures = await fetchFuturesMetrics(sym);
+  } catch (e: any) {
+    console.warn(`[keel] futures metrics fetch failed: ${e?.message}`);
+  }
+  if (futures.success) {
+    const oiB = futures.openInterestUsd ? (futures.openInterestUsd / 1e9).toFixed(1) : "-";
+    console.log(`[keel] futures: ${futures.source} funding=${(futures.fundingBps ?? 0).toFixed(2)}bps OI=$${oiB}B LSR=${futures.lsrTaker ?? "-"}`);
+  }
+
   try {
     const result = runKeelQuantEngine({
       symbol: sym,
@@ -1030,6 +1043,7 @@ app.post("/api/keel/signal", requireAuth, async (req, res) => {
       mtfLiquidity: mtf,
       orderBook,
       recentTrades: trades.trades,
+      futures,
     });
     const currentEquity = (() => { try { return getPaperAccount().equity; } catch { return 10000; } })();
     const riskEval = evaluateKeelRisk(
