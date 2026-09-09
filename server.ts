@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type Request, type Response } from "express";
 import path from "path";
 import { pathToFileURL } from "node:url";
 import dotenv from "dotenv";
@@ -15,14 +15,12 @@ import {
   fetchCcxtTicker,
   getBrokerStatus,
   getVaultCredentialsStatus,
-  placeBrokerOrder,
   saveBrokerCredentials,
   setLiveArmed,
   testBrokerConnection,
 } from "./broker";
 import {
   PaperOrderError,
-  closePaperPosition,
   getBookFilePath,
   getLatestEventSeq,
   getPaperAccount,
@@ -31,7 +29,6 @@ import {
   getPaperOrder,
   getPaperPositions,
   initPaperBook,
-  openPaperPosition,
   refreshPaperMarks,
   startBracketMonitor,
   updatePaperMarkCache,
@@ -70,6 +67,8 @@ import { analyzeMTFLiquidity } from "./src/logic/liquidityHunt";
 import { fetchMarketData, fetchRecentTrades, fetchOHLCVWithFallback, RecentTrade, fetchFuturesMetrics, FuturesMetrics } from "./src/data/marketFetcher";
 import { calculateRSI, calculateEMA, calculateMACD } from "./src/logic/indicators";
 import { scanGateMicrocapPumps } from "./src/logic/pumpScanner";
+import { handlePaperOrder, handlePaperClose } from "./src/broker/paperBroker";
+import { handleLiveOrder, handleLiveClose } from "./src/broker/liveBroker";
 import type { Candle, OrderBook, MTFLiquidityAnalysis, OnChainMetrics, MacroSummary } from "./src/types";
 
 dotenv.config();
@@ -1541,129 +1540,13 @@ function guardReject(res: any, reason: string, message?: string) {
 }
 
 // Order (paper: buku posisi paper dengan fill terukur; live: order exchange asli) — PROTECTED + guardrails
-app.post("/api/broker/order", requireAuth, async (req, res) => {
+// ROUTER TIPIS: delegasi ke paperBroker / liveBroker berdasarkan mode (pisah struktur paper vs live).
+app.post("/api/broker/order", requireAuth, async (req: Request, res: Response) => {
   try {
-    const body = req.body || {};
-
-    // ---------- PAPER MODE ----------
-    if (getBrokerStatus().mode !== "live") {
-      // Closing order: { closePositionId } — closing de-risks, no guardrail
-      if (body.closePositionId) {
-        try {
-          const result = await closePaperPosition(String(body.closePositionId), "MANUAL");
-          try {
-            appendAudit("exit", {
-              positionId: result.position.id,
-              symbol: result.position.symbol,
-              side: result.position.side,
-              exitReason: "MANUAL",
-              exitPrice: result.exitFillPrice,
-              realizedPnlUSD: result.realizedPnlUSD,
-              orderId: result.order.id,
-            });
-          } catch (err) {
-            // P3: audit failure TIDAK boleh silent — log selalu biar operator tau.
-            console.error("[audit] GAGAL tulis audit close: ", (err as Error)?.message);
-          }
-          return res.json({ success: true, mode: "paper", closed: true, ...result });
-        } catch (err: any) {
-          if (err instanceof PaperOrderError) {
-            return res.status(400).json({ success: false, status: "REJECTED", reason: err.code, message: err.message });
-          }
-          return res.status(400).json({ success: false, status: "REJECTED", reason: "CLOSE_FAILED", message: err?.message || "Gagal menutup posisi." });
-        }
-      }
-
-      // Opening order — evaluate guardrails before placement
-      // Only guard OPENs, not closes
-      const guard = await evaluateGuardrails({ symbol: String(body.symbol || "BTC/USDT") });
-      if (!guard.allowed) {
-        const primary = guard.reasons[0] as string;
-        return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guard.reasons.join(", ")})`);
-      }
-
-      // Opening order
-      try {
-        const result = await openPaperPosition({
-          symbol: body.symbol,
-          side: String(body.side || "buy").toLowerCase() === "sell" ? "sell" : "buy",
-          qty: Number(body.amount),
-          leverage: body.leverage,
-          stopLoss: body.stopLoss,
-          takeProfit: body.takeProfit,
-          meta: body.meta,
-        });
-        recordOrderPlaced();
-        try {
-          appendAudit("order", {
-            orderId: result.order.id,
-            positionId: result.position.id,
-            symbol: result.position.symbol,
-            side: result.order.side,
-            amount: result.order.amount,
-            fillPrice: result.order.fillPrice,
-            leverage: result.order.leverage,
-            stopLoss: body.stopLoss,
-            takeProfit: body.takeProfit,
-          });
-        } catch (err) {
-          console.error("[audit] GAGAL tulis audit order: ", (err as Error)?.message);
-        }
-        const { position, order } = result;
-        return res.json({
-          success: true,
-          mode: "paper",
-          order: {
-            id: order.id,
-            status: order.status,
-            fillPrice: order.fillPrice,
-            slippageBps: order.slippageBps,
-            feeUSD: order.feeUSD,
-            qty: order.qty,
-            notional: order.notional,
-            leverage: order.leverage,
-            marginRequired: order.marginRequired,
-            executionLatencyMs: order.executionLatencyMs,
-            timestamp: order.timestamp,
-            signature: order.signature,
-            payloadHash: order.payloadHash,
-          },
-          position,
-        });
-      } catch (err: any) {
-        if (err instanceof PaperOrderError) {
-          return res.status(400).json({ success: false, status: "REJECTED", reason: err.code, message: err.message });
-        }
-        return res.status(400).json({ success: false, status: "REJECTED", reason: "ORDER_FAILED", message: err?.message || "Order paper gagal." });
-      }
+    if (getBrokerStatus().mode === "live") {
+      return await handleLiveOrder(req, res);
     }
-
-    // ---------- LIVE MODE (pass-through, guarded + double-lock) ----------
-    // Guardrails must also apply to live opens
-    const guardLive = await evaluateGuardrails({ symbol: String(body.symbol || "BTC/USDT") });
-    if (!guardLive.allowed) {
-      const primary = guardLive.reasons[0] as string;
-      return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guardLive.reasons.join(", ")})`);
-    }
-    // Double-lock: liveArmed check is inside placeBrokerOrder via assertLiveAllowed, but we surface clearly
-    try {
-      const result = await placeBrokerOrder(body);
-      recordOrderPlaced();
-      res.json({ success: true, ...result });
-    } catch (err: any) {
-      const code = err?.code;
-      if (code === "LIVE_NOT_ARMED") {
-        return guardReject(res, "LIVE_NOT_ARMED", err.message);
-      }
-      if (err instanceof GuardrailRejectedError) {
-        return guardReject(res, err.reason, err.message);
-      }
-      // Map other errors to REJECTED shape if they look like guard
-      if (String(err?.message).includes("ARM_REQUIRES_LIVE_AND_CREDENTIALS")) {
-        return res.status(400).json({ success: false, status: "REJECTED", reason: "ARM_REQUIRES_LIVE_AND_CREDENTIALS", message: err.message });
-      }
-      res.status(400).json({ success: false, status: "REJECTED", reason: "ORDER_FAILED", message: err?.message || "Order gagal." });
-    }
+    return await handlePaperOrder(req, res);
   } catch (err: any) {
     // Generic fallback — check if it's a guard error
     if (err instanceof GuardrailRejectedError) {
@@ -1698,30 +1581,13 @@ app.get("/api/broker/positions", requireAuth, async (_req, res) => {
 });
 
 // Close posisi (paper: market close via paper book) — PROTECTED (closing de-risks, no guardrail)
-app.post("/api/broker/close", requireAuth, async (req, res) => {
+// ROUTER TIPIS: delegasi ke paperBroker / liveBroker.
+app.post("/api/broker/close", requireAuth, async (req: Request, res: Response) => {
   try {
     if (getBrokerStatus().mode === "live") {
-      return res.status(400).json({ success: false, message: "Live close via /api/broker/close belum diimplementasikan (roadmap Phase 2+)." });
+      return await handleLiveClose(req, res);
     }
-    const positionId = String((req.body || {}).positionId || "");
-    if (!positionId) {
-      return res.status(400).json({ success: false, status: "REJECTED", reason: "MISSING_POSITION_ID", message: "positionId wajib diisi." });
-    }
-    const result = await closePaperPosition(positionId, "MANUAL");
-    try {
-      appendAudit("exit", {
-        positionId: result.position.id,
-        symbol: result.position.symbol,
-        side: result.position.side,
-        exitReason: "MANUAL",
-        exitPrice: result.exitFillPrice,
-        realizedPnlUSD: result.realizedPnlUSD,
-        orderId: result.order.id,
-      });
-    } catch (err) {
-      console.error("[audit] GAGAL tulis audit close (manual): ", (err as Error)?.message);
-    }
-    res.json({ success: true, mode: "paper", closed: true, ...result });
+    return await handlePaperClose(req, res);
   } catch (err: any) {
     if (err instanceof PaperOrderError) {
       const status = err.code === "POSITION_NOT_FOUND" ? 404 : 400;
