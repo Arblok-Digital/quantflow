@@ -14,6 +14,7 @@ import { KeyVaultModal } from "./components/KeyVaultModal";
 import { BrokerModal } from "./components/BrokerModal";
 import { KeelEnginePanel, KeelAnalysisResult } from "./components/KeelEnginePanel";
 import { AiAdvisorPanel } from "./components/AiAdvisorPanel";
+import { PumpRadarPanel } from "./components/PumpRadarPanel";
 
 import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
 import { PaperTradingPanel } from "./components/PaperTradingPanel";
@@ -544,6 +545,11 @@ export default function App() {
             macroSummary={macroSummary}
             geminiActive={geminiActive}
           />
+        )}
+
+        {/* 📡 PUMP RADAR — scanner microcap Gate.io SPOT (alert only, tanpa eksekusi) */}
+        {activeTab === "pump" && (
+          <PumpRadarPanel />
         )}
       </main>
 

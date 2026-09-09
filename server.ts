@@ -69,6 +69,7 @@ import { runKeelQuantEngine, evaluateKeelRisk, FuturesAnalysis } from "./src/log
 import { analyzeMTFLiquidity } from "./src/logic/liquidityHunt";
 import { fetchMarketData, fetchRecentTrades, fetchOHLCVWithFallback, RecentTrade, fetchFuturesMetrics, FuturesMetrics } from "./src/data/marketFetcher";
 import { calculateRSI, calculateEMA, calculateMACD } from "./src/logic/indicators";
+import { scanGateMicrocapPumps } from "./src/logic/pumpScanner";
 import type { Candle, OrderBook, MTFLiquidityAnalysis, OnChainMetrics, MacroSummary } from "./src/types";
 
 dotenv.config();
@@ -1384,6 +1385,19 @@ app.get("/api/market/keel-context", requireAuth, async (req, res) => {
     recentTrades: recentTrades.trades,
     futures,
   });
+});
+
+// ================= PUMP RADAR (Gate.io SPOT microcap scanner — ALERT ONLY) =================
+// Endpoint read-only: tidak ada eksekusi order. Fail-close: kalau scan error/empty,
+// tetap 200 dengan success:false / results:[] — jangan pernah crash server.
+app.get("/api/pump-scan", requireAuth, async (_req, res) => {
+  try {
+    const results = await scanGateMicrocapPumps();
+    res.json({ success: true, scannedAt: Date.now(), results });
+  } catch (err: any) {
+    console.error(`[pump-scan] failed: ${err?.message}`);
+    res.status(502).json({ success: false, message: err?.message || "Scan microcap Gate.io gagal." });
+  }
 });
 
 // ================= BROKER ROUTES (ccxt provider) =================
