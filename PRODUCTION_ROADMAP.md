@@ -1,6 +1,7 @@
 # PRODUCTION ROADMAP — AI Trading Agent Engine
 
-> Hasil audit 2026-09-06. Status awal: **~35% production-ready**. Update 2026-09-07: **~88% — Phase 2,3,4,5,6,7 DONE di code (verif tsc EXIT 0 + 46 tests PASS), Phase 1,8 sisa**.
+> Hasil audit 2026-09-06. Status awal: **~35% production-ready**. Update 2026-09-07: **~88% paper — Phase 2,3,4,5,6,7 DONE (tsc 0 + 48 tests PASS)**.
+> Update 2026-09-09: **Paper 88% / Live 30%** — tsc EXIT 0, vitest 64/64 PASS, build OK. Live 3 blockers: no close, no positions, no TP/SL on restart. 4 file masih monolith (server.ts 1718L, paperBook.ts 1278L, broker.ts 668L, db.ts 668L).
 > Aturan emas: **SETIAP pekerjaan backend WAJIB punya pasangan FE** — kalau agent/server mengerjakan sesuatu, UI harus menunjukkannya (apa, kenapa, kapan, hasil apa).
 > Target: **Paper mode = 100%可信 (trustworthy) dulu**, baru Live mode dengan guardrails.
 
@@ -30,6 +31,8 @@ Masalah sekarang: `src/pipeline/brokerService.ts` = simulator pura-pura (slippag
 - [ ] [FE] **1.9** **Order Lifecycle Stream** (decision → risk gate → submit → ack → fill) sebagai timeline per order, warna status jelas
 
 **Acceptance Phase 1:** paper mode menghasilkan trade journal yang isinya 100% berasal dari server (tidak ada angka yang di-random di browser); kill server → UI menunjuk "disconnected", bukan lanjut trading diam-diam.
+
+**Status audit 2026-09-09:** Paper path ✅ (order → fill → positions → close → journal, semua server-truth). Live path bertahan sebagai TODO: `handleLiveClose` stub (liveBroker.ts:51), live positions `[]` (server.ts:1567), belum ada order-status polling FE. **VERDICT Live: ~30% — JANGAN arm live sampai P0-1..P0-3 di atas selesai.**
 
 ## PHASE 2 — Server-Side Guardrails & Security (P0, WAJIB sebelum TRADING_MODE=live dipakai)
 
@@ -113,6 +116,31 @@ Masalah sekarang: harga 1s adalah random-walk sintetis yang di-revert ke anchor 
 
 ---
 
+## PHASE 9 — Live-Readiness Close-Out (P0 — SEBELUM live uang riil, hasil audit 2026-09-09)
+
+> Blocker P0 dari audit: 3 item live gak bisa dipakai — close, positions, TP/SL exchange-native. Tanpa ini jangan arm live.
+
+- [ ] **9.1** [BE] **`handleLiveClose` implementasi**: fetch posisi dari exchange (ccxt), kirim market order lawan arah dengan `reduceOnly`, catat ke audit ledger. Hapus stub liveBroker.ts:51.
+- [ ] **9.2** [BE] **Live positions dari exchange**: `GET /api/broker/positions` saat mode live → fetch `fetchPositions()` ccxt, map ke shape Position (entry, mark, uPnL, liq price), hapus return `positions: []` (server.ts:1567).
+- [ ] **9.3** [BE] **Exchange-native TP/SL**: saat open live order, pasang conditional order (stopMarket SL + takeProfitMarket TP) via ccxt; fallback server-side bracket monitor hanya untuk paper.
+- [ ] [FE] **9.4** PositionsPanel & ExecutionConsole: render posisi live real (bukan kosong), tombol Close jalan server-side, polling order-status.
+- [ ] **9.5** [SEC] `AUTH_PASSCODE` wajib di-set kuat + `BROKER_EVENT_SECRET` non-default sebelum live. `.env` jangan pernah kosong untuk kedua ini.
+
+## PHASE 10 — Monolith Split & Ops (P1 — tech debt, hasil audit 2026-09-09)
+
+- [ ] **10.1** Split `server.ts` (1718 baris) → `src/server/routes/{auth,market,broker,ledger,ai}.ts` + `src/server/wsProxy.ts` + `server.ts` tipis (setup only)
+- [ ] **10.2** Split `paperBook.ts` (1278 baris) → `src/paperbook/{engine,store,bracketMonitor,markCache}.ts`
+- [ ] **10.3** Split `broker.ts` (668 baris) → `src/broker/{exchange,vault,config,test}.ts`
+- [ ] **10.4** Split `db.ts` (668 baris) → `src/db/{init,ledger,audit,secrets}.ts`
+- [ ] **10.5** Structured logging (pino) + mask apiKey + file rotation
+- [ ] **10.6** Watchdog: heartbeat exchange ↔ server ↔ browser; disconnect → agent auto-pause + UI freeze alasan
+- [ ] **10.7** Rehydrate on restart: server startup sync posisi terbuka dari exchange (live) / DB (paper) → FE otomatis cocok
+- [ ] **10.8** Dockerfile + docker-compose (app + volume sqlite)
+- [ ] **10.9** Notification center (toast fills/rejects/ws-disconnect) + Agent Status Panel
+- [ ] **10.10** Backfill/forward-test mode: replay data historis tanpa order + panel hasil
+
+---
+
 ## Definisi Selesai (Definition of Done per item BE)
 
 Setiap task backend baru dianggap selesai kalau:
@@ -131,10 +159,28 @@ Phase 0 (fondasi, <1 hari)
  → Phase 4 (decision integrity) ✅ 2026-09-07
  → Phase 5 (WS feed) ✅ 2026-09-07
  → Phase 6 (correctness) ✅ 2026-09-07
- → Phase 7 (tests/CI) ✅ 2026-09-07 — 46 tests PASS
+ → Phase 7 (tests/CI) ✅ 2026-09-07 — 64 tests PASS (09-09)
  → Phase 8 (ops, sebelum live)
+ → Phase 9 (live close-out) ← TODO besok 10-09: P0-1..P0-3
+ → Phase 10 (monolith split & ops) ← TODO berikutnya
 ```
 
-**Gate:** Phase 1–3 selesai → Paper mode bisa dipercaya. (Phase 2,3 done; Phase 1 live-only pending)
-**Gate:** Phase 4–7 selesai → boleh mempertimbangkan `TRADING_MODE=live` dengan testnet. (Phase 4,5,6,7 done ✅; siap testnet)
-Uang riil hanya setelah Phase 8 + forward-test.
+**Gate:** Phase 1–3 selesai → Paper mode bisa dipercaya. (Phase 2,3 done; Phase 1 paper done, live-only pending → **Paper ~88%**)
+**Gate:** Phase 4–7 selesai → boleh mempertimbangkan `TRADING_MODE=live` dengan testnet. (Phase 4,5,6,7 done ✅; siap testnet SETELAH Phase 9 selesai)
+Uang riil hanya setelah Phase 8 + 9 + forward-test.
+
+---
+
+## TODO BESOK — Kamis 10 Sep 2026 (dari audit 09-09)
+
+> Prioritas P0 dulu: 3 blocker live. Jangan mulai Phase 10 sebelum 9.1-9.3 kelar.
+
+1. **P0-9.1** Implement `handleLiveClose` — cari posisi di exchange, reduceOnly market order, audit
+2. **P0-9.2** Implement live positions — `fetchPositions()` ccxt → Position shape, API return real
+3. **P0-9.3** Exchange-native TP/SL — conditional order Binance Futures saat open live
+4. **P0-9.4** FE: PositionsPanel render live positions + Close button real + order-status poll
+5. **P0-9.5** Set AUTH_PASSCODE kuat + BROKER_EVENT_SECRET kuat di .env (.env gak di-commit)
+6. **P1-10.1** Split server.ts (1718L) → route modules
+7. **P1-10.5** Pino structured logging
+
+Verify tiap item: `npx tsc --noEmit && npx vitest run && npm run build` → smoke test login → order → close via curl.
