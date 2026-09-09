@@ -1200,55 +1200,53 @@ app.post("/api/ai-advisor", requireAuth, async (req, res) => {
   if (client && keelDecision) {
     const oc = body.onChainMetrics;
     const mc = body.macroCalendar;
-    const prompt = `Anda adalah PENASIHAT finansial (advisor) dalam agent trading. Peran Anda: beri INSIGHT NARATIF untuk membantu manusia mengambil keputusan. Anda BUKAN eksekutor — jangan pernah memerintahkan eksekusi order, tidak ada trade yang dieksekusi dari output Anda.
+    const prompt = `Anda adalah STRATEGIST & ANALYST QUANT SENIOR dari institusi elit (seperti Jane Street atau BlackRock Aladdin).
+Peran Anda: memberikan INTELLIGENCE & REKOMENDASI STRATEGIS berdasarkan sintesis data mikro (Keel/MTF), on-chain, dan makroekonomi.
 
 Aset: ${sym} | Harga saat ini: $${livePrice}
 
-RINGKASAN KEEL QUANT ENGINE (rule-based, sumber utama):
+[DATA MIKRO & FLOW (KEEL ENGINE)]:
 - Aksi: ${keelSummary.action} | Confidence: ${keelSummary.confidence}%
-- Order flow (smart money): ${keelSummary.flow}
+- Order flow (Smart Money): ${keelSummary.flow}
 - Bias futures: ${keelSummary.futuresBias} | Funding: ${keelSummary.fundingBps != null ? keelSummary.fundingBps.toFixed(2) + " bps" : "N/A"}
-- Open Interest: ${keelSummary.openInterestUsd != null ? "$" + (keelSummary.openInterestUsd / 1e6).toFixed(0) + "M" : "N/A"} | LSR Taker: ${keelSummary.lsrTaker ?? "N/A"}
-- Confluence: ${keelSummary.confluenceScore ?? "N/A"}% | Liquidity depth: ${keelSummary.liquidityDepthUsd != null ? "$" + (keelSummary.liquidityDepthUsd / 1000).toFixed(0) + "k" : "N/A"}
-- Reasoning keel: ${keelSummary.reasoning}
-- Filtered/discarded: ${keelSummary.discardedReason || "tidak ada"}
+- Confluence: ${keelSummary.confluenceScore ?? "N/A"}% | Liquidity: ${keelSummary.liquidityDepthUsd != null ? "$" + (keelSummary.liquidityDepthUsd / 1000).toFixed(0) + "k" : "N/A"}
+- Reasoning: ${keelSummary.reasoning}
 
-MTF LIQUIDITY:
+[MTF & LIQUIDITY STRUCTURE]:
 - State: ${keelSummary.mtfState?.activeState || "N/A"}
-- BSL terdekat: ${keelSummary.mtfState?.nearestBSL ? "$" + keelSummary.mtfState.nearestBSL.midPrice : "N/A"}
-- SSL terdekat: ${keelSummary.mtfState?.nearestSSL ? "$" + keelSummary.mtfState.nearestSSL.midPrice : "N/A"}
-- Sweep terakhir: ${keelSummary.mtfState?.recentSweep ? keelSummary.mtfState.recentSweep.type + " (rejeksi " + keelSummary.mtfState.recentSweep.wickRejectionPercent + "%, invalidation $" + keelSummary.mtfState.recentSweep.invalidationPrice + ")" : "belum ada"}
+- BSL (Buy Side Liquidity): ${keelSummary.mtfState?.nearestBSL ? "$" + keelSummary.mtfState.nearestBSL.midPrice : "N/A"}
+- SSL (Sell Side Liquidity): ${keelSummary.mtfState?.nearestSSL ? "$" + keelSummary.mtfState.nearestSSL.midPrice : "N/A"}
+- Sweep: ${keelSummary.mtfState?.recentSweep ? keelSummary.mtfState.recentSweep.type + " (" + keelSummary.mtfState.recentSweep.wickRejectionPercent + "%)" : "None"}
 
-ON-CHAIN:
-- Netflow bursa 24h USD: ${oc?.exchangeNetflow24hUSD != null ? oc.exchangeNetflow24hUSD : "N/A"}
-- Smart money bias: ${oc?.smartMoneyBias || "N/A"} (confidence ${oc?.onChainConfidence ?? "N/A"}%)
+[ON-CHAIN METRICS]:
+- Netflow: ${oc?.exchangeNetflow24hUSD != null ? oc.exchangeNetflow24hUSD : "N/A"}
 - MVRV Z-score: ${oc?.mvrvZScore ?? "N/A"} (${oc?.mvrvTerritory || "N/A"})
-- SOPR: ${oc?.sopr ?? "N/A"} (${oc?.soprStatus || "N/A"})
-- Whale: ${oc?.whaleAlerts?.[0] ? oc.whaleAlerts[0].type + " $" + (oc.whaleAlerts[0].usdValue / 1e6).toFixed(1) + "M" : "N/A"}
+- Whale Move: ${oc?.whaleAlerts?.[0] ? oc.whaleAlerts[0].type + " $" + (oc.whaleAlerts[0].usdValue / 1e6).toFixed(1) + "M" : "None"}
 
-MAKRO:
-- Sikap Fed: ${mc?.fedPolicyStance || "N/A"}
-- Indeks risiko makro: ${mc?.macroRiskIndex ?? "N/A"}/100
-- Event terdekat: ${mc?.nearestEvent ? mc.nearestEvent.name + " (" + mc.nearestEvent.relativeTime + ", impact " + mc.nearestEvent.impact + ")" : "N/A"}
+[MACRO CONTEXT]:
+- Fed Stance: ${mc?.fedPolicyStance || "N/A"}
+- Risk Index: ${mc?.macroRiskIndex ?? "N/A"}/100
+- Nearest Event: ${mc?.nearestEvent ? mc.nearestEvent.name + " (" + mc.nearestEvent.relativeTime + ")" : "None"}
 
-TUGAS:
-1. Beri INSIGHT NARATIF (3-6 kalimat Bahasa Indonesia): kenapa kondisi ini terjadi, apa risiko utama, dan level apa yang masuk akal untuk SL/TP serta apa yang harus user perhatikan.
-2. Sintesis keel + MTF + on-chain + makro menjadi satu narasi mudah dipahami, bukan baris data mentah.
-3. JANGAN perintah eksekusi/order. Ini murni pertimbangan buat user.
+TUGAS ANDA:
+1. Analisis SINTESIS: Hubungkan data mikro (Keel) dengan konteks besar (Makro/On-chain). Mengapa harga bergerak seperti ini?
+2. Berikan "Professional Insight" (3-6 kalimat Bahasa Indonesia tajam, tanpa basa-basi).
+3. Tentukan suggestedBias secara TEGAS: LONG atau SHORT jika ada sinyal minimal 60% confluence. Gunakan NEUTRAL hanya jika market benar-benar dead-flat atau data sangat kontradiktif (conflict of interest). 
+4. Berikan level Entry, SL, dan TP yang presisi secara matematis berdasarkan likuiditas (BSL/SSL).
 
-Jawab HANYA JSON valid tanpa markdown wrapper:
+Jawab HANYA JSON valid tanpa markdown:
 {
-  "insight": "string naratif 3-6 kalimat Bahasa Indonesia",
-  "suggestedBias": "BULLISH" | "BEARISH" | "NEUTRAL",
-  "keyLevels": { "entry": number|null, "stopLoss": number|null, "takeProfit": number|null },
-  "risks": ["string", "string", "string"] (1-3 item),
-  "caveat": "string"
+  "insight": "analisis tajam ala Jane Street",
+  "suggestedBias": "LONG" | "SHORT" | "NEUTRAL",
+  "keyLevels": { "entry": number, "stopLoss": number, "takeProfit": number },
+  "risks": ["string", "string"],
+  "caveat": "disclaimer singkat"
 }`;
 
     // Zod schema — semua optional kecuali insight.
     const advisorSchema = z.object({
       insight: z.string().min(5),
-      suggestedBias: z.enum(["BULLISH", "BEARISH", "NEUTRAL"]).optional(),
+      suggestedBias: z.enum(["LONG", "SHORT", "NEUTRAL", "BULLISH", "BEARISH"]).optional(),
       keyLevels: z
         .object({
           entry: z.number().nullable().optional(),

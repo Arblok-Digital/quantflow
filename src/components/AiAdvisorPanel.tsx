@@ -46,10 +46,10 @@ interface AiAdvisorPanelProps {
   geminiActive: boolean;
 }
 
-function biasBadge(bias: string) {
+function biasBadge(bias?: string) {
   const b = String(bias || "NEUTRAL").toUpperCase();
-  if (b === "BULLISH") return { label: "BULLISH", cls: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" };
-  if (b === "BEARISH") return { label: "BEARISH", cls: "bg-rose-500/15 text-rose-400 border-rose-500/30" };
+  if (b === "BULLISH" || b === "LONG") return { label: "LONG", cls: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" };
+  if (b === "BEARISH" || b === "SHORT") return { label: "SHORT", cls: "bg-rose-500/15 text-rose-400 border-rose-500/30" };
   return { label: "NEUTRAL", cls: "bg-amber-500/15 text-amber-400 border-amber-500/30" };
 }
 
@@ -198,6 +198,45 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
 
         {result && (
           <>
+            {/* STRATEGIC RECOMMENDATION — Headline Arahan */}
+            {ai?.suggestedBias && (
+              <div className={`mb-4 rounded-2xl border-4 p-5 flex items-center justify-between shadow-[0_0_30px_rgba(0,0,0,0.5)] ${
+                ai.suggestedBias === "LONG" ? "bg-emerald-950/60 border-emerald-500/80 shadow-emerald-500/20" : 
+                ai.suggestedBias === "SHORT" ? "bg-rose-950/60 border-rose-500/80 shadow-rose-500/20" : 
+                "bg-zinc-900/80 border-zinc-600/50"
+              }`}>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <p className="text-[11px] font-mono uppercase tracking-[0.2em] text-zinc-400 font-black">Strategic Guidance</p>
+                    <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-[9px] text-zinc-500 font-bold border border-zinc-700">SWING 4H</span>
+                  </div>
+                  <h3 className={`text-3xl font-black font-mono tracking-tighter uppercase leading-none ${
+                    ai.suggestedBias === "LONG" ? "text-emerald-400" : 
+                    ai.suggestedBias === "SHORT" ? "text-rose-400" : 
+                    "text-zinc-100"
+                  }`}>
+                    {ai.suggestedBias === "LONG" ? "INSTITUTIONAL LONG" : 
+                     ai.suggestedBias === "SHORT" ? "INSTITUTIONAL SHORT" : 
+                     "WAIT & OBSERVE"}
+                  </h3>
+                  <p className="text-[10px] font-medium text-zinc-500 italic">Targeting liquidity pools (BSL/SSL)</p>
+                </div>
+                <div className="flex flex-col items-end gap-2">
+                  <span className={`text-sm font-mono font-black px-4 py-1.5 rounded-full border-2 shadow-sm ${biasBadge(ai.suggestedBias).cls}`}>
+                    {ai.suggestedBias}
+                  </span>
+                  <div className="flex gap-1">
+                    {[1,2,3].map(i => (
+                      <div key={i} className={`w-1.5 h-1.5 rounded-full ${
+                        ai.suggestedBias === "NEUTRAL" ? "bg-zinc-700" : 
+                        ai.suggestedBias === "LONG" ? "bg-emerald-500 animate-pulse" : "bg-rose-500 animate-pulse"
+                      }`} style={{ animationDelay: `${i*0.2}s` }} />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* INSIGHT — paling menonjol */}
             <div
               className={`rounded-xl bg-zinc-950/70 border p-4 space-y-2 ${
