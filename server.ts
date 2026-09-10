@@ -9,11 +9,13 @@ import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import {
   clearBrokerCredentials,
+  ensureMarketsLoaded,
   fetchBrokerBalance,
   fetchCcxtOHLCV,
   fetchCcxtOrderBook,
   fetchCcxtTicker,
   getBrokerStatus,
+  getExchange,
   getVaultCredentialsStatus,
   saveBrokerCredentials,
   setLiveArmed,
@@ -149,6 +151,19 @@ function getGeminiClient(): GoogleGenAI | null {
 // ================= AUTH ROUTES =================
 warnIfDefaultPasscode();
 warnIfDefaultAuditSecret();
+
+// SECURITY: warn if weak/default secrets detected (P0-9.9)
+if (getAuthPasscode() === "paper-local") {
+  console.warn(
+    "⚠️  AUTH_PASSCODE is using default 'paper-local'. Set a strong passcode via AUTH_PASSCODE env before enabling live trading.",
+  );
+}
+const brokerEventSecret = process.env.BROKER_EVENT_SECRET;
+if (!brokerEventSecret || brokerEventSecret === "shared-dev-secret" || brokerEventSecret === "paper-dev-secret") {
+  console.warn(
+    "⚠️  BROKER_EVENT_SECRET is missing or using a known dev default ('shared-dev-secret'/'paper-dev-secret'). Generate a strong secret: node -e \"console.log(require('crypto').randomUUID())\"",
+  );
+}
 
 app.post("/api/auth/login", loginLimiter, (req, res) => {
   const passcode = String((req.body || {}).passcode || "");
@@ -1556,16 +1571,45 @@ app.post("/api/broker/order", requireAuth, async (req: Request, res: Response) =
   }
 });
 
-// Positions (paper: buku posisi paper dengan mark terbaru; live: belum disimpan, passthrough) — PROTECTED
+// Positions (paper: buku posisi paper dengan mark terbaru; live: fetch dari exchange) — PROTECTED
 app.get("/api/broker/positions", requireAuth, async (_req, res) => {
   if (getBrokerStatus().mode === "live") {
-    return res.json({
-      success: true,
-      mode: "live",
-      positions: [],
-      account: null,
-      note: "Live positions are pass-through only and not stored yet (roadmap Phase 2+).",
-    });
+    try {
+      const exchange = getExchange();
+      await ensureMarketsLoaded(exchange);
+      const rawPositions = await exchange.fetchPositions();
+      const positions = rawPositions
+        .filter((p: any) => Number(p.contracts || p.amount || 0) !== 0)
+        .map((p: any) => ({
+          id: `${p.symbol}-${p.side}-${Date.now()}`,
+          symbol: p.symbol,
+          side: p.side,
+          amount: Number(p.contracts || p.amount || 0),
+          entryPrice: Number(p.entryPrice || 0),
+          markPrice: Number(p.markPrice || p.info?.markPrice || 0),
+          unrealizedPnl: Number(p.unrealizedPnl || 0),
+          liquidationPrice: Number(p.liquidationPrice || 0),
+          leverage: Number(p.leverage || 1),
+          marginType: p.marginType || "cross",
+          notional: Number(p.notional || 0),
+          timestamp: p.timestamp || Date.now(),
+        }));
+      return res.json({
+        success: true,
+        mode: "live",
+        positions,
+        account: null,
+      });
+    } catch (err: any) {
+      console.warn(`[live] Gagal fetch positions dari exchange: ${err?.message}`);
+      return res.json({
+        success: true,
+        mode: "live",
+        positions: [],
+        account: null,
+        error: err?.message,
+      });
+    }
   }
   try {
     await refreshPaperMarks();

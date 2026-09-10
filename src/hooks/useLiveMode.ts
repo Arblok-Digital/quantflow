@@ -45,18 +45,18 @@ export function useLiveMode(isAuthenticated?: boolean) {
       const armed = armedFromCred || armedFromGuard;
 
       const credConfigured = Boolean(credRes?.credentialsConfigured ?? credRes?.configured ?? (credRes?.credentialSource && credRes.credentialSource !== "none"));
-      const mode = (guardRes?.config ? "paper" : "paper") as "paper" | "live";
-      // real mode from broker status is more reliable; fetch separately if needed
-      // we derive from balance response: balRes.mode
+      // Mode real diambil dari balance response (balRes.mode) — paling reliable.
       const m = balRes?.mode === "live" ? "live" : credRes?.success ? (armed ? "live" : "paper") : "paper";
 
       const balances = Array.isArray(balRes?.balances) ? balRes.balances : undefined;
+      // Equity: prioritas account.equity dari balance response, lalu USDT total
+      // sebagai proxy, terakhir pertahankan nilai lama (prev.equity).
       let equity: number | undefined;
-      if (balances) {
-        // crude: sum USDT totals as proxy equity when live; paper equity from account
+      if (balRes?.account?.equity !== undefined) {
+        equity = Number(balRes.account.equity);
+      } else if (balances) {
         const usdt = balances.find((b: any) => b.currency === "USDT");
         if (usdt) equity = Number(usdt.total);
-        if (balRes?.account?.equity !== undefined) equity = Number(balRes.account.equity);
       }
 
       setState((prev) => ({
@@ -68,7 +68,7 @@ export function useLiveMode(isAuthenticated?: boolean) {
         exchangeId: credRes?.exchange || prev.exchangeId,
         testnet: typeof credRes?.testnet === "boolean" ? credRes.testnet : prev.testnet,
         balances,
-        equity,
+        equity: equity ?? prev.equity,
       }));
     } catch {
       // ignore

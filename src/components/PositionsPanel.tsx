@@ -97,7 +97,9 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
       setData(payload);
       setConn("ok");
       setLastSync(Date.now());
-      if (payload.mode === "paper" && Array.isArray(payload.positions)) {
+      // Sync server open ids ke client book untuk mode paper maupun live —
+      // shape response identik, tinggal server yang menentukan isinya.
+      if (Array.isArray(payload.positions)) {
         onServerPositionsRef.current?.(
           payload.positions.filter((p) => p.status === "OPEN").map((p) => p.id)
         );
@@ -183,7 +185,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
 
   const account = data?.account;
   const openPositions =
-    data?.mode === "paper" && Array.isArray(data.positions)
+    Array.isArray(data.positions)
       ? data.positions.filter((p) => p.status === "OPEN").sort((a, b) => b.openedAt - a.openedAt)
       : [];
 
@@ -229,17 +231,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
         </div>
       </div>
 
-      {data?.mode === "live" ? (
-        <div className="flex flex-col items-center justify-center py-10 text-center bg-zinc-950/60 rounded-xl border border-zinc-800/80">
-          <XCircle className="w-8 h-8 text-rose-500/70 mb-2" />
-          <p className="text-xs font-mono text-rose-300">
-            Mode LIVE: posisi belum disync dari exchange (roadmap Phase 2).
-          </p>
-          <p className="text-[10px] font-mono text-zinc-500 mt-1">
-            Live positions bersifat pass-through dan belum disimpan di broker server.
-          </p>
-        </div>
-      ) : account ? (
+      {account ? (
         <>
           {/* Account summary strip */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-4 font-mono">

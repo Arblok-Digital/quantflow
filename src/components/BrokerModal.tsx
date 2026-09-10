@@ -322,7 +322,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
                 <span>
                   BALANCE{" "}
                   <span className="text-[10px] text-zinc-500 font-normal">
-                    ({status?.mode === "live" ? "EXCHANGE REAL — LIVE equity" : "PAPER SAMPLE — ganti .env TRADING_MODE=live utk real"})
+                    ({status?.mode === "live" ? "EXCHANGE REAL — balance langsung dari exchange" : "PAPER SAMPLE — ganti .env TRADING_MODE=live utk real"})
                   </span>
                 </span>
                 <span className={`ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold border ${status?.mode === "live" ? "bg-rose-500/20 text-rose-300 border-rose-500/30" : "bg-zinc-800 text-zinc-400 border-zinc-700"}`}>

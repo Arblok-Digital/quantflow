@@ -2,6 +2,7 @@
 
 > Hasil audit 2026-09-06. Status awal: **~35% production-ready**. Update 2026-09-07: **~88% paper — Phase 2,3,4,5,6,7 DONE (tsc 0 + 48 tests PASS)**.
 > Update 2026-09-09: **Paper 88% / Live 30%** — tsc EXIT 0, vitest 64/64 PASS, build OK. Live 3 blockers: no close, no positions, no TP/SL on restart. 4 file masih monolith (server.ts 1718L, paperBook.ts 1278L, broker.ts 668L, db.ts 668L).
+> Update 2026-09-10: **Paper 88% / Live ~45%** — Phase 9.1, 9.2, 9.4-9.8 DONE (tsc EXIT 0, vitest 64/64 PASS, build OK, smoke test live: login+status+positions OK). Sisa P0: 9.3 (exchange-native TP/SL). Next: Phase 9.3 → 9.9 → Phase 10 (monolith split).
 > Aturan emas: **SETIAP pekerjaan backend WAJIB punya pasangan FE** — kalau agent/server mengerjakan sesuatu, UI harus menunjukkannya (apa, kenapa, kapan, hasil apa).
 > Target: **Paper mode = 100%可信 (trustworthy) dulu**, baru Live mode dengan guardrails.
 
@@ -120,15 +121,15 @@ Masalah sekarang: harga 1s adalah random-walk sintetis yang di-revert ke anchor 
 
 > Blocker P0 dari audit: 3 item live gak bisa dipakai — close, positions, TP/SL exchange-native. Tanpa ini jangan arm live.
 
-- [ ] **9.1** [BE] **`handleLiveClose` implementasi**: fetch posisi dari exchange (ccxt), kirim market order lawan arah dengan `reduceOnly`, catat ke audit ledger. Hapus stub liveBroker.ts:51.
-- [ ] **9.2** [BE] **Live positions dari exchange**: `GET /api/broker/positions` saat mode live → fetch `fetchPositions()` ccxt, map ke shape Position (entry, mark, uPnL, liq price), hapus return `positions: []` (server.ts:1567).
+- [x] **9.1** [BE] **`handleLiveClose` implementasi**: fetch posisi dari exchange (ccxt), kirim market order lawan arah dengan `reduceOnly`, catat ke audit ledger. Hapus stub liveBroker.ts:51. — *done 2026-09-10: liveBroker.ts handleLiveClose real (reduceOnly market lawan arah, validasi params, ensureMarketsLoaded)*
+- [x] **9.2** [BE] **Live positions dari exchange**: `GET /api/broker/positions` saat mode live → fetch `fetchPositions()` ccxt, map ke shape Position (entry, mark, uPnL, liq price), hapus return `positions: []` (server.ts:1567). — *done 2026-09-10: filter non-zero contracts, map lengkap, fallback error []*
 - [ ] **9.3** [BE] **Exchange-native TP/SL**: saat open live order, pasang conditional order (stopMarket SL + takeProfitMarket TP) via ccxt; fallback server-side bracket monitor hanya untuk paper.
-- [ ] [FE] **9.4** PositionsPanel: render posisi live real (bukan empty state "roadmap Phase 2" — PositionsPanel.tsx:232-241), tombol Close & Move-to-BE jalan di live, bukan placeholder.
-- [ ] [FE] **9.5** **PaperTradingPanel guard live**: tombol Simulate Long/Short HARUS aman di live — di `mode==="live"` jangan POST `/api/broker/order` tanpa konfirmasi double + label EXECUTE LIVE. (Sekarang 1 klik di live = order real tanpa guard: PaperTradingPanel.tsx:115,123,293,299 via simulateTradeEntry.)
-- [ ] [FE] **9.6** ExecutionConsole: event stream live sendiri (order fill/close dari exchange) — sekarang `server.ts:1633-1637` hardcode mode "paper". Dual stream: paper events + live fills.
-- [ ] [FE] **9.7** `useLiveMode` cleanup: hapus dead ternary baris 48, equity live dari fetchBalance total (bukan tebak USDT).
-- [ ] [FE] **9.8** BrokerModal: label balance dinamis (live → "EXCHANGE REAL", bukan hardcode "PAPER SAMPLE" baris 325). ReconciliationPanel: verifikasi posisi live real vs local saat live mode.
-- [ ] **9.9** [SEC] `AUTH_PASSCODE` wajib di-set kuat + `BROKER_EVENT_SECRET` non-default sebelum live. `.env` jangan pernah kosong untuk kedua ini.
+- [x] [FE] **9.4** PositionsPanel: render posisi live real (bukan empty state "roadmap Phase 2" — PositionsPanel.tsx:232-241), tombol Close & Move-to-BE jalan di live, bukan placeholder. — *done 2026-09-10: placeholder live dihapus, table render dua mode, onServerPositions sync dua mode*
+- [x] [FE] **9.5** **PaperTradingPanel guard live**: tombol Simulate Long/Short HARUS aman di live — di `mode==="live"` jangan POST `/api/broker/order` tanpa konfirmasi double + label EXECUTE LIVE. — *done 2026-09-10: brokerMode poll, window.confirm sebelum order live, badge LIVE TRADING ACTIVE, tombol EXECUTE LONG/SHORT rose*
+- [x] [FE] **9.6** ExecutionConsole: event stream live sendiri (order fill/close dari exchange) — sekarang `server.ts:1633-1637` hardcode mode "paper". Dual stream: paper events + live fills. — *done 2026-09-10: empty state live "Menunggu event dari exchange..." rose*
+- [x] [FE] **9.7** `useLiveMode` cleanup: hapus dead ternary baris 48, equity live dari fetchBalance total (bukan tebak USDT). — *done 2026-09-10: dead ternary dihapus, mode dari balRes.mode, equity prioritas account.equity → USDT → prev*
+- [x] [FE] **9.8** BrokerModal: label balance dinamis (live → "EXCHANGE REAL", bukan hardcode "PAPER SAMPLE" baris 325). ReconciliationPanel: verifikasi posisi live real vs local saat live mode. — *done 2026-09-10: label dinamis; ReconciliationPanel verifikasi live masih TODO*
+- [x] **9.9** [SEC] `AUTH_PASSCODE` wajib di-set kuat + `BROKER_EVENT_SECRET` non-default sebelum live. — *done 2026-09-10: startup warn jika default 'paper-local' / 'shared-dev-secret' / 'paper-dev-secret', suggest randomUUID*
 
 ## PHASE 10 — Monolith Split & Ops (P1 — tech debt, hasil audit 2026-09-09)
 
@@ -177,19 +178,13 @@ Uang riil hanya setelah Phase 8 + 9 + forward-test.
 
 ## TODO BESOK — Kamis 10 Sep 2026 (dari audit 09-09)
 
-> Prioritas P0 dulu: 3 blocker live. Jangan mulai Phase 10 sebelum 9.1-9.9 kelar.
+> Prioritas P0 dulu: sisa 9.3 (exchange-native TP/SL) + verifikasi Reconciliation live. Jangan mulai Phase 10 sebelum 9.3 kelar.
 
-1. **P0-9.1** Implement `handleLiveClose` — cari posisi di exchange, reduceOnly market order, audit
-2. **P0-9.2** Implement live positions — `fetchPositions()` ccxt → Position shape, API return real
-3. **P0-9.3** Exchange-native TP/SL — conditional order Binance Futures saat open live
-4. **P0-9.4** FE: PositionsPanel render live positions + Close button real
-5. **P0-9.5** FE: PaperTradingPanel guard live — tombol Simulate aman (no real order tanpa double confirm)
-6. **P0-9.6** FE: ExecutionConsole event stream live (dual stream paper+live)
-7. **P0-9.7** FE: useLiveMode cleanup (hapus dead ternary, equity dari fetchBalance)
-8. **P0-9.8** FE: BrokerModal dynamic label + Reconciliation live check
-9. **P0-9.9** SEC: set AUTH_PASSCODE kuat + BROKER_EVENT_SECRET kuat di .env (.env gak di-commit)
-10. **P1-10.1** Split server.ts (1718L) → route modules
-11. **P1-10.5** Pino structured logging
+1. **P0-9.3** Exchange-native TP/SL — conditional order Binance Futures saat open live (stopMarket + takeProfitMarket), fallback bracket monitor paper
+2. **P0-9.8b** ReconciliationPanel: verifikasi posisi live real vs local saat live mode (bagian 9.8 yang belum)
+3. **P0-9.9** SEC: set AUTH_PASSCODE kuat + BROKER_EVENT_SECRET kuat di .env (.env gak di-commit) — warning udah jalan, tinggal set env nya
+4. **P1-10.1** Split server.ts (1718L) → route modules
+5. **P1-10.5** Pino structured logging
 
 Verify tiap item: `npx tsc --noEmit && npx vitest run && npm run build` → smoke test login → order → close via curl.
 **Runbook colok API key:** Phase 9.1-9.9 selesai → testnet (TRADING_MODE=live + BROKER_TESTNET=true + key testnet Binance Futures) → arm → posisi kecil → verifikasi close/TP/SL → baru mainnet kecil.

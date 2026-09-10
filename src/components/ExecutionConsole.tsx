@@ -322,15 +322,27 @@ export const ExecutionConsole: React.FC = () => {
 
       {/* Timeline */}
       {events.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-10 text-center bg-zinc-950/60 rounded-xl border border-zinc-800/80">
-          <Radio className="w-8 h-8 text-zinc-600 mb-2" />
-          <p className="text-xs font-mono text-zinc-400">
-            Belum ada event &mdash; tunggu pipeline cycle atau auto-pilot.
-          </p>
-          <p className="text-[10px] font-mono text-zinc-600 mt-1">
-            Event ORDER_FILLED / POSITION_CLOSED / BRACKET_MONITOR_ACTION akan muncul di sini
-          </p>
-        </div>
+        mode === "live" ? (
+          <div className="flex flex-col items-center justify-center py-10 text-center bg-zinc-950/60 rounded-xl border border-zinc-800/80">
+            <Radio className="w-8 h-8 text-rose-500/60 mb-2" />
+            <p className="text-xs font-mono text-rose-300">
+              Menunggu event dari exchange...
+            </p>
+            <p className="text-[10px] font-mono text-zinc-500 mt-1">
+              ORDER_FILLED / POSITION_CLOSED dari exchange akan muncul di sini
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-10 text-center bg-zinc-950/60 rounded-xl border border-zinc-800/80">
+            <Radio className="w-8 h-8 text-zinc-600 mb-2" />
+            <p className="text-xs font-mono text-zinc-400">
+              Belum ada event &mdash; tunggu pipeline cycle atau auto-pilot.
+            </p>
+            <p className="text-[10px] font-mono text-zinc-600 mt-1">
+              Event ORDER_FILLED / POSITION_CLOSED / BRACKET_MONITOR_ACTION akan muncul di sini
+            </p>
+          </div>
+        )
       ) : (
         <div className="space-y-1.5">
           {events.map((ev) => (

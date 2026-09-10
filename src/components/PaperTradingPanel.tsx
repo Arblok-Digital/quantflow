@@ -1,13 +1,14 @@
-import React, { useState } from "react";
-import { 
-  Portfolio, 
-  Position, 
-  ClosedTrade, 
-  Timeframe, 
-  MarketType, 
-  MTFLiquidityAnalysis, 
-  LLMDecision 
+import React, { useEffect, useState } from "react";
+import {
+  Portfolio,
+  Position,
+  ClosedTrade,
+  Timeframe,
+  MarketType,
+  MTFLiquidityAnalysis,
+  LLMDecision
 } from "../types";
+import { authFetch } from "../hooks/useAuth";
 import { 
   DollarSign, 
   TrendingUp, 
@@ -64,6 +65,42 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   const [simulateError, setSimulateError] = useState<{ reason: string; message: string; duplicatePositionId?: string } | null>(null);
   const [selectedCapital, setSelectedCapital] = useState<number>(50000);
 
+  // Mode broker di-poll dari server (paper/live). Saat live, tombol simulasi
+  // berubah jadi EXECUTE dengan konfirmasi ganda — jangan sampai order REAL
+  // terkirim tanpa persetujuan eksplisit.
+  const [brokerMode, setBrokerMode] = useState<"paper" | "live">("paper");
+
+  useEffect(() => {
+    let mounted = true;
+    const loadStatus = async () => {
+      try {
+        const res = await authFetch("/api/broker/status");
+        if (res.status === 401) return;
+        const data = await res.json();
+        if (mounted && data?.mode) setBrokerMode(data.mode);
+      } catch {
+        // ignore — tetap anggap paper kalau status gagal
+      }
+    };
+    loadStatus();
+    const iv = setInterval(loadStatus, 5000);
+    return () => {
+      mounted = false;
+      clearInterval(iv);
+    };
+  }, []);
+
+  const isLiveMode = brokerMode === "live";
+
+  // Guard utama: di live mode wajib konfirmasi sebelum kirim order REAL.
+  const handleSimulate = (side: "LONG" | "SHORT") => {
+    if (isLiveMode) {
+      const ok = window.confirm("Anda akan mengirim order REAL ke exchange. Lanjutkan?");
+      if (!ok) return;
+    }
+    onSimulateTradeEntry(side);
+  };
+
   // Cashflow and PnL metrics
   const totalUnrealizedPnl = positions.reduce((acc, p) => acc + p.unrealizedPnl, 0);
   const totalRealizedPnl = portfolio.realizedPnl;
@@ -90,12 +127,18 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
           <div>
             <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-              <span className="px-2.5 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-mono font-bold flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                SIMULATED PAPER TRADING ACTIVE
+              <span className={`px-2.5 py-0.5 rounded-md text-[10px] font-mono font-bold flex items-center gap-1.5 border ${
+                isLiveMode
+                  ? "bg-rose-500/20 text-rose-300 border-rose-500/40"
+                  : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+              }`}>
+                <span className={`w-2 h-2 rounded-full ${isLiveMode ? "bg-rose-400" : "bg-amber-400"} animate-pulse`} />
+                {isLiveMode ? "LIVE TRADING ACTIVE" : "SIMULATED PAPER TRADING ACTIVE"}
               </span>
-              <span className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 text-[10px] font-mono border border-zinc-700">
-                ZERO RISK &bull; REAL LIVE FEED
+              <span className={`px-2 py-0.5 rounded text-[10px] bg-zinc-800 border font-mono ${
+                isLiveMode ? "text-rose-300 border-rose-500/30" : "text-zinc-300 border-zinc-700"
+              }`}>
+                {isLiveMode ? "LIVE TRADING — REAL ORDERS" : "ZERO RISK &bull; REAL LIVE FEED"}
               </span>
               <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px] font-mono font-bold border border-emerald-500/30">
                 HUMAN-READABLE REASONING LOG
@@ -112,20 +155,28 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
           {/* Quick Simulation Trigger Buttons */}
           <div className="flex items-center gap-2 shrink-0 flex-wrap">
             <button
-              onClick={() => onSimulateTradeEntry("LONG")}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold font-mono text-xs shadow-md shadow-emerald-600/20 transition"
-              title="Simulasikan Entry LONG pada sinyal 15m"
+              onClick={() => handleSimulate("LONG")}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold font-mono text-xs shadow-md transition ${
+                isLiveMode
+                  ? "bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/30"
+                  : "bg-emerald-600 hover:bg-emerald-500 text-zinc-950 shadow-emerald-600/20"
+              }`}
+              title={isLiveMode ? "KIRIM order LONG REAL ke exchange (konfirmasi dulu)" : "Simulasikan Entry LONG pada sinyal 15m"}
             >
-              <TrendingUp className="w-3.5 h-3.5" />
-              <span>Simulate LONG</span>
+              {isLiveMode ? <ShieldAlert className="w-3.5 h-3.5" /> : <TrendingUp className="w-3.5 h-3.5" />}
+              <span>{isLiveMode ? "EXECUTE LONG (live)" : "Simulate LONG"}</span>
             </button>
             <button
-              onClick={() => onSimulateTradeEntry("SHORT")}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-zinc-100 font-bold font-mono text-xs shadow-md shadow-rose-600/20 transition"
-              title="Simulasikan Entry SHORT pada sinyal 15m"
+              onClick={() => handleSimulate("SHORT")}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-zinc-100 font-bold font-mono text-xs shadow-md transition ${
+                isLiveMode
+                  ? "bg-rose-700 hover:bg-rose-600 shadow-rose-700/30"
+                  : "bg-rose-600 hover:bg-rose-500 shadow-rose-600/20"
+              }`}
+              title={isLiveMode ? "KIRIM order SHORT REAL ke exchange (konfirmasi dulu)" : "Simulasikan Entry SHORT pada sinyal 15m"}
             >
-              <TrendingDown className="w-3.5 h-3.5" />
-              <span>Simulate SHORT</span>
+              {isLiveMode ? <ShieldAlert className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+              <span>{isLiveMode ? "EXECUTE SHORT (live)" : "Simulate SHORT"}</span>
             </button>
             {actionableRunKeel && (
               <button
@@ -290,16 +341,24 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
                 </p>
                 <div className="flex justify-center gap-2">
                   <button
-                    onClick={() => onSimulateTradeEntry("LONG")}
-                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 rounded-lg text-xs font-bold font-mono transition"
+                    onClick={() => handleSimulate("LONG")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition ${
+                      isLiveMode
+                        ? "bg-rose-600 hover:bg-rose-500 text-white"
+                        : "bg-emerald-600 hover:bg-emerald-500 text-zinc-950"
+                    }`}
+                    title={isLiveMode ? "Kirim order LONG REAL ke exchange (konfirmasi dulu)" : "Simulasikan entry LONG"}
                   >
-                    + Simulasikan Entry LONG
+                    {isLiveMode ? "⚠ EXECUTE LONG (live)" : "+ Simulasikan Entry LONG"}
                   </button>
                   <button
-                    onClick={() => onSimulateTradeEntry("SHORT")}
-                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold font-mono transition"
+                    onClick={() => handleSimulate("SHORT")}
+                    className={`px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold font-mono transition ${
+                      isLiveMode ? "ring-1 ring-rose-400/50" : ""
+                    }`}
+                    title={isLiveMode ? "Kirim order SHORT REAL ke exchange (konfirmasi dulu)" : "Simulasikan entry SHORT"}
                   >
-                    + Simulasikan Entry SHORT
+                    {isLiveMode ? "⚠ EXECUTE SHORT (live)" : "+ Simulasikan Entry SHORT"}
                   </button>
                   {actionableRunKeel && (
                     <button

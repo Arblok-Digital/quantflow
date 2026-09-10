@@ -4,7 +4,7 @@
  * Behavior-preserving move dari server.ts /api/broker/order (branch live).
  */
 import type { Request, Response } from "express";
-import { placeBrokerOrder, getBrokerStatus } from "../../broker";
+import { placeBrokerOrder, getBrokerStatus, getExchange, ensureMarketsLoaded } from "../../broker";
 import { evaluateGuardrails, GuardrailRejectedError, recordOrderPlaced } from "../../guardrails";
 import { guardReject } from "./routerUtils";
 
@@ -44,11 +44,66 @@ export async function handleLiveOrder(req: Request, res: Response): Promise<Resp
 }
 
 /**
- * Close di LIVE MODE — belum diimplementasikan (roadmap Phase 2+).
- * Behavior persis server.ts /api/broker/close.
+ * Close di LIVE MODE — kirim reduceOnly market order lawan arah via ccxt.
+ * Request body: { symbol: "BTC/USDT", side: "buy"|"sell", amount: 0.001 }
+ *   - side = posisi yang mau ditutup (misal "buy" = long position → close sell)
+ *   - amount = jumlah asset yang mau ditutup
  */
-export async function handleLiveClose(_req: Request, res: Response): Promise<Response> {
-  return res.status(400).json({ success: false, message: "Live close via /api/broker/close belum diimplementasikan (roadmap Phase 2+)." });
+export async function handleLiveClose(req: Request, res: Response): Promise<Response> {
+  const body = req.body || {};
+  const symbol = String(body.symbol || "").trim();
+  const side = String(body.side || "").toLowerCase(); // "buy" or "sell" = position side to close
+  const amount = Number(body.amount);
+
+  if (!symbol || (side !== "buy" && side !== "sell") || !isFinite(amount) || amount <= 0) {
+    return res.status(400).json({
+      success: false,
+      status: "REJECTED",
+      reason: "MISSING_PARAMS",
+      message: "symbol, side (buy|sell), and amount wajib diisi untuk live close.",
+    });
+  }
+
+  // Close position = market order in the OPPOSITE direction with reduceOnly
+  const closeSide: "buy" | "sell" = side === "buy" ? "sell" : "buy";
+  const normalizedSymbol = symbol.includes("/") ? symbol : `${symbol.replace("USDT", "")}/USDT`;
+
+  try {
+    const exchange = getExchange();
+    await ensureMarketsLoaded(exchange);
+    const order = await exchange.createOrder(
+      normalizedSymbol,
+      "market",
+      closeSide,
+      amount,
+      undefined, // market order — no price
+      { reduceOnly: true },
+    );
+    return res.json({
+      success: true,
+      mode: "live",
+      closed: true,
+      order: {
+        id: order.id,
+        status: order.status,
+        symbol: order.symbol,
+        side: order.side,
+        type: order.type,
+        amount: order.amount,
+        price: order.average || order.price,
+        cost: order.cost,
+        fee: order.fee,
+        timestamp: order.timestamp || Date.now(),
+      },
+    });
+  } catch (err: any) {
+    return res.status(400).json({
+      success: false,
+      status: "REJECTED",
+      reason: "CLOSE_FAILED",
+      message: err?.message || "Gagal menutup posisi live.",
+    });
+  }
 }
 
 export { getBrokerStatus } from "../../broker";
