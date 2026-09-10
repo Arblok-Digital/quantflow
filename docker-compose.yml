@@ -1,0 +1,25 @@
+# ai-trading-agent-engine — docker compose (single service)
+# Usage:
+#   docker compose --env-file .env up -d --build
+# Data (SQLite) persists in ./data volume on host.
+
+services:
+  agent:
+    build: .
+    container_name: ai-trading-agent
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/data/trading.db
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

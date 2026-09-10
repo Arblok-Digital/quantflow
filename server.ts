@@ -7,6 +7,7 @@ import rateLimit from "express-rate-limit";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
+import { httpLogger, logger } from "./src/log/logger";
 import {
   clearBrokerCredentials,
   ensureMarketsLoaded,
@@ -107,6 +108,9 @@ if (process.env.CORS_ORIGIN) {
 }
 
 app.use(express.json({ limit: "5mb" }));
+
+// Structured HTTP logging (Pino) — segera setelah body parser, sebelum routes
+app.use(httpLogger);
 
 // Rate limiters — relaxed in development
 const isDev = process.env.NODE_ENV !== "production";
@@ -366,6 +370,7 @@ function connectBinanceStream(key: string): void {
     } catch {
       return;
     }
+    heartbeatState.lastWsTick = Date.now();
     const curSlot = streamSlots.get(key);
     if (!curSlot) return;
     if (msg.e === "trade") {
@@ -475,10 +480,33 @@ app.get("/api/market/stream", (req, res) => {
 });
 
 // Health check (public, skip rate limit via skip fn above)
+const heartbeatState = {
+  startTime: Date.now(),
+  lastWsTick: 0,
+  lastWsError: 0,
+  lastPipelineCycle: 0,
+  lastOrderTs: 0,
+  lastDbWrite: 0,
+};
+
 app.get("/api/health", (_req, res) => {
+  const now = Date.now();
+  const wsAgeMs = now - (heartbeatState.lastWsTick || now);
+  const feed = heartbeatState.lastWsTick === 0
+    ? (process.env.DISABLE_WS === "true" ? "disabled" : "pending")
+    : wsAgeMs > 60000 ? "down"
+    : wsAgeMs > 15000 ? "stale"
+    : "live";
+  const uptimeSec = Math.floor((now - heartbeatState.startTime) / 1000);
+  const mode = (process.env.TRADING_MODE === "live" ? "live" : "paper") as "live" | "paper";
   res.json({
     status: "online",
-    timestamp: Date.now(),
+    timestamp: now,
+    mode,
+    feed,
+    broker: "ok",
+    db: "ok",
+    uptimeSec,
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"),
   });
 });
@@ -1838,7 +1866,7 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, HOST, () => {
-    console.log(`[AI Trading Agent] Server listening on http://${HOST}:${PORT}`);
+    logger.info({ host: HOST, port: PORT }, "AI Trading Agent server listening");
     // Paper book adalah sumber kebenaran posisi paper; monitor bracket aktif
     // hanya di mode selain live.
     if (getBrokerStatus().mode !== "live") {
