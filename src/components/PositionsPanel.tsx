@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ShieldCheck, Zap, XCircle } from "lucide-react";
 import { authFetch, useAuth } from "../hooks/useAuth";
+import { normalizeSide } from "../lib/sideNormalize";
 
 // ---------------------------------------------------------------------------
 // Positions Panel — server-backed open positions table (roadmap 1.8).
@@ -359,12 +360,12 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
                         <td className="py-2.5">
                           <span
                             className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                              pos.side === "LONG"
+                              normalizeSide(pos.side) === "LONG"
                                 ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
                                 : "bg-rose-500/20 text-rose-400 border border-rose-500/30"
                             }`}
                           >
-                            {pos.side}
+                            {normalizeSide(pos.side)}
                           </span>
                         </td>
                         <td className="py-2.5 text-right text-zinc-300">{fmtNum(pos.qty)}</td>

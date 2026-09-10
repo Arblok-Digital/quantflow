@@ -2,7 +2,7 @@
 
 > Hasil audit 2026-09-06. Status awal: **~35% production-ready**. Update 2026-09-07: **~88% paper — Phase 2,3,4,5,6,7 DONE (tsc 0 + 48 tests PASS)**.
 > Update 2026-09-09: **Paper 88% / Live 30%** — tsc EXIT 0, vitest 64/64 PASS, build OK. Live 3 blockers: no close, no positions, no TP/SL on restart. 4 file masih monolith (server.ts 1718L, paperBook.ts 1278L, broker.ts 668L, db.ts 668L).
-> Update 2026-09-10: **Paper 88% / Live ~45%** — Phase 9.1, 9.2, 9.4-9.8 DONE (tsc EXIT 0, vitest 64/64 PASS, build OK, smoke test live: login+status+positions OK). Sisa P0: 9.3 (exchange-native TP/SL). Next: Phase 9.3 → 9.9 → Phase 10 (monolith split).
+> Update 2026-09-10: **Paper 88% / Live ~60%** — Phase 9.1, 9.2, 9.4-9.8 DONE (tsc EXIT 0, vitest 64/64 PASS, build OK, smoke test live: login+status+positions OK). Sisa P0: **9.3 done** (exchange-native TP/SL via placeBrokerOrder + position/update live). Live ~60% — tinggal Phase 10 split + ops.
 > Aturan emas: **SETIAP pekerjaan backend WAJIB punya pasangan FE** — kalau agent/server mengerjakan sesuatu, UI harus menunjukkannya (apa, kenapa, kapan, hasil apa).
 > Target: **Paper mode = 100%可信 (trustworthy) dulu**, baru Live mode dengan guardrails.
 
@@ -123,7 +123,7 @@ Masalah sekarang: harga 1s adalah random-walk sintetis yang di-revert ke anchor 
 
 - [x] **9.1** [BE] **`handleLiveClose` implementasi**: fetch posisi dari exchange (ccxt), kirim market order lawan arah dengan `reduceOnly`, catat ke audit ledger. Hapus stub liveBroker.ts:51. — *done 2026-09-10: liveBroker.ts handleLiveClose real (reduceOnly market lawan arah, validasi params, ensureMarketsLoaded)*
 - [x] **9.2** [BE] **Live positions dari exchange**: `GET /api/broker/positions` saat mode live → fetch `fetchPositions()` ccxt, map ke shape Position (entry, mark, uPnL, liq price), hapus return `positions: []` (server.ts:1567). — *done 2026-09-10: filter non-zero contracts, map lengkap, fallback error []*
-- [ ] **9.3** [BE] **Exchange-native TP/SL**: saat open live order, pasang conditional order (stopMarket SL + takeProfitMarket TP) via ccxt; fallback server-side bracket monitor hanya untuk paper.
+- [x] **9.3** [BE] **Exchange-native TP/SL**: saat open live order, pasang conditional order (stopMarket SL + takeProfitMarket TP) via ccxt; fallback server-side bracket monitor hanya untuk paper. — *done 2026-09-10: placeBrokerOrder live attach stop_market+take_profit_market reduceOnly "true"; POST /api/broker/position/update live path (cancel lama, pasang baru); break-even live pakai offset 0.08%; side normalize LONG/SHORT; getBrokerStatus false-positive fix*
 - [x] [FE] **9.4** PositionsPanel: render posisi live real (bukan empty state "roadmap Phase 2" — PositionsPanel.tsx:232-241), tombol Close & Move-to-BE jalan di live, bukan placeholder. — *done 2026-09-10: placeholder live dihapus, table render dua mode, onServerPositions sync dua mode*
 - [x] [FE] **9.5** **PaperTradingPanel guard live**: tombol Simulate Long/Short HARUS aman di live — di `mode==="live"` jangan POST `/api/broker/order` tanpa konfirmasi double + label EXECUTE LIVE. — *done 2026-09-10: brokerMode poll, window.confirm sebelum order live, badge LIVE TRADING ACTIVE, tombol EXECUTE LONG/SHORT rose*
 - [x] [FE] **9.6** ExecutionConsole: event stream live sendiri (order fill/close dari exchange) — sekarang `server.ts:1633-1637` hardcode mode "paper". Dual stream: paper events + live fills. — *done 2026-09-10: empty state live "Menunggu event dari exchange..." rose*

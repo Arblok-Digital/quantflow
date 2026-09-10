@@ -18,6 +18,8 @@ interface BrokerOrderRequest {
   amount: number;
   price?: number;
   leverage?: number;
+  stopLoss?: number;
+  takeProfit?: number;
 }
 
 interface BrokerSecrets {
@@ -308,15 +310,16 @@ function makeExchange(): ccxt.Exchange {
 export function getBrokerStatus() {
   const source = getCredentialSource();
   const cfg = effectiveBrokerConfig();
+  const hasCreds = source !== "none";
   return {
     mode: process.env.TRADING_MODE === "live" ? ("live" as BrokerMode) : ("paper" as BrokerMode),
     exchangeId: resolveExchangeId(),
     testnet: cfg.testnet,
-    credentialsConfigured: source !== "none",
+    credentialsConfigured: hasCreds,
     credentialSource: source,
-    canPlaceLiveOrders: process.env.TRADING_MODE === "live" && source !== "none" && cfg.liveArmed === true,
-    liveArmed: cfg.liveArmed,
-    armedForLive: cfg.liveArmed,
+    canPlaceLiveOrders: process.env.TRADING_MODE === "live" && hasCreds && cfg.liveArmed === true,
+    liveArmed: hasCreds && cfg.liveArmed,
+    armedForLive: hasCreds && cfg.liveArmed,
     secretsFile: SECRETS_FILE,
     vaultKeyFile: VAULT_KEY_FILE,
     encrypted: isVaultEncrypted(),
@@ -649,6 +652,37 @@ export async function placeBrokerOrder(req: BrokerOrderRequest) {
   const order = await exchange.createOrder(normalizedSymbol, type, side, amount, type === "limit" ? Number(req.price) : undefined, {
     ...(req.leverage && req.leverage > 1 ? { leverage: req.leverage } : {}),
   });
+
+  // Best-effort: attach exchange-native TP/SL conditional orders when provided.
+  // Main order must never fail due to TP/SL attachment issues.
+  if (req.stopLoss || req.takeProfit) {
+    const closeSide: "buy" | "sell" = side === "buy" ? "sell" : "buy";
+    try {
+      if (req.stopLoss && Number(req.stopLoss) > 0) {
+        await exchange.createOrder(
+          normalizedSymbol,
+          "stop_market",
+          closeSide,
+          amount,
+          undefined,
+          { stopPrice: Number(req.stopLoss), reduceOnly: "true" },
+        );
+      }
+      if (req.takeProfit && Number(req.takeProfit) > 0) {
+        await exchange.createOrder(
+          normalizedSymbol,
+          "take_profit_market",
+          closeSide,
+          amount,
+          undefined,
+          { stopPrice: Number(req.takeProfit), reduceOnly: "true" },
+        );
+      }
+    } catch (tpslErr: any) {
+      console.warn(`[live] Best-effort TP/SL placement failed: ${tpslErr?.message || tpslErr}`);
+    }
+  }
+
   // Record live realized? Not yet, would need fills.
   return {
     id: order.id,

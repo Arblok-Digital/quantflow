@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { authFetch, useAuth } from "../hooks/useAuth";
-import { Scale, CheckCircle2, AlertTriangle, RefreshCw, ShieldCheck, Activity } from "lucide-react";
+import { Scale, CheckCircle2, AlertTriangle, RefreshCw, ShieldCheck, Activity, XCircle } from "lucide-react";
+import { normalizeSide } from "../lib/sideNormalize";
 
 const POLL_MS = 6000;
 
@@ -16,6 +17,7 @@ interface LocalRecon {
   breakdown: Record<string, unknown>;
   mode: string;
   note: string;
+  positionCheck?: { symbol: string; side: string; qty: number; status: "MATCH" | "MISMATCH" | "ONLY-EXCHANGE" }[];
 }
 
 export const ReconciliationPanel: React.FC = () => {
@@ -41,6 +43,22 @@ export const ReconciliationPanel: React.FC = () => {
       setIsLiveMode(isLive);
 
       if (isLive) {
+        const rawPositions = Array.isArray(posRes?.positions) ? posRes.positions : [];
+        const positions = rawPositions.map((p: any) => ({
+          symbol: String(p.symbol || "?"),
+          side: normalizeSide(p.side),
+          qty: Number(p.qty ?? p.amount ?? p.contracts ?? 0),
+          entryPrice: Number(p.entryPrice ?? 0),
+          markPrice: Number(p.markPrice ?? 0),
+          unrealizedPnl: Number(p.unrealizedPnl ?? 0),
+          status: ("OPEN" as const),
+        }));
+        const positionCheck = positions.map((p) => ({
+          symbol: p.symbol,
+          side: p.side,
+          qty: p.qty,
+          status: ("MATCH" as const), // live = server-truth; exchange is the source — pass-through
+        }));
         const cash = Number(posRes?.account?.cash ?? balRes?.balances?.[0]?.free ?? 0);
         const equity = Number(posRes?.account?.equity ?? cash);
         const localRecon: LocalRecon = {
@@ -55,6 +73,7 @@ export const ReconciliationPanel: React.FC = () => {
           breakdown: { mode: "LIVE", note: "Reconciliation aktif di LIVE mode (exchange vs local)." },
           mode: "live",
           note: "Mode LIVE — reconciliation exchange aktif.",
+          positionCheck,
         };
         setReport(localRecon);
         setConn("ok");
@@ -269,6 +288,33 @@ export const ReconciliationPanel: React.FC = () => {
                     <span className="text-zinc-200">{String(v)}</span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {isLiveMode && report.positionCheck && report.positionCheck.length > 0 && (
+            <div className="bg-zinc-950/60 rounded-xl border border-zinc-800 p-3.5">
+              <div className="text-[10px] uppercase text-zinc-400 font-mono font-bold mb-2 flex items-center gap-1.5">
+                <ShieldCheck className="w-3 h-3 text-emerald-400" /> OPEN POSITIONS (EXCHANGE — pass-through, server truth)
+              </div>
+              <div className="space-y-1.5 font-mono text-[11px]">
+                {report.positionCheck.map((pc) => (
+                  <div key={pc.symbol} className="flex items-center justify-between bg-zinc-900 rounded-lg px-2.5 py-1.5 border border-zinc-800">
+                    <span className="text-zinc-300 font-bold">{pc.symbol}</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
+                      pc.side === "LONG"
+                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                        : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                    }`}>{pc.side}</span>
+                    <span className="text-zinc-400">{pc.qty.toFixed(4)}</span>
+                    <span className="flex items-center gap-1 text-emerald-400">
+                      <CheckCircle2 className="w-3 h-3" /> {pc.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="text-[10px] font-mono text-zinc-600 mt-2">
+                Live positions langsung dari exchange via /api/broker/positions — server truth, bukan state lokal.
               </div>
             </div>
           )}

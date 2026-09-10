@@ -1583,7 +1583,10 @@ app.get("/api/broker/positions", requireAuth, async (_req, res) => {
         .map((p: any) => ({
           id: `${p.symbol}-${p.side}-${Date.now()}`,
           symbol: p.symbol,
-          side: p.side,
+          side:
+            String(p.side || "long").toUpperCase().startsWith("LONG") || String(p.side).toLowerCase() === "buy"
+              ? "LONG"
+              : "SHORT",
           amount: Number(p.contracts || p.amount || 0),
           entryPrice: Number(p.entryPrice || 0),
           markPrice: Number(p.markPrice || p.info?.markPrice || 0),
@@ -1642,12 +1645,117 @@ app.post("/api/broker/close", requireAuth, async (req: Request, res: Response) =
 });
 
 // Update SL/TP posisi (manual SL edit / move-to-break-even) — PROTECTED
-app.post("/api/broker/position/update", requireAuth, (req, res) => {
+app.post("/api/broker/position/update", requireAuth, async (req, res) => {
   try {
     const body = req.body || {};
     const positionId = String(body.positionId || "");
     if (!positionId) {
       return res.status(400).json({ success: false, reason: "MISSING_POSITION_ID", message: "positionId wajib diisi." });
+    }
+    if (getBrokerStatus().mode === "live") {
+      // LIVE PATH: update TP/SL = conditional orders ke exchange (bukan paper book).
+      // positionId format (live): `${symbol}-${side}-${Date.now()}` (lihat mapping positions).
+      const m = /^(.*)-((?:LONG|SHORT|long|short|buy|sell))-\d+$/.exec(positionId);
+      if (!m) {
+        return res.status(400).json({ success: false, reason: "INVALID_POSITION_ID", message: "positionId live tidak valid." });
+      }
+      const symbol = m[1];
+      const rawSide = m[2];
+
+      const stopLoss = body.stopLoss !== undefined ? Number(body.stopLoss) : undefined;
+      const takeProfit = body.takeProfit !== undefined ? Number(body.takeProfit) : undefined;
+      const breakEven = Boolean(body.breakEven);
+
+      const exchange = getExchange();
+      await ensureMarketsLoaded(exchange);
+      const rawPositions = await exchange.fetchPositions();
+      const pos = rawPositions.find(
+        (p: any) => String(p.symbol) === symbol && Number(p.contracts || p.amount || 0) !== 0
+      );
+      if (!pos) {
+        return res.status(404).json({ success: false, reason: "POSITION_NOT_FOUND", message: `Posisi ${symbol} tidak ditemukan di exchange.` });
+      }
+
+      const posSide = String(pos.side || rawSide).toLowerCase();
+      const side: "LONG" | "SHORT" = posSide === "short" || posSide === "sell" ? "SHORT" : "LONG";
+      const closeSide: "buy" | "sell" = side === "LONG" ? "sell" : "buy";
+      const amount = Number(pos.contracts || 0);
+
+      // Break-even live: mirror paperBook BE offset (~0.08% ≈ 2x taker fee + buffer).
+      let sl = stopLoss;
+      if (breakEven && (sl === undefined || !isFinite(sl) || sl <= 0)) {
+        const entry = Number(pos.entryPrice || 0);
+        if (!entry) {
+          return res.status(400).json({ success: false, reason: "NO_ENTRY_PRICE", message: "Entry price tidak diketahui, break-even gagal." });
+        }
+        const beOffsetPct = 0.0008;
+        sl = side === "LONG" ? entry * (1 - beOffsetPct) : entry * (1 + beOffsetPct);
+      }
+
+      // Cancel SL/TP lama dulu (avoid stacking) — best-effort, log kalau gagal.
+      const conditionalTypes = new Set([
+        "stop_market", "take_profit_market",
+        "stop", "stop_limit", "take_profit", "take_profit_limit",
+      ]);
+      try {
+        const openOrders = await exchange.fetchOpenOrders(symbol);
+        for (const o of openOrders) {
+          const isConditional =
+            conditionalTypes.has(String((o as any).type || "").toLowerCase()) ||
+            (o as any).reduceOnly === true ||
+            String((o as any).reduceOnly).toLowerCase() === "true";
+          if (!isConditional) continue;
+          try {
+            await exchange.cancelOrder(o.id, symbol);
+          } catch (cancelErr: any) {
+            console.warn(`[live] Cancel conditional order ${o.id} gagal: ${cancelErr?.message}`);
+          }
+        }
+      } catch (openErr: any) {
+        console.warn(`[live] fetchOpenOrders gagal (skip cancel lama): ${openErr?.message}`);
+      }
+
+      // Pasang conditional orders baru.
+      const placed: any[] = [];
+      if (sl !== undefined && isFinite(sl) && sl > 0) {
+        placed.push(
+          await exchange.createOrder(symbol, "stop_market", closeSide, amount, undefined, {
+            stopPrice: sl,
+            reduceOnly: "true",
+          })
+        );
+      }
+      if (takeProfit !== undefined && isFinite(takeProfit) && takeProfit > 0) {
+        placed.push(
+          await exchange.createOrder(symbol, "take_profit_market", closeSide, amount, undefined, {
+            stopPrice: takeProfit,
+            reduceOnly: "true",
+          })
+        );
+      }
+
+      return res.json({
+        success: true,
+        mode: "live",
+        position: {
+          id: positionId,
+          symbol,
+          side,
+          amount,
+          entryPrice: Number(pos.entryPrice || 0),
+          markPrice: Number(pos.markPrice || pos.info?.markPrice || 0),
+          stopLoss: sl !== undefined && isFinite(sl) && sl > 0 ? sl : undefined,
+          takeProfit: takeProfit !== undefined && isFinite(takeProfit) && takeProfit > 0 ? takeProfit : undefined,
+          reduceOnly: "true",
+          placedOrders: placed.map((o: any) => ({
+            id: o.id,
+            type: o.type,
+            side: o.side,
+            price: o.price,
+            status: o.status,
+          })),
+        },
+      });
     }
     const updated = updatePaperPosition(positionId, {
       stopLoss: body.stopLoss !== undefined ? Number(body.stopLoss) : undefined,
