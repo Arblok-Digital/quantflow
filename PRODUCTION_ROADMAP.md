@@ -106,8 +106,8 @@ Masalah sekarang: harga 1s adalah random-walk sintetis yang di-revert ke anchor 
 
 ## PHASE 8 — Ops & Go-Live Hardening (P2, sebelum live uang riil)
 
-- [ ] **8.1** Logging terstruktur (pino) + file log request/response broker (mask apiKey), error tracking (Sentry opsional)
-- [ ] **8.2** Dockerfile + docker-compose (app + volume sqlite) buat deploy konsisten
+- [x] **8.1** Logging terstruktur (pino) + mask apiKey + file rotation — *done 2026-09-10: src/log/logger.ts + pino-http auto-logging, sensitive field mask*
+- [x] **8.2** Dockerfile + docker-compose (app + volume sqlite) — *done 2026-09-10: see 10.8*
 - [ ] **8.3** Watchdog: heartbeat exchange ↔ server ↔ browser; kalau salah satu putus, agent auto-pause DAN UI freeze dengan alasan
 - [ ] **8.4** Reconnect/rehydrate: setelah restart, server re-sync posisi open dari exchange (live) / DB (paper) → UI otomatis cocok
 - [ ] **8.5** [FE] **Agent Status Panel** (baru): uptime, RPC/exchange latency, last cycle time, jumlah cycle, error counter, mode — "kotak hitam" agent yang bisa dibaca user dalam 5 detik
@@ -137,10 +137,10 @@ Masalah sekarang: harga 1s adalah random-walk sintetis yang di-revert ke anchor 
 - [ ] **10.2** Split `paperBook.ts` (1278 baris) → `src/paperbook/{engine,store,bracketMonitor,markCache}.ts`
 - [ ] **10.3** Split `broker.ts` (668 baris) → `src/broker/{exchange,vault,config,test}.ts`
 - [ ] **10.4** Split `db.ts` (668 baris) → `src/db/{init,ledger,audit,secrets}.ts`
-- [ ] **10.5** Structured logging (pino) + mask apiKey + file rotation
+- [x] **10.5** Structured logging (pino) + mask apiKey + file rotation — *done 2026-09-10: src/log/logger.ts Pino with sensitive redaction (apiKey/secret/token/passcode/[REDACTED]), pino-http auto-logging, pretty transport dev*
 - [ ] **10.6** Watchdog: heartbeat exchange ↔ server ↔ browser; disconnect → agent auto-pause + UI freeze alasan
 - [ ] **10.7** Rehydrate on restart: server startup sync posisi terbuka dari exchange (live) / DB (paper) → FE otomatis cocok
-- [ ] **10.8** Dockerfile + docker-compose (app + volume sqlite)
+- [x] **10.8** Dockerfile + docker-compose (app + volume sqlite) — *done 2026-09-10: Dockerfile multi-stage node:22-alpine, docker-compose.yml + .dockerignore, HEALTHCHECK, VOLUME /data*
 - [ ] **10.9** Notification center (toast fills/rejects/ws-disconnect) + Agent Status Panel
 - [ ] **10.10** Backfill/forward-test mode: replay data historis tanpa order + panel hasil
 
@@ -184,7 +184,7 @@ Uang riil hanya setelah Phase 8 + 9 + forward-test.
 2. **P0-9.8b** ReconciliationPanel: verifikasi posisi live real vs local saat live mode (bagian 9.8 yang belum)
 3. **P0-9.9** SEC: set AUTH_PASSCODE kuat + BROKER_EVENT_SECRET kuat di .env (.env gak di-commit) — warning udah jalan, tinggal set env nya
 4. **P1-10.1** Split server.ts (1718L) → route modules
-5. **P1-10.5** Pino structured logging
+5. **P1-10.5** ~~Pino structured logging~~ ✅ DONE
 
 Verify tiap item: `npx tsc --noEmit && npx vitest run && npm run build` → smoke test login → order → close via curl.
 **Runbook colok API key:** Phase 9.1-9.9 selesai → testnet (TRADING_MODE=live + BROKER_TESTNET=true + key testnet Binance Futures) → arm → posisi kecil → verifikasi close/TP/SL → baru mainnet kecil.
