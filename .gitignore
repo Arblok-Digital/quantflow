@@ -16,3 +16,6 @@ coverage/
 trading.db
 .audit-signing-key
 .auth-sessions.json
+
+# OpenCode task artifacts
+.oc-tasks/
