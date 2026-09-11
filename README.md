@@ -3,8 +3,10 @@
 Autonomous AI-driven trading agent with **paper trading** (realistic fills on real order books, zero risk) and guarded **live trading** via [ccxt](https://github.com/ccxt/ccxt) (a single connector for 100+ exchanges). The decision layer runs on **Gemini 2.0 Flash** combined with the **Keel Quantitative Institutional MM Engine** and an algorithmic MTF liquidation-hunt fallback.
 
 > This project is under active production hardening. See
-> [PRODUCTION_ROADMAP.md](./PRODUCTION_ROADMAP.md) for the phased plan, current
-> status, and the definition of done for each item.
+> [PRODUCTION_ROADMAP.md](./PRODUCTION_ROADMAP.md) for the phased plan and
+> [IMPLEMENTATION.md](./IMPLEMENTATION.md) for the **current implementation
+> status** (module map, endpoints, replay/auto-strategy, DB, TODO) — read that
+> one first before touching code.
 
 ## Architecture
 

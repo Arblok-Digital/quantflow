@@ -147,6 +147,29 @@ export function initDb(): DatabaseSync {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_decisions_created ON agent_decisions(created_at);`);
 
+  // Replay / forward-test runs (isolated book results — training data)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS replay_runs(
+      id TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      start_ts INTEGER NOT NULL,
+      end_ts INTEGER NOT NULL,
+      total_candles INTEGER NOT NULL,
+      initial_cash REAL NOT NULL,
+      final_equity REAL NOT NULL,
+      realized_pnl REAL NOT NULL,
+      max_drawdown_pct REAL NOT NULL,
+      total_trades INTEGER NOT NULL,
+      win_rate REAL NOT NULL,
+      profit_factor REAL NOT NULL,
+      avg_r REAL NOT NULL,
+      created_at INTEGER NOT NULL,
+      result_json TEXT NOT NULL
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_replay_created ON replay_runs(created_at);`);
+
   // Ensure audit secret exists (lazy init, warn)
   ensureAuditSecret();
 

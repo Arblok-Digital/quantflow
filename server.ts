@@ -24,12 +24,14 @@ import {
 } from "./broker";
 import {
   PaperOrderError,
+  cancelPaperOrder,
   getBookFilePath,
   getLatestEventSeq,
   getPaperAccount,
   getPaperBalance,
   getPaperEvents,
   getPaperOrder,
+  getPaperOrders,
   getPaperPositions,
   initPaperBook,
   refreshPaperMarks,
@@ -45,6 +47,9 @@ import {
   saveAgentDecisionDb,
   initDb,
   warnIfDefaultAuditSecret,
+  saveReplayRunDb,
+  listReplayRunsDb,
+  getReplayRunDb,
 } from "./db";
 import {
   createSession,
@@ -72,6 +77,23 @@ import { calculateRSI, calculateEMA, calculateMACD } from "./src/logic/indicator
 import { scanGateMicrocapPumps } from "./src/logic/pumpScanner";
 import { handlePaperOrder, handlePaperClose } from "./src/broker/paperBroker";
 import { handleLiveOrder, handleLiveClose } from "./src/broker/liveBroker";
+import {
+  fetchHistoricalCandles,
+  getReplayStatus,
+  startReplay,
+  stepReplay,
+  runReplay,
+  pauseReplay,
+  resetReplay,
+  setReplaySpeed,
+  placeReplayOrder,
+  closeReplayPositionManual,
+  cancelReplayOrder,
+  getReplaySessionFull,
+  buildReplayTrainingDataset,
+  buildReplayTrainingCsv,
+  setReplayMode,
+} from "./src/replay/replayEngine";
 import type { Candle, OrderBook, MTFLiquidityAnalysis, OnChainMetrics, MacroSummary } from "./src/types";
 
 dotenv.config();
@@ -704,6 +726,9 @@ Portfolio & Risk Context:
 - Active Position: ${JSON.stringify(activePositions || [])}
 - Max Risk Per Trade: ${riskParams?.maxRiskPerTradePercent ?? 2}%
 
+[BACKTEST CONTEXT (HASIL REPLAY HISTORIS — kalibrasi keyakinan)]:
+${(() => { try { return buildBacktestContextFor(String(symbol || "BTC/USDT")); } catch { return "Tidak ada konteks backtest."; } })()}
+
 TUGAS ANDA:
 1. Sintesis ketiga pilar (MTF Liquidity Hunt + On-Chain Whale Flows + Macroeconomic Calendar).
 2. Jika ada sweep SSL (long stop swept) ditambah On-Chain Whale Outflows dan Macro dovish -> Bullish Confluence kuat.
@@ -711,6 +736,7 @@ TUGAS ANDA:
 4. Tentukan aksi (BUY, SELL, atau HOLD) dan Confidence (1-100%).
 5. Tentukan Stop Loss presisi di luar invalidation wick sweep dan Take Profit menuju Liquidity Pool lawan.
 6. Berikan reasoning ringkas (2-3 kalimat) yang menjelaskan integrasi Liquidity + On-chain + Makro.
+7. KALIBRASI dengan BACKTEST CONTEXT: jika strategi historis simbol ini menunjukkan PF < 1 atau MaxDD tinggi -> JANGAN overconfident; turunkan confidence / kecilkan positionSizePercent secara wajar.
 
 Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
 {
@@ -1125,6 +1151,41 @@ interface AiAdvisorBody {
   macroCalendar?: MacroSummary | null;
 }
 
+/**
+ * Replay → Advisor bridge: baca run replay/backtest tersimpan (tabel replay_runs,
+ * data REAL Binance Vision) untuk simbol tertentu, ringkas jadi konteks prompt LLM.
+ * LLM advisor lalu bisa MENGECAL IBARAT-KAN rekomendasi-nya terhadap hasil
+ * backtest historis strategi di simbol yang sama (kalibrasi keyakinan).
+ */
+function buildBacktestContextFor(symbol: string): string {
+  try {
+    const symUpper = String(symbol || "").toUpperCase().replace(" ", "");
+    const runs = (listReplayRunsDb(50) || []).filter(
+      (r) => r.symbol.toUpperCase().replace(" ", "") === symUpper || `${r.symbol}USDT`.toUpperCase().replace(" ", "") === symUpper
+    );
+    if (runs.length === 0) {
+      return "Tidak ada run replay/backtest tersimpan untuk simbol ini. (Jalankan Replay di tab Paper lalu klik Export untuk menghasilkan).";
+    }
+    const rows = runs.slice(0, 3).map((r) => {
+      const date = new Date(r.createdAt).toISOString().slice(0, 10);
+      return (
+        `- ${date} · ${r.symbol} ${r.timeframe} · ${r.totalCandles} candle · ` +
+        `${r.totalTrades} trade (${r.winRate}% win) · PF ${r.profitFactor} · avgR ${r.avgR} · ` +
+        `MaxDD ${r.maxDrawdownPct}% · PnL ${r.realizedPnl >= 0 ? "+" : ""}$${r.realizedPnl.toFixed(2)} (modal $${r.initialCash.toFixed(0)})`
+      );
+    });
+    return (
+      "Run replay/backtest historis terbaru pada simbol ini (sumber candle REAL Binance Vision):\n" +
+      rows.join("\n") +
+      "\nCatatan penting: ini HASIL MASA LALU (backtest) — bukan prediksi & bukan jaminan. " +
+      "Gunakan sebagai KALIBRASI keyakinan: jika backtest strategi menunjukkan win rate rendah / MaxDD besar / PF < 1, " +
+      "turunkan tingkat keyakinan dan hindari bias optimistik."
+    );
+  } catch (e: any) {
+    return `Gagal memuat konteks backtest: ${e?.message || "unknown"}`;
+  }
+}
+
 // Derivasikan technicals (satu set datar) dari candles + orderBook — pola sama
 // dengan pipeline (calculateRSI/EMA/MACD + order book imbalance).
 function deriveTechnicals(
@@ -1242,8 +1303,10 @@ app.post("/api/ai-advisor", requireAuth, async (req, res) => {
   if (client && keelDecision) {
     const oc = body.onChainMetrics;
     const mc = body.macroCalendar;
+    // Replay → LLM: bawa hasil backtest historis tersimpan sebagai kalibrasi.
+    const backtestCtx = buildBacktestContextFor(sym);
     const prompt = `Anda adalah STRATEGIST & ANALYST QUANT SENIOR dari institusi elit (seperti Jane Street atau BlackRock Aladdin).
-Peran Anda: memberikan INTELLIGENCE & REKOMENDASI STRATEGIS berdasarkan sintesis data mikro (Keel/MTF), on-chain, dan makroekonomi.
+Peran Anda: memberikan INTELLIGENCE & REKOMENDASI STRATEGIS berdasarkan sintesis data mikro (Keel/MTF), on-chain, makroekonomi, DAN hasil backtest historis.
 
 Aset: ${sym} | Harga saat ini: $${livePrice}
 
@@ -1270,11 +1333,15 @@ Aset: ${sym} | Harga saat ini: $${livePrice}
 - Risk Index: ${mc?.macroRiskIndex ?? "N/A"}/100
 - Nearest Event: ${mc?.nearestEvent ? mc.nearestEvent.name + " (" + mc.nearestEvent.relativeTime + ")" : "None"}
 
+[BACKTEST CONTEXT (HASIL REPLAY HISTORIS — kalibrasi keyakinan)]:
+${backtestCtx}
+
 TUGAS ANDA:
 1. Analisis SINTESIS: Hubungkan data mikro (Keel) dengan konteks besar (Makro/On-chain). Mengapa harga bergerak seperti ini?
 2. Berikan "Professional Insight" (3-6 kalimat Bahasa Indonesia tajam, tanpa basa-basi).
-3. Tentukan suggestedBias secara TEGAS: LONG atau SHORT jika ada sinyal minimal 60% confluence. Gunakan NEUTRAL hanya jika market benar-benar dead-flat atau data sangat kontradiktif (conflict of interest). 
+3. Tentukan suggestedBias secara TEGAS: LONG atau SHORT jika ada sinyal minimal 60% confluence. Gunakan NEUTRAL hanya jika market benar-benar dead-flat atau data sangat kontradiktif (conflict of interest).
 4. Berikan level Entry, SL, dan TP yang presisi secara matematis berdasarkan likuiditas (BSL/SSL).
+5. KALIBRASI dengan BACKTEST CONTEXT di atas: citakan secara eksplisit (misal "backtest terakhir simbol ini 55% win / PF 1.3 / MaxDD 6% → keyakinan cukup, bukan tinggi"). Jika PF < 1 atau MaxDD besar → turunkan keyakinan & tandai risiko.
 
 Jawab HANYA JSON valid tanpa markdown:
 {
@@ -1341,6 +1408,7 @@ Jawab HANYA JSON valid tanpa markdown:
             model: usedModel,
             timestamp: Date.now(),
             keelSummary,
+            backtest: { symbol: sym, context: backtestCtx },
             ai: {
               insight: ai.insight,
               suggestedBias: ai.suggestedBias,
@@ -1376,6 +1444,7 @@ Jawab HANYA JSON valid tanpa markdown:
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"),
     timestamp: Date.now(),
     keelSummary,
+    backtest: { symbol: sym, context: buildBacktestContextFor(sym) },
     ai: {
       insight: `Mode AI nonaktif (GEMINI_API_KEY belum di-set). Berikut ringkasan data keel: ${insightKeel}`,
       suggestedBias: keelSummary.action === "BUY" ? "BULLISH" : keelSummary.action === "SELL" ? "BEARISH" : "NEUTRAL",
@@ -1669,6 +1738,266 @@ app.post("/api/broker/close", requireAuth, async (req: Request, res: Response) =
       return res.status(status).json({ success: false, status: "REJECTED", reason: err.code, message: err.message });
     }
     res.status(400).json({ success: false, message: err?.message || "Close gagal." });
+  }
+});
+
+// Cancel pending limit order (paper: refund reserved margin; live: cancel di exchange) — PROTECTED
+app.post("/api/broker/cancel", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const orderId = String((req.body || {}).orderId || "");
+    if (!orderId) {
+      return res.status(400).json({ success: false, reason: "MISSING_ORDER_ID", message: "orderId wajib diisi." });
+    }
+    if (getBrokerStatus().mode === "live") {
+      const exchange = getExchange();
+      await ensureMarketsLoaded(exchange);
+      const order = await exchange.cancelOrder(orderId);
+      return res.json({ success: true, mode: "live", cancelled: true, order });
+    }
+    const order = cancelPaperOrder(orderId);
+    try {
+      appendAudit("order", {
+        id: order.id,
+        symbol: order.symbol,
+        side: order.side,
+        amount: order.amount,
+        status: "CANCELLED",
+        reason: "MANUAL_CANCEL",
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      console.error("[audit] GAGAL tulis audit cancel: ", (err as Error)?.message);
+    }
+    return res.json({ success: true, mode: "paper", cancelled: true, order });
+  } catch (err: any) {
+    if (err instanceof PaperOrderError) {
+      return res.status(err.code === "ORDER_NOT_FOUND" ? 404 : 400).json({ success: false, reason: err.code, message: err.message });
+    }
+    return res.status(400).json({ success: false, message: err?.message || "Cancel gagal." });
+  }
+});
+
+// Orders (paper: semua order paper book termasuk pending; live: open orders dari exchange) — PROTECTED
+app.get("/api/broker/orders", requireAuth, async (_req, res) => {
+  if (getBrokerStatus().mode === "live") {
+    try {
+      const exchange = getExchange();
+      await ensureMarketsLoaded(exchange);
+      const openOrders = await exchange.fetchOpenOrders();
+      return res.json({ success: true, mode: "live", orders: openOrders });
+    } catch (err: any) {
+      return res.json({ success: true, mode: "live", orders: [], error: err?.message });
+    }
+  }
+  res.json({ success: true, mode: "paper", orders: getPaperOrders() });
+});
+
+// ==========================================================================
+// REPLAY / FORWARD-TEST endpoints (isolated book, real historical data)
+// ==========================================================================
+// Start replay: fetch real candles dari Binance Vision lalu buat sesi replay.
+app.post("/api/paper/replay/start", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const symbol = String(body.symbol || "BTC/USDT");
+    const timeframe = String(body.timeframe || "15m");
+    const startMs = Number(body.startMs);
+    const endMs = Number(body.endMs);
+    const initialCash = Number(body.initialCash) > 0 ? Number(body.initialCash) : 10000;
+    if (!isFinite(startMs) || !isFinite(endMs) || startMs >= endMs) {
+      return res.status(400).json({ success: false, reason: "INVALID_RANGE", message: "startMs dan endMs wajib diisi (startMs < endMs)." });
+    }
+    const { candles, error } = await fetchHistoricalCandles(symbol, timeframe, startMs, endMs);
+    if (error || candles.length === 0) {
+      return res.status(400).json({ success: false, reason: "FETCH_FAILED", message: error || "Tidak ada data." });
+    }
+    const session = startReplay(symbol, timeframe, candles, initialCash);
+    res.json({ success: true, session });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Gagal start replay." });
+  }
+});
+
+app.get("/api/paper/replay/status", requireAuth, (_req, res) => {
+  res.json({ success: true, ...getReplayStatus() });
+});
+
+app.post("/api/paper/replay/step", requireAuth, (req, res) => {
+  try {
+    const session = stepReplay();
+    res.json({ success: true, session });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Step gagal." });
+  }
+});
+
+app.post("/api/paper/replay/run", requireAuth, (_req, res) => {
+  try {
+    const session = runReplay();
+    res.json({ success: true, session });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Run gagal." });
+  }
+});
+
+app.post("/api/paper/replay/pause", requireAuth, (_req, res) => {
+  const session = pauseReplay();
+  res.json({ success: true, session });
+});
+
+app.post("/api/paper/replay/reset", requireAuth, (_req, res) => {
+  const session = resetReplay();
+  res.json({ success: true, session });
+});
+
+app.post("/api/paper/replay/speed", requireAuth, (req, res) => {
+  try {
+    const speedMs = Number((req.body || {}).speedMs) > 0 ? Number((req.body || {}).speedMs) : 100;
+    const session = setReplaySpeed(speedMs);
+    res.json({ success: true, session });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Set speed gagal." });
+  }
+});
+
+// Auto-execute mode: mode="auto" → strategi teknikal deterministik dieksekusi
+// per candle; mode="manual" → kembali ke eksekusi manual. params optional.
+app.post("/api/paper/replay/strategy", requireAuth, (req, res) => {
+  try {
+    const body = req.body || {};
+    const mode = body.mode === "auto" ? "auto" : "manual";
+    const params = body.params && typeof body.params === "object" ? body.params : undefined;
+    const session = setReplayMode(mode, params);
+    res.json({ success: true, session });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Set strategy gagal." });
+  }
+});
+
+// Place order di replay book (terpisah dari paper book live)
+app.post("/api/paper/replay/order", requireAuth, (req, res) => {
+  try {
+    const order = placeReplayOrder(req.body || {});
+    res.json({ success: true, order });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Order replay gagal." });
+  }
+});
+
+app.post("/api/paper/replay/close", requireAuth, (req, res) => {
+  try {
+    const position = closeReplayPositionManual(String((req.body || {}).positionId || ""));
+    res.json({ success: true, position });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Close replay gagal." });
+  }
+});
+
+app.post("/api/paper/replay/cancel", requireAuth, (req, res) => {
+  try {
+    const order = cancelReplayOrder(String((req.body || {}).orderId || ""));
+    res.json({ success: true, order });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Cancel replay gagal." });
+  }
+});
+
+// Save hasil sesi replay aktif ke SQLite (training data). Hanya sesi done/paused.
+app.post("/api/paper/replay/export", requireAuth, (req, res) => {
+  try {
+    const full = getReplaySessionFull();
+    if (!full) {
+      return res.status(400).json({ success: false, message: "Tidak ada sesi replay aktif." });
+    }
+    if (full.currentIndex < 0) {
+      return res.status(400).json({ success: false, message: "Sesi belum dijalankan — tidak ada hasil untuk disimpan." });
+    }
+    const ds = buildReplayTrainingDataset();
+    saveReplayRunDb({
+      id: ds.runId,
+      symbol: ds.symbol,
+      timeframe: ds.timeframe,
+      startTs: ds.startTs,
+      endTs: ds.endTs,
+      totalCandles: ds.totalCandles,
+      initialCash: ds.initialCash,
+      finalEquity: ds.finalEquity,
+      realizedPnl: ds.realizedPnl,
+      maxDrawdownPct: ds.maxDrawdownPct,
+      totalTrades: ds.stats.totalTrades,
+      winRate: ds.stats.winRate,
+      profitFactor: ds.stats.profitFactor,
+      avgR: ds.stats.avgR,
+      createdAt: Date.now(),
+      resultJson: JSON.stringify(ds),
+    });
+    try {
+      appendAudit("replay_export", {
+        runId: ds.runId,
+        symbol: ds.symbol,
+        timeframe: ds.timeframe,
+        totalTrades: ds.stats.totalTrades,
+        realizedPnl: ds.realizedPnl,
+        source: "REAL",
+      });
+    } catch (err) {
+      console.error("[audit] GAGAL tulis audit replay_export: ", (err as Error)?.message);
+    }
+    res.json({ success: true, runId: ds.runId, stats: ds.stats, savedAt: ds.savedAt });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Export replay gagal." });
+  }
+});
+
+// Daftar run replay yang tersimpan (training data history)
+app.get("/api/paper/replay/runs", requireAuth, (req, res) => {
+  try {
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || "50"), 10) || 50));
+    res.json({ success: true, runs: listReplayRunsDb(limit) });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Gagal load replay runs." });
+  }
+});
+
+// Detail satu run replay tersimpan — format=json (default) atau format=csv
+app.get("/api/paper/replay/runs/:id", requireAuth, (req, res) => {
+  try {
+    const row = getReplayRunDb(String(req.params.id));
+    if (!row) {
+      return res.status(404).json({ success: false, message: "Replay run tidak ditemukan." });
+    }
+    const format = String((req.query as any).format || "json").toLowerCase();
+    if (format === "csv") {
+      const parsed = JSON.parse(row.resultJson);
+      // Rebuild CSV deterministik dari trades tersimpan (sama dengan builder live).
+      const header = [
+        "trade_id", "symbol", "side", "qty", "leverage",
+        "entry_price", "entry_candle_index", "entry_candle_ts",
+        "exit_price", "exit_candle_index", "exit_candle_ts",
+        "exit_reason", "pnl_usd", "pnl_percent", "risk_r", "fees_usd",
+        "hold_candles", "decision_id",
+      ].join(",");
+      const esc = (v: unknown): string => {
+        const s = v === null || v === undefined ? "" : String(v);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const lines = [header];
+      for (const t of parsed.trades || []) {
+        lines.push([
+          esc(t.id), esc(t.symbol), esc(t.side), esc(t.qty), esc(t.leverage),
+          esc(t.entryPrice), esc(t.openedCandleIndex), esc(t.openedCandleTs ?? ""),
+          esc(t.exitPrice), esc(t.closedCandleIndex), esc(t.closedCandleTs ?? ""),
+          esc(t.exitReason), esc(t.pnlUSD), esc(t.pnlPercent), esc(t.riskR ?? ""),
+          esc(t.feesPaidUSD), esc(t.holdCandles), esc(t.decisionId ?? ""),
+        ].join(","));
+      }
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="replay-${row.run.id}.csv"`);
+      return res.send(lines.join("\n"));
+    }
+    res.json({ success: true, run: row.run, dataset: JSON.parse(row.resultJson) });
+  } catch (err: any) {
+    res.status(400).json({ success: false, message: err?.message || "Gagal load replay run." });
   }
 });
 

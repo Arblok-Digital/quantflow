@@ -175,6 +175,106 @@ export function getLatestSnapshotDb(): { ts: number; cash: number; margin_used: 
   return row ? { ts: Number(row.ts), cash: Number(row.cash), margin_used: Number(row.margin_used), equity: Number(row.equity), unrealized_pnl: Number(row.unrealized_pnl) } : null;
 }
 
+// ---------------------------------------------------------------------------
+// Replay / forward-test runs (training data persistence)
+// ---------------------------------------------------------------------------
+export interface ReplayRunSummary {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  startTs: number;
+  endTs: number;
+  totalCandles: number;
+  initialCash: number;
+  finalEquity: number;
+  realizedPnl: number;
+  maxDrawdownPct: number;
+  totalTrades: number;
+  winRate: number;
+  profitFactor: number;
+  avgR: number;
+  createdAt: number;
+}
+
+export function saveReplayRunDb(run: ReplayRunSummary & { resultJson: string }): void {
+  const _db = getDb();
+  _db.prepare(
+    `INSERT OR REPLACE INTO replay_runs
+     (id, symbol, timeframe, start_ts, end_ts, total_candles, initial_cash, final_equity, realized_pnl, max_drawdown_pct, total_trades, win_rate, profit_factor, avg_r, created_at, result_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    run.id,
+    run.symbol,
+    run.timeframe,
+    run.startTs,
+    run.endTs,
+    run.totalCandles,
+    run.initialCash,
+    run.finalEquity,
+    run.realizedPnl,
+    run.maxDrawdownPct,
+    run.totalTrades,
+    run.winRate,
+    run.profitFactor,
+    run.avgR,
+    run.createdAt,
+    run.resultJson
+  );
+}
+
+export function listReplayRunsDb(limit = 50): ReplayRunSummary[] {
+  const _db = getDb();
+  const rows = _db
+    .prepare(
+      `SELECT id, symbol, timeframe, start_ts, end_ts, total_candles, initial_cash, final_equity, realized_pnl, max_drawdown_pct, total_trades, win_rate, profit_factor, avg_r, created_at
+       FROM replay_runs ORDER BY created_at DESC LIMIT ?`
+    )
+    .all(Math.min(200, Math.max(1, Math.floor(limit)))) as any[];
+  return rows.map((r) => ({
+    id: String(r.id),
+    symbol: String(r.symbol),
+    timeframe: String(r.timeframe),
+    startTs: Number(r.start_ts),
+    endTs: Number(r.end_ts),
+    totalCandles: Number(r.total_candles),
+    initialCash: Number(r.initial_cash),
+    finalEquity: Number(r.final_equity),
+    realizedPnl: Number(r.realized_pnl),
+    maxDrawdownPct: Number(r.max_drawdown_pct),
+    totalTrades: Number(r.total_trades),
+    winRate: Number(r.win_rate),
+    profitFactor: Number(r.profit_factor),
+    avgR: Number(r.avg_r),
+    createdAt: Number(r.created_at),
+  }));
+}
+
+export function getReplayRunDb(id: string): { run: ReplayRunSummary; resultJson: string } | null {
+  const _db = getDb();
+  const row = _db.prepare("SELECT * FROM replay_runs WHERE id = ?").get(String(id)) as any;
+  if (!row) return null;
+  return {
+    run: {
+      id: String(row.id),
+      symbol: String(row.symbol),
+      timeframe: String(row.timeframe),
+      startTs: Number(row.start_ts),
+      endTs: Number(row.end_ts),
+      totalCandles: Number(row.total_candles),
+      initialCash: Number(row.initial_cash),
+      finalEquity: Number(row.final_equity),
+      realizedPnl: Number(row.realized_pnl),
+      maxDrawdownPct: Number(row.max_drawdown_pct),
+      totalTrades: Number(row.total_trades),
+      winRate: Number(row.win_rate),
+      profitFactor: Number(row.profit_factor),
+      avgR: Number(row.avg_r),
+      createdAt: Number(row.created_at),
+    },
+    resultJson: String(row.result_json),
+  };
+}
+
 export function getDbFilePath(): string {
   // Re-export from core for callers that only need the path.
   return path_join(process.cwd(), "trading.db");

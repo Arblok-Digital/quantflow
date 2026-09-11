@@ -31,6 +31,14 @@ import {
   Sliders
 } from "lucide-react";
 
+interface PendingOrderLike {
+  id: string;
+  symbol: string;
+  side: string;
+  qty: number;
+  limitPrice: number;
+}
+
 interface PaperTradingPanelProps {
   portfolio: Portfolio;
   positions: Position[];
@@ -42,7 +50,12 @@ interface PaperTradingPanelProps {
   onClosePosition: (symbol: string, reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => void;
   onMoveToBreakEven: (symbol: string) => void;
   onResetPaperAccount: (initialCapital: number) => void;
-  onSimulateTradeEntry: (side: "LONG" | "SHORT") => void;
+  onSimulateTradeEntry: (
+    side: "LONG" | "SHORT",
+    orderType?: "market" | "limit",
+    limitPrice?: number
+  ) => void | Promise<any>;
+  cancelPendingOrder?: (orderId: string) => Promise<void>;
   actionableRunKeel?: () => void;
 }
 
@@ -58,12 +71,20 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   onMoveToBreakEven,
   onResetPaperAccount,
   onSimulateTradeEntry,
+  cancelPendingOrder,
   actionableRunKeel,
 }) => {
   const [activeTab, setActiveTab] = useState<"positions" | "history">("positions");
   const [expandedPositionId, setExpandedPositionId] = useState<string | null>(null);
   const [simulateError, setSimulateError] = useState<{ reason: string; message: string; duplicatePositionId?: string } | null>(null);
   const [selectedCapital, setSelectedCapital] = useState<number>(50000);
+
+  // Order entry: Market/Limit toggle + limit price + last pending order status.
+  const [orderType, setOrderType] = useState<"market" | "limit">("market");
+  const [limitPrice, setLimitPrice] = useState<number | "">("");
+  const [limitError, setLimitError] = useState<string | null>(null);
+  const [lastPendingOrder, setLastPendingOrder] = useState<PendingOrderLike | null>(null);
+  const [cancellingPending, setCancellingPending] = useState(false);
 
   // Mode broker di-poll dari server (paper/live). Saat live, tombol simulasi
   // berubah jadi EXECUTE dengan konfirmasi ganda — jangan sampai order REAL
@@ -93,12 +114,61 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   const isLiveMode = brokerMode === "live";
 
   // Guard utama: di live mode wajib konfirmasi sebelum kirim order REAL.
-  const handleSimulate = (side: "LONG" | "SHORT") => {
+  const handleSimulate = async (side: "LONG" | "SHORT") => {
     if (isLiveMode) {
       const ok = window.confirm("Anda akan mengirim order REAL ke exchange. Lanjutkan?");
       if (!ok) return;
     }
-    onSimulateTradeEntry(side);
+    setSimulateError(null);
+    if (orderType === "limit") {
+      if (limitPrice === "" || !isFinite(Number(limitPrice)) || Number(limitPrice) <= 0) {
+        setLimitError("Isi limitPrice dulu (angka > 0) untuk limit order.");
+        return;
+      }
+      setLimitError(null);
+    }
+    try {
+      const result = await onSimulateTradeEntry(
+        side,
+        orderType,
+        orderType === "limit" ? Number(limitPrice) : undefined
+      );
+      const order = (result as any)?.order ?? result ?? null;
+      const state = String(order?.state ?? order?.status ?? "").toUpperCase();
+      if (orderType === "limit" && (state === "NEW" || state === "PARTIALLY_FILLED")) {
+        setLastPendingOrder({
+          id: String(order?.id ?? ""),
+          symbol: String(order?.symbol ?? symbol),
+          side: String(order?.side ?? side),
+          qty: Number(order?.amount ?? order?.qty ?? 0),
+          limitPrice: Number(order?.limitPrice ?? limitPrice),
+        });
+      }
+    } catch (err) {
+      setSimulateError({ reason: "SIMULATE_FAILED", message: (err as Error).message });
+    }
+  };
+
+  const handleCancelLastPending = async () => {
+    if (!lastPendingOrder) return;
+    if (!window.confirm(`Batalkan limit order ${lastPendingOrder.id}?`)) return;
+    setCancellingPending(true);
+    try {
+      if (cancelPendingOrder) {
+        await cancelPendingOrder(lastPendingOrder.id);
+      } else {
+        await authFetch("/api/broker/order/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId: lastPendingOrder.id }),
+        });
+      }
+      setLastPendingOrder(null);
+    } catch {
+      // keep banner so user can retry
+    } finally {
+      setCancellingPending(false);
+    }
   };
 
   // Cashflow and PnL metrics
@@ -198,7 +268,93 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Order entry: Market / Limit toggle + limitPrice */}
+        <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-zinc-800/80 relative z-10">
+          <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 font-mono text-xs">
+            <button
+              onClick={() => setOrderType("market")}
+              className={`px-3 py-1.5 rounded-lg transition font-semibold ${
+                orderType === "market"
+                  ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+              title="Market order — fill langsung di harga live"
+            >
+              Market
+            </button>
+            <button
+              onClick={() => setOrderType("limit")}
+              className={`px-3 py-1.5 rounded-lg transition font-semibold ${
+                orderType === "limit"
+                  ? "bg-sky-500/20 text-sky-300 border border-sky-500/40"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+              title="Limit order — pending di book sampai harga tersentuh"
+            >
+              Limit
+            </button>
+          </div>
+          {orderType === "limit" && (
+            <label className="flex items-center gap-2 font-mono text-xs text-zinc-300">
+              <span className="text-zinc-500 uppercase text-[10px]">Limit Price</span>
+              <input
+                type="number"
+                min={0}
+                step="any"
+                value={limitPrice}
+                placeholder={currentPrice ? currentPrice.toFixed(2) : "0.00"}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setLimitPrice(v === "" ? "" : Number(v));
+                }}
+                className="w-36 px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 text-zinc-100 font-mono text-xs focus:outline-none focus:border-sky-500/60"
+              />
+            </label>
+          )}
+          <span className="text-[10px] font-mono text-zinc-500">
+            {orderType === "limit"
+              ? "Limit: order pending di book — batalkan via panel Pending Orders."
+              : "Market: fill instan di harga live."}
+          </span>
+        </div>
+        {limitError && (
+          <p className="mt-2 text-[11px] font-mono text-rose-400 relative z-10">{limitError}</p>
+        )}
       </div>
+
+      {/* Limit order pending status banner */}
+      {lastPendingOrder && (
+        <div className="bg-sky-950/40 border border-sky-500/30 rounded-2xl p-3 sm:p-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 font-mono text-xs">
+            <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
+            <span className="text-sky-200">
+              Order pending di book — {lastPendingOrder.symbol} {lastPendingOrder.side}{" "}
+              {lastPendingOrder.qty} @ ${Number(lastPendingOrder.limitPrice).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+            </span>
+            <span className="px-2 py-0.5 rounded border text-[10px] font-bold bg-sky-500/15 text-sky-300 border-sky-500/30">
+              NEW
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCancelLastPending}
+              disabled={cancellingPending}
+              className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-200 hover:text-white border border-zinc-700 hover:border-rose-500 font-mono text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Batalkan limit order via POST /api/broker/order/cancel"
+            >
+              {cancellingPending ? "Cancelling…" : "Cancel"}
+            </button>
+            <button
+              onClick={() => setLastPendingOrder(null)}
+              className="px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-300 font-mono text-xs transition"
+              title="Sembunyikan banner (order tetap pending di book)"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Cashflow & PnL Overview Bento Grid (4 Cards) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">

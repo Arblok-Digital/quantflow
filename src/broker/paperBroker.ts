@@ -62,6 +62,11 @@ export async function handlePaperOrder(req: Request, res: Response): Promise<Res
 
     // Opening order
     try {
+      // decisionId: datang dari meta pipeline (saveAgentDecisionDb di
+      // /api/ai-decision) ATAU top-level body (panel manual). Disimpan di
+      // order.meta.decisionId → receipt → posisi → audit → training join.
+      const meta = body.meta && typeof body.meta === "object" ? { ...body.meta } : {};
+      if (!meta.decisionId && body.decisionId) meta.decisionId = String(body.decisionId);
       const result = await openPaperPosition({
         symbol: body.symbol,
         side: String(body.side || "buy").toLowerCase() === "sell" ? "sell" : "buy",
@@ -69,20 +74,28 @@ export async function handlePaperOrder(req: Request, res: Response): Promise<Res
         leverage: body.leverage,
         stopLoss: body.stopLoss,
         takeProfit: body.takeProfit,
-        meta: body.meta,
+        orderType: String(body.type || "market").toLowerCase() === "limit" ? "limit" : "market",
+        limitPrice: body.limitPrice ? Number(body.limitPrice) : undefined,
+        allowPartialFill: body.allowPartialFill === true,
+        meta,
       });
       recordOrderPlaced();
       try {
         appendAudit("order", {
           orderId: result.order.id,
-          positionId: result.position.id,
-          symbol: result.position.symbol,
+          positionId: result.position?.id,
+          symbol: result.position?.symbol || String(body.symbol || "BTC/USDT"),
           side: result.order.side,
           amount: result.order.amount,
           fillPrice: result.order.fillPrice,
           leverage: result.order.leverage,
           stopLoss: body.stopLoss,
           takeProfit: body.takeProfit,
+          orderType: result.order.type,
+          status: result.order.status,
+          filledQty: result.order.filledQty,
+          remainingQty: result.order.remainingQty,
+          decisionId: (result.order.meta as any)?.decisionId ?? meta.decisionId ?? null,
         });
       } catch (err) {
         console.error("[audit] GAGAL tulis audit order: ", (err as Error)?.message);
@@ -98,6 +111,8 @@ export async function handlePaperOrder(req: Request, res: Response): Promise<Res
           slippageBps: order.slippageBps,
           feeUSD: order.feeUSD,
           qty: order.qty,
+          filledQty: order.filledQty,
+          remainingQty: order.remainingQty,
           notional: order.notional,
           leverage: order.leverage,
           marginRequired: order.marginRequired,
@@ -105,6 +120,7 @@ export async function handlePaperOrder(req: Request, res: Response): Promise<Res
           timestamp: order.timestamp,
           signature: order.signature,
           payloadHash: order.payloadHash,
+          decisionId: (order.meta as any)?.decisionId ?? meta.decisionId ?? null,
         },
         position,
       });

@@ -112,11 +112,58 @@ const EMPTY_PORTFOLIO: Portfolio = {
   currentDrawdownPercent: 0,
 };
 
+export type OrderTypeInput = "market" | "limit";
+
+export interface PendingOrder {
+  id: string;
+  symbol: string;
+  side: "buy" | "sell" | "LONG" | "SHORT";
+  type: "limit";
+  qty: number;
+  filledQty?: number;
+  remainingQty?: number;
+  limitPrice: number;
+  state: "NEW" | "PARTIALLY_FILLED" | "CANCELED" | "REJECTED";
+  createdAt?: number;
+}
+
+function mapPendingOrder(o: any): PendingOrder | null {
+  if (!o) return null;
+  const id = String(o.id ?? o.orderId ?? "");
+  if (!id) return null;
+  const qty = Number(o.qty ?? o.amount ?? o.quantity ?? 0);
+  const limitPrice = Number(o.limitPrice ?? o.limit_price ?? o.price ?? 0);
+  if (!limitPrice || limitPrice <= 0) return null;
+  const rawState = String(o.state ?? o.status ?? "NEW").toUpperCase();
+  if (rawState === "FILLED") return null;
+  const state: PendingOrder["state"] =
+    rawState === "PARTIALLY_FILLED" || rawState === "PARTIAL"
+      ? "PARTIALLY_FILLED"
+      : rawState === "CANCELED" || rawState === "CANCELLED"
+      ? "CANCELED"
+      : rawState === "REJECTED"
+      ? "REJECTED"
+      : "NEW";
+  return {
+    id,
+    symbol: String(o.symbol ?? "?"),
+    side: (o.side as PendingOrder["side"]) ?? "buy",
+    type: "limit",
+    qty,
+    filledQty: o.filledQty != null ? Number(o.filledQty) : o.filled_qty != null ? Number(o.filled_qty) : undefined,
+    remainingQty: o.remainingQty != null ? Number(o.remainingQty) : o.remaining_qty != null ? Number(o.remaining_qty) : undefined,
+    limitPrice,
+    state,
+    createdAt: o.createdAt != null ? Number(o.createdAt) : o.created_at != null ? Number(o.created_at) : undefined,
+  };
+}
+
 export function usePaperTrading(options: UsePaperTradingOptions) {
   const { symbol, currentPrice } = options;
   const [portfolio, setPortfolio] = useState<Portfolio>(EMPTY_PORTFOLIO);
   const [positions, setPositions] = useState<Position[]>([]);
   const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
 
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
@@ -134,9 +181,10 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
     if (!mountedRef.current) return;
     if (typeof document !== "undefined" && document.hidden) return;
     try {
-      const [posRes, statsRes] = await Promise.all([
+      const [posRes, statsRes, ordersRes] = await Promise.all([
         authFetch("/api/broker/positions").then((r) => r.json().catch(() => null)),
         authFetch("/api/ledger/stats").then((r) => r.json().catch(() => null)),
+        authFetch("/api/broker/orders").then((r) => r.json().catch(() => null)),
       ]);
 
       // positions + account
@@ -145,6 +193,21 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         const openOnly = rawPositions.filter((p) => (p.status || "OPEN") === "OPEN");
         const mapped = openOnly.map(mapServerPosition);
         if (mountedRef.current) setPositions(mapped);
+
+        // pendingOrders (server truth from /api/broker/orders; fallback: keep
+        // client-side state when the server does not return the array yet).
+        const serverOrders: any[] = ordersRes && Array.isArray(ordersRes.orders) ? ordersRes.orders : [];
+        const pendingFromServer = serverOrders
+          .map(mapPendingOrder)
+          .filter((o): o is PendingOrder => o !== null);
+        if (Array.isArray((posRes as any).pendingOrders)) {
+          const pendingFromPos = ((posRes as any).pendingOrders as any[])
+            .map(mapPendingOrder)
+            .filter((o): o is PendingOrder => o !== null);
+          if (mountedRef.current) setPendingOrders(pendingFromServer.length > 0 ? pendingFromServer : pendingFromPos);
+        } else if (mountedRef.current) {
+          setPendingOrders(pendingFromServer);
+        }
 
         const acc = posRes.account as any | null;
         const stats = statsRes && statsRes.success ? statsRes : null;
@@ -332,8 +395,31 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
     [load]
   );
 
+  const cancelPendingOrder = useCallback(
+    async (orderId: string) => {
+      try {
+        const res = await authFetch("/api/broker/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId }),
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok || !payload?.success) {
+          console.error(`Cancel order ditolak (${payload?.reason || res.status}): ${payload?.message || "unknown"}`);
+          return;
+        }
+        // Optimistic prune: drop canceled order locally, then refresh server truth.
+        setPendingOrders((prev) => prev.filter((o) => o.id !== orderId));
+        await load();
+      } catch (err) {
+        console.error("Cancel order unreachable:", (err as Error).message);
+      }
+    },
+    [load]
+  );
+
   const simulateTradeEntry = useCallback(
-    async (side: "LONG" | "SHORT") => {
+    async (side: "LONG" | "SHORT", orderType: OrderTypeInput = "market", limitPrice?: number) => {
       const sym = symbolRef.current || "BTC/USDT";
       const entryPrice = priceRef.current ?? 0;
       if (!entryPrice || entryPrice <= 0) {
@@ -367,8 +453,24 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         return;
       }
       const isLong = side === "LONG";
+      // Pre-flight guard: server paper book menolak duplikat arah yang sama
+      // pada symbol yang masih OPEN (DUPLICATE_POSITION_DIRECTION). Cek di
+      // client supaya tidak hit server + console.error tidak perlu. `positions`
+      // hanya berisi posisi OPEN (filter server di load()).
+      const dupSameSide = positions.find((p) => p.symbol === sym && p.side === side);
+      if (dupSameSide) {
+        console.warn(
+          `[usePaperTrading] Simulate ${side} ${sym} di-skip: posisi ${side} sudah OPEN (${dupSameSide.id}). Tutup dulu.`
+        );
+        return null;
+      }
       const stopLoss = isLong ? Number((entryPrice * 0.991).toFixed(2)) : Number((entryPrice * 1.009).toFixed(2));
       const takeProfit = isLong ? Number((entryPrice * 1.021).toFixed(2)) : Number((entryPrice * 0.979).toFixed(2));
+      const effectiveType: OrderTypeInput = orderType === "limit" ? "limit" : "market";
+      if (effectiveType === "limit" && (!limitPrice || !isFinite(limitPrice) || limitPrice <= 0)) {
+        console.warn("[usePaperTrading] simulateTradeEntry: limitPrice wajib diisi untuk limit order.");
+        return null;
+      }
       try {
         const res = await authFetch("/api/broker/order", {
           method: "POST",
@@ -376,11 +478,12 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
           body: JSON.stringify({
             symbol: sym,
             side: isLong ? "buy" : "sell",
-            type: "market",
+            type: effectiveType,
             amount: qty,
             leverage: 10,
             stopLoss,
             takeProfit,
+            ...(effectiveType === "limit" ? { limitPrice: Number(limitPrice) } : {}),
             meta: {
               reasoning: isLong
                 ? `Simulated LONG via paper book: 15m SSL sweep @ ${(entryPrice * 0.994).toFixed(0)}`
@@ -394,27 +497,53 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         });
         const payload = await res.json().catch(() => null);
         if (!res.ok || !payload?.success) {
-          console.error(`Simulate order ditolak (${payload?.reason || res.status}): ${payload?.message || "unknown"}`);
-          return;
+          console.warn(
+            `Simulate order ditolak (${payload?.reason || res.status}): ${payload?.message || "unknown"}`
+          );
+          return null;
+        }
+        const order = payload?.order as any | undefined;
+        const orderState = String(order?.state ?? order?.status ?? "").toUpperCase();
+        if (effectiveType === "limit" && (orderState === "NEW" || orderState === "PARTIALLY_FILLED")) {
+          // Client-side fallback: populate pendingOrders locally in case the
+          // server positions response does not include pendingOrders yet.
+          const mapped = mapPendingOrder({
+            id: order?.id,
+            symbol: order?.symbol ?? sym,
+            side: order?.side ?? (isLong ? "buy" : "sell"),
+            qty: order?.amount ?? order?.qty ?? qty,
+            limitPrice: order?.limitPrice ?? limitPrice,
+            state: orderState,
+            createdAt: Date.now(),
+          });
+          if (mapped) {
+            setPendingOrders((prev) =>
+              prev.some((o) => o.id === mapped.id) ? prev : [...prev, mapped]
+            );
+          }
         }
         await load();
+        return order ?? null;
       } catch (err) {
         console.error("Simulate order unreachable:", (err as Error).message);
+        return null;
       }
     },
-    [portfolio.cash, portfolio.equity, load]
+    [portfolio.cash, portfolio.equity, positions, load]
   );
 
   return {
     portfolio,
     positions,
     closedTrades,
+    pendingOrders,
     processPriceTick,
     addPosition,
     commitPortfolio,
     moveToBreakEven,
     resetPaperAccount,
     simulateTradeEntry,
+    cancelPendingOrder,
     closePosition,
     pruneServerPositions,
     refresh: load,

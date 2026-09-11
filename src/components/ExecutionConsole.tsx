@@ -16,6 +16,10 @@ type PaperEventType =
   | "POSITION_CLOSED"
   | "BRACKET_MONITOR_ACTION"
   | "POSITION_UPDATED"
+  | "ORDER_NEW"
+  | "ORDER_PARTIAL"
+  | "ORDER_REJECTED"
+  | "ORDER_CANCELLED"
   | "ERROR";
 
 interface PaperEvent {
@@ -78,14 +82,53 @@ function describeEvent(e: PaperEvent): EventDescription {
     case "ORDER_FILLED": {
       const side = String(p.side || "?").toUpperCase();
       const symbol = String(p.symbol || "?");
-      const qty = fmtNum(p.qty);
+      const qty = fmtNum(p.qty ?? p.filledQty);
       const fill = fmtMoney(p.fillPrice);
       const slip = p.slippageBps === undefined ? "?" : `${fmtNum(p.slippageBps)}bps`;
       const fee = p.feeUSD === undefined ? "?" : `$${Number(p.feeUSD).toFixed(3)}`;
       const latency = p.executionLatencyMs === undefined ? "?" : `${fmtNum(p.executionLatencyMs)}ms`;
+      const partial = p.remainingQty ? ` | partial sisa ${fmtNum(p.remainingQty)}` : "";
+      const decision = (p as any).decisionId ? ` | decision ${(p as any).decisionId}` : "";
       return {
         badge: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
-        text: `FILLED ${side} ${symbol} ${qty} @ ${fill} | slip ${slip} | fee ${fee} | ${latency}`,
+        text: `FILLED ${side} ${symbol} ${qty} @ ${fill} | slip ${slip} | fee ${fee} | ${latency}${partial}${decision}`,
+      };
+    }
+    case "ORDER_NEW": {
+      const side = String(p.side || "?").toUpperCase();
+      const symbol = String(p.symbol || "?");
+      const qty = fmtNum(p.qty);
+      const type = String(p.type || "market").toUpperCase();
+      const lp = p.limitPrice ? ` @ limit ${fmtMoney(p.limitPrice)}` : "";
+      const lat = p.submittedAt ? ` (lat ${fmtNum((p.submittedAt as number) - e.timestamp)}ms)` : "";
+      return {
+        badge: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
+        text: `ORDER NEW ${type} ${side} ${symbol} ${qty}${lp}${lat}`,
+      };
+    }
+    case "ORDER_PARTIAL": {
+      const symbol = String(p.symbol || "?");
+      const filled = fmtNum(p.filledQty);
+      const remaining = fmtNum(p.remainingQty);
+      return {
+        badge: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30",
+        text: `PARTIAL FILL ${symbol}: ${filled} filled / ${remaining} remaining`,
+      };
+    }
+    case "ORDER_REJECTED": {
+      const symbol = String(p.symbol || "?");
+      const reason = p.reason ? ` (${String(p.reason)})` : "";
+      return {
+        badge: "bg-rose-500/15 text-rose-400 border-rose-500/30",
+        text: `ORDER REJECTED ${symbol}${reason}`,
+      };
+    }
+    case "ORDER_CANCELLED": {
+      const symbol = String(p.symbol || "?");
+      const reason = p.reason ? ` (${String(p.reason)})` : "";
+      return {
+        badge: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
+        text: `ORDER CANCELLED ${symbol}${reason}`,
       };
     }
     case "POSITION_CLOSED": {
@@ -345,8 +388,8 @@ export const ExecutionConsole: React.FC = () => {
         )
       ) : (
         <div className="space-y-1.5">
-          {events.map((ev) => (
-            <EventRow key={ev.seq} event={ev} />
+          {events.map((ev, idx) => (
+            <EventRow key={`${ev.seq}-${ev.timestamp}-${idx}`} event={ev} />
           ))}
         </div>
       )}

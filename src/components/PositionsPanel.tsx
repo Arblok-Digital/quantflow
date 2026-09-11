@@ -186,7 +186,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
 
   const account = data?.account;
   const openPositions =
-    Array.isArray(data.positions)
+    Array.isArray(data?.positions)
       ? data.positions.filter((p) => p.status === "OPEN").sort((a, b) => b.openedAt - a.openedAt)
       : [];
 

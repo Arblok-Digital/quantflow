@@ -20,6 +20,7 @@ import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
 import { PaperTradingPanel } from "./components/PaperTradingPanel";
 import { ExecutionConsole } from "./components/ExecutionConsole";
 import { PositionsPanel } from "./components/PositionsPanel";
+import { ReplayControlPanel } from "./components/ReplayControlPanel";
 import { ProbabilityBadge } from "./components/ProbabilityBadge";
 import { ReconciliationPanel } from "./components/ReconciliationPanel";
 
@@ -479,6 +480,7 @@ export default function App() {
 
             <ExecutionConsole />
             <PositionsPanel onServerPositions={handleServerPositions} />
+            <ReplayControlPanel />
 
             <PaperTradingPanel
               portfolio={paper.portfolio}

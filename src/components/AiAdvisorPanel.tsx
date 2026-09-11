@@ -28,6 +28,7 @@ export interface AiAdvisorResponse {
   geminiConfigured: boolean;
   timestamp: number;
   keelSummary: AiAdvisorKeelSummary;
+  backtest?: { symbol: string; context: string };
   ai: {
     insight: string;
     suggestedBias?: "BULLISH" | "BEARISH" | "NEUTRAL";
@@ -258,6 +259,23 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                 </p>
               )}
             </div>
+
+            {/* BACKTEST CONTEXT — hasil replay historis (kalibrasi keyakinan) */}
+            {result.backtest && (
+              <div className="rounded-xl bg-zinc-950/70 border border-sky-500/25 p-3">
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <p className="text-[10px] font-mono uppercase tracking-wider text-sky-400 font-bold">
+                    Backtest Context (Replay Historis)
+                  </p>
+                  <span className="px-1.5 py-0.5 rounded border border-sky-500/30 bg-sky-500/10 text-[9px] font-mono font-bold text-sky-300">
+                    {result.backtest.symbol?.toUpperCase()}
+                  </span>
+                </div>
+                <p className="text-[10px] font-mono text-zinc-400 whitespace-pre-wrap leading-relaxed">
+                  {result.backtest.context}
+                </p>
+              </div>
+            )}
 
             {/* KEEL DATA — grid info */}
             {keel && (

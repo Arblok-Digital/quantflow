@@ -202,7 +202,7 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
                 {positions.map((pos) => {
                   const isPosProfitable = pos.unrealizedPnl >= 0;
                   return (
-                    <tr key={pos.symbol} className="hover:bg-zinc-800/40 transition-colors">
+                    <tr key={pos.id} className="hover:bg-zinc-800/40 transition-colors">
                       <td className="py-2.5 font-bold text-zinc-200">{pos.symbol}</td>
                       <td className="py-2.5">
                         <span className="px-1.5 py-0.5 text-[10px] rounded bg-zinc-800 text-zinc-300 border border-zinc-700">

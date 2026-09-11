@@ -22,25 +22,46 @@ import {
 // Source of truth for PAPER trading. Persisted to SQLite (trading.db) via db.ts.
 // Init rehydrates OPEN positions from DB. All fills measured against real ccxt data.
 
-export const TAKER_FEE_RATE = 0.0004;
+// Paper mode env config (TODO 6.1) — semua bisa dioverride via .env, default
+// mengikuti tarif Binance USDT-M VIP0 (taker 0.04%, maker 0.02%).
+const envPositiveInt = (v: string | undefined, def: number): number => {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+};
+const envPositiveNum = (v: string | undefined, def: number): number => {
+  const n = parseFloat(String(v ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : def;
+};
+
+export const TAKER_FEE_RATE = envPositiveNum(process.env.PAPER_FEE_TAKER_BPS, 4) / 10000;
+export const MAKER_FEE_RATE = envPositiveNum(process.env.PAPER_FEE_MAKER_BPS, 2) / 10000;
 
 let warnedDefaultSecret = false;
-export const INITIAL_PAPER_CASH = 10000;
-export const MAINTENANCE_MARGIN_RATE = 0.005;
-export const MAX_LEVERAGE = 50;
+export const INITIAL_PAPER_CASH = envPositiveInt(process.env.PAPER_INITIAL_CASH, 10000);
+export const MAINTENANCE_MARGIN_RATE = 0.004;
+export const MAX_LEVERAGE = envPositiveInt(process.env.PAPER_LEVERAGE_MAX, 50);
 export const ORDERBOOK_LEVELS = 20;
 export const EVENT_RING_SIZE = 200;
 export const MARK_TTL_MS = 3000;
 export const ERROR_LOG_THROTTLE_MS = 30000;
 
+// Simulated exchange latency range (ms)
+export const EXCHANGE_LATENCY_MS_MIN = 5;
+export const EXCHANGE_LATENCY_MS_MAX = 50;
+
 export type PaperSide = "LONG" | "SHORT";
 export type PaperPositionStatus = "OPEN" | "CLOSED";
 export type ExitReason = "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL" | "LIQUIDATED";
+export type PaperOrderStatus = "NEW" | "PARTIALLY_FILLED" | "FILLED" | "REJECTED" | "CANCELLED";
 export type PaperEventType =
   | "ORDER_FILLED"
   | "POSITION_CLOSED"
   | "BRACKET_MONITOR_ACTION"
   | "POSITION_UPDATED"
+  | "ORDER_NEW"
+  | "ORDER_PARTIAL"
+  | "ORDER_REJECTED"
+  | "ORDER_CANCELLED"
   | "ERROR";
 
 export interface PaperPosition {
@@ -55,6 +76,7 @@ export interface PaperPosition {
   stopLoss: number;
   takeProfit: number;
   liquidationPrice: number;
+  maintenanceMarginRate: number;
   openedAt: number;
   status: PaperPositionStatus;
   entryReasoning?: string;
@@ -77,22 +99,33 @@ export interface PaperOrderReceipt {
   mode: "paper";
   symbol: string;
   side: "buy" | "sell";
-  type: string;
+  type: "market" | "limit";
   amount: number;
   fillPrice?: number;
   slippageBps?: number;
   feeUSD: number;
   qty: number;
   notional?: number;
+  limitPrice?: number;
   leverage?: number;
   marginRequired?: number;
   executionLatencyMs?: number;
   timestamp: number;
-  status: "FILLED" | "REJECTED";
+  status: PaperOrderStatus;
   positionId?: string;
   reason?: string;
   signature: string;
   payloadHash: string;
+  // Lifecycle timestamps
+  submittedAt?: number;
+  filledAt?: number;
+  cancelledAt?: number;
+  // For partial fills
+  filledQty?: number;
+  remainingQty?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  meta?: PaperOrderMeta;
 }
 
 export interface PaperEvent {
@@ -145,6 +178,7 @@ const r2 = (n: number) => roundTo(Number(n), 2);
 const r3 = (n: number) => roundTo(Number(n), 3);
 const r4 = (n: number) => roundTo(Number(n), 4);
 const r6 = (n: number) => roundTo(Number(n), 6);
+const r8 = (n: number) => roundTo(Number(n), 8);
 
 let state: PaperBookState = {
   positions: [],
@@ -277,7 +311,7 @@ function dbSaveOrder(order: PaperOrderReceipt): void {
     closed_at: null,
     realized_pnl_usd: null,
   });
-  // also save fills row
+  // also save fills row (amount = filledQty terukur; sisa unfilled TIDAK pernah jadi fill)
   if (order.fillPrice != null) {
     const fillId = `fill-${order.id}`;
     saveFillDb({
@@ -286,7 +320,7 @@ function dbSaveOrder(order: PaperOrderReceipt): void {
       symbol: order.symbol,
       side: order.side,
       price: order.fillPrice,
-      amount: order.amount,
+      amount: order.filledQty ?? order.amount,
       fee_usd: order.feeUSD,
       created_at: order.timestamp,
     });
@@ -309,6 +343,14 @@ function dbSavePositionTolerant(pos: PaperPosition): void {
     dbSavePosition(pos);
   } catch (err) {
     console.warn(`[paperBook] Gagal save position (non-tx) ${pos.id}: ${(err as Error).message}`);
+  }
+}
+
+function dbSaveOrderTolerant(order: PaperOrderReceipt): void {
+  try {
+    dbSaveOrder(order);
+  } catch (err) {
+    console.warn(`[paperBook] Gagal save order (non-tx) ${order.id}: ${(err as Error).message}`);
   }
 }
 
@@ -344,7 +386,7 @@ export function initPaperBook(): void {
       mode: (r.mode as "paper") || "paper",
       symbol: String(r.symbol),
       side: (String(r.side).toLowerCase() === "sell" ? "sell" : "buy") as "buy" | "sell",
-      type: String(r.type),
+      type: (String(r.type) === "limit" ? "limit" : "market") as "market" | "limit",
       amount: Number(r.amount),
       fillPrice: r.price != null ? Number(r.price) : undefined,
       slippageBps: r.slippage_bps != null ? Number(r.slippage_bps) : undefined,
@@ -355,7 +397,7 @@ export function initPaperBook(): void {
       marginRequired: undefined,
       executionLatencyMs: undefined,
       timestamp: Number(r.created_at),
-      status: (String(r.status).toUpperCase() === "REJECTED" ? "REJECTED" : "FILLED") as "FILLED" | "REJECTED",
+      status: (String(r.status).toUpperCase() === "REJECTED" ? "REJECTED" : String(r.status).toUpperCase() === "CANCELLED" ? "CANCELLED" : String(r.status).toUpperCase() === "PARTIALLY_FILLED" ? "PARTIALLY_FILLED" : String(r.status).toUpperCase() === "NEW" ? "NEW" : "FILLED") as PaperOrderStatus,
       positionId: undefined,
       signature: "",
       payloadHash: "",
@@ -390,6 +432,8 @@ export function initPaperBook(): void {
         stopLoss: r.stop_loss != null ? Number(r.stop_loss) : 0,
         takeProfit: r.take_profit != null ? Number(r.take_profit) : 0,
         liquidationPrice: r.liq_price != null ? Number(r.liq_price) : liquidationPrice(entryPrice, leverage, String(r.side) as PaperSide),
+        // Posisi lama (sebelum kolom ini ada) fallback ke tier-1 MMR sekarang.
+        maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
         openedAt: Number(r.opened_at),
         status: String(r.status) as PaperPositionStatus,
         sourceOrderId: String(r.id),
@@ -464,6 +508,10 @@ export function getPaperPositions(): PaperPosition[] {
 export function getPaperOrder(orderId: string): PaperOrderReceipt | undefined {
   const order = state.orders.find((o) => o.id === orderId);
   return order ? { ...order } : undefined;
+}
+
+export function getPaperOrders(): PaperOrderReceipt[] {
+  return state.orders.map((o) => ({ ...o }));
 }
 
 export function getPaperEvents(sinceSeq: number): PaperEvent[] {
@@ -555,6 +603,10 @@ interface FillResult {
   feeUSD: number;
   method: "ORDERBOOK" | "TICKER" | "LIQUIDATION";
   latencyMs: number;
+  /** Qty yang benar-benar bisa didukung orderbook top-20 (sisa = partial). */
+  filledQty: number;
+  /** Qty yang tidak kebagian depth (0 = full fill). */
+  unfilledQty: number;
 }
 
 async function marketFill(
@@ -587,18 +639,30 @@ async function marketFill(
         remaining -= take;
       }
       if (remaining > 0) {
-        // Order melebihi kedalaman book yang terlihat: jangan isi di harga
-        // level terakhir flat (understates slippage & terlalu optimistic).
-        // Beri marginal penalty sebesar spread tiap "level tak terlihat" —
-        // fill di luar visible depth lebih mahal/lebih murah secara realistis.
-        const worst = ladder.length > 0 ? Number(ladder[ladder.length - 1][0]) : mid;
-        const depthGapBps = Math.max(
-          5,
-          (Math.abs(worst - mid) / mid) * 10000 + 5
-        );
-        const beyondDepthPrice =
-          side === "buy" ? worst * (1 + depthGapBps / 10000) : worst * (1 - depthGapBps / 10000);
-        weightedSum += beyondDepthPrice * remaining;
+        // Versi 2026-09-10: JANGAN extrapolate fill di luar visible depth.
+        // Order yang melebihi kedalaman top-20 difill PARSIAL atas qty yang
+        // kebagian book; sisanya diteruskan sebagai PARTIALLY_FILLED.
+        // Extrapolate dengan penalty spread (logika lama, dihapus) justru
+        // mengada-ada: harga fill bagian unfilled tidak terukur → tidak boleh
+        // diproduksi sebagai fill.
+        const filledQty = r8(qty - remaining);
+        if (filledQty <= 0) {
+          throw new PaperOrderError("NO_DEPTH", `Orderbook tidak cukup likuid untuk ${symbol} ${side}. Depth top-20 habis.`);
+        }
+        let fillPrice = weightedSum / filledQty;
+        if (bracketMode !== "none" && triggerPrice !== undefined && triggerPrice > 0) {
+          fillPrice = side === "buy" ? Math.max(triggerPrice, fillPrice) : Math.min(triggerPrice, fillPrice);
+        }
+        const slippageBps = (Math.abs(fillPrice - mid) / mid) * 10000;
+        return {
+          fillPrice: r6(fillPrice),
+          slippageBps: r2(slippageBps),
+          feeUSD: r4(fillPrice * filledQty * TAKER_FEE_RATE),
+          method: "ORDERBOOK",
+          latencyMs: Date.now() - t0,
+          filledQty,
+          unfilledQty: r8(remaining),
+        };
       }
       let fillPrice = weightedSum / qty;
       if (bracketMode !== "none" && triggerPrice !== undefined && triggerPrice > 0) {
@@ -611,6 +675,8 @@ async function marketFill(
         feeUSD: r4(fillPrice * qty * TAKER_FEE_RATE),
         method: "ORDERBOOK",
         latencyMs: Date.now() - t0,
+        filledQty: qty,
+        unfilledQty: 0,
       };
     }
   } catch {}
@@ -634,6 +700,8 @@ async function marketFill(
       feeUSD: r4(fillPrice * qty * TAKER_FEE_RATE),
       method: "TICKER",
       latencyMs: Date.now() - t0,
+      filledQty: qty,
+      unfilledQty: 0,
     };
   } catch (err) {
     // CCXT exchange (Binance) tidak terjangkau / kena blokir ISP.
@@ -652,6 +720,8 @@ async function marketFill(
           feeUSD: r4(fillPrice * qty * TAKER_FEE_RATE),
           method: "TICKER",
           latencyMs: Date.now() - t0,
+          filledQty: qty,
+          unfilledQty: 0,
         };
       }
     } catch (chainErr) {
@@ -679,6 +749,8 @@ export interface PaperOrderMeta {
   timeframe?: string;
   marketType?: string;
   targetPool?: string;
+  /** AI decision id yang memicu order (untuk training join decision → fill). */
+  decisionId?: string;
 }
 
 export interface OpenPaperPositionInput {
@@ -688,6 +760,15 @@ export interface OpenPaperPositionInput {
   leverage?: number;
   stopLoss?: number;
   takeProfit?: number;
+  orderType?: "market" | "limit";
+  limitPrice?: number;
+  /**
+   * Versi 2026-09-10: order yang orderbook depth-nya tidak cukup untuk full
+   * qty difill PARSIAL — tidak lagi all-or-nothing. JANGAN pernah simulasikan
+   * partial di client; seluruh state (NEW → PARTIALLY_FILLED → FILLED) hanya
+   * diproduksi di sini dan disiarkan lewat ORDER_PARTIAL / ORDER_FILLED.
+   */
+  allowPartialFill?: boolean;
   meta?: PaperOrderMeta;
 }
 
@@ -720,7 +801,103 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     );
   }
 
-  const fill = await marketFill(symbol, direction, qty);
+  const orderType = input.orderType || "market";
+  const limitPrice = input.limitPrice ? Number(input.limitPrice) : undefined;
+  
+  // Validate limit order
+  if (orderType === "limit" && (!limitPrice || !isFinite(limitPrice) || limitPrice <= 0)) {
+    throw new PaperOrderError("INVALID_LIMIT_PRICE", "limitPrice wajib diisi untuk limit order.");
+  }
+
+  const positionId = newId("pos");
+  const orderId = newId("ord");
+  const now = Date.now();
+  
+  // Simulate exchange latency (5-50ms)
+  const exchangeLatency = Math.floor(Math.random() * (EXCHANGE_LATENCY_MS_MAX - EXCHANGE_LATENCY_MS_MIN + 1)) + EXCHANGE_LATENCY_MS_MIN;
+  const submittedAt = now + exchangeLatency;
+
+  // Initial order payload + signature
+  const payload = JSON.stringify({
+    symbol,
+    side: direction,
+    type: orderType,
+    amount: qty,
+    leverage,
+    stopLoss,
+    takeProfit,
+    ...(orderType === "limit" && limitPrice ? { limitPrice } : {}),
+    meta: input.meta || {},
+    timestamp: now,
+    orderId,
+  });
+  const signed = signPayload(payload);
+
+  const initialOrder: PaperOrderReceipt = {
+    id: orderId,
+    mode: "paper",
+    symbol,
+    side: direction,
+    type: orderType,
+    amount: qty,
+    limitPrice,
+    feeUSD: 0,
+    qty,
+    notional: 0,
+    leverage: r2(leverage),
+    marginRequired: 0,
+    executionLatencyMs: exchangeLatency,
+    timestamp: now,
+    status: "NEW",
+    positionId,
+    submittedAt,
+    stopLoss,
+    takeProfit,
+    meta: input.meta,
+    signature: signed.signature,
+    payloadHash: signed.payloadHash,
+  };
+
+  // Emit ORDER_NEW so FE sees the lifecycle start
+  appendEvent("ORDER_NEW", {
+    orderId,
+    positionId,
+    symbol,
+    side: direction,
+    type: orderType,
+    amount: qty,
+    limitPrice,
+    leverage,
+    stopLoss,
+    takeProfit,
+    submittedAt,
+  });
+
+  if (orderType !== "market") {
+    // Limit order: reserve margin, store pending; filled later via bracket monitor
+    const estimatedNotional = limitPrice! * qty;
+    const estimatedMargin = estimatedNotional / leverage;
+    if (estimatedMargin > state.cash) {
+      throw new PaperOrderError("INSUFFICIENT_CASH", `Estimated margin ${r2(estimatedMargin)} melebihi cash paper ${r2(state.cash)}.`);
+    }
+    state.cash = r2(state.cash - estimatedMargin);
+    state.orders.push(initialOrder);
+    return { position: null as any, order: initialOrder, account: getPaperAccount() };
+  }
+  return handleMarketOpenFill(
+    input, symbol, side, direction, qty, leverage, stopLoss, takeProfit,
+    orderType, initialOrder, positionId, now, submittedAt, signed
+  );
+}
+
+async function handleMarketOpenFill(
+  input: OpenPaperPositionInput, symbol: string, side: PaperSide, direction: "buy" | "sell",
+  qty: number, leverage: number, stopLoss: number, takeProfit: number,
+  orderType: "market" | "limit", initialOrder: PaperOrderReceipt,
+  positionId: string, now: number, submittedAt: number,
+  signed: { signature: string; payloadHash: string }
+): Promise<OpenPaperPositionResult> {
+  const fill = await marketFill(symbol, direction, qty, undefined, "none");
   const entryPrice = fill.fillPrice;
 
   if (side === "LONG" && !(stopLoss < entryPrice && entryPrice < takeProfit)) {
@@ -730,34 +907,44 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     throw new PaperOrderError("INVALID_STOP", "Untuk SHORT: takeProfit harus < entryPrice < stopLoss.");
   }
 
-  const notional = entryPrice * qty;
+  // Depth > top-20 didukung penuh → full fill. Depth habis → emit PARTIAL:
+  // posisi dibuka HANYA atas filledQty (terukur), sisa unfilledQty TIDAK
+  // di-fill. Tanpa allowPartialFill eksplisit → REJECT (fail-closed, bukan
+  // fake full fill).
+  const filledQty = fill.filledQty > 0 ? fill.filledQty : qty;
+  const unfilledQty = fill.unfilledQty > 0 ? fill.unfilledQty : 0;
+  const isPartial = unfilledQty > 0;
+  if (isPartial && !input.allowPartialFill) {
+    appendEvent("ORDER_REJECTED", {
+      orderId: initialOrder.id,
+      symbol,
+      side: direction,
+      type: orderType,
+      amount: qty,
+      filledQty,
+      unfilledQty,
+      reason: "INSUFFICIENT_DEPTH",
+      message: `Orderbook top-20 hanya mendukung ${filledQty}/${qty}. Kirim ulang dengan allowPartialFill=true untuk partial, atau kecilkan qty.`,
+    });
+    throw new PaperOrderError(
+      "INSUFFICIENT_DEPTH",
+      `Orderbook top-20 hanya mendukung ${filledQty}/${qty} ${symbol}. Kirim ulang dengan allowPartialFill=true untuk partial, atau kecilkan qty.`
+    );
+  }
+
+  const notional = entryPrice * filledQty;
   const marginUSD = notional / leverage;
   if (marginUSD > state.cash) {
     throw new PaperOrderError("INSUFFICIENT_CASH", `Margin ${r2(marginUSD)} melebihi cash paper ${r2(state.cash)}.`);
   }
 
-  const positionId = newId("pos");
-  const orderId = newId("ord");
-  const now = Date.now();
-  const payload = JSON.stringify({
-    symbol,
-    side: direction,
-    type: "market",
-    amount: qty,
-    leverage,
-    stopLoss,
-    takeProfit,
-    meta: input.meta || {},
-    timestamp: now,
-    orderId,
-  });
-  const signed = signPayload(payload);
+  const feeUSD = r4(fill.feeUSD); // market order => taker fee
 
   const position: PaperPosition = {
     id: positionId,
     symbol,
     side,
-    qty,
+    qty: filledQty,
     entryPrice,
     notionalUSD: r2(notional),
     leverage: r2(leverage),
@@ -765,6 +952,7 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     stopLoss,
     takeProfit,
     liquidationPrice: liquidationPrice(entryPrice, leverage, side),
+    maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
     openedAt: now,
     status: "OPEN",
     entryReasoning: input.meta?.reasoning,
@@ -772,65 +960,70 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     timeframe: input.meta?.timeframe,
     marketType: input.meta?.marketType,
     targetPool: input.meta?.targetPool,
-    sourceOrderId: orderId,
+    sourceOrderId: initialOrder.id,
     lastMark: entryPrice,
     lastMarkUpdatedAt: now,
-    feesPaidUSD: fill.feeUSD,
+    feesPaidUSD: feeUSD,
   };
+
+  const filledAt = submittedAt + Math.floor(Math.random() * 10) + 1; // 1-10ms additional fill time
 
   const order: PaperOrderReceipt = {
-    id: orderId,
-    mode: "paper",
-    symbol,
-    side: direction,
-    type: "market",
-    amount: qty,
+    ...initialOrder,
     fillPrice: entryPrice,
     slippageBps: fill.slippageBps,
-    feeUSD: fill.feeUSD,
-    qty,
+    feeUSD,
+    qty: filledQty,
     notional: r2(notional),
-    leverage: r2(leverage),
     marginRequired: r2(marginUSD),
-    executionLatencyMs: fill.latencyMs,
-    timestamp: now,
-    status: "FILLED",
-    positionId,
-    signature: signed.signature,
-    payloadHash: signed.payloadHash,
+    executionLatencyMs: filledAt - now,
+    timestamp: filledAt,
+    status: isPartial ? "PARTIALLY_FILLED" : "FILLED",
+    filledAt,
+    filledQty,
+    remainingQty: unfilledQty,
   };
-
   state.positions.push(position);
   state.orders.push(order);
-  state.cash -= marginUSD;
-  state.cash = r2(state.cash);
+  state.cash = r2(state.cash - marginUSD - feeUSD);
+
+  if (isPartial) {
+    appendEvent("ORDER_PARTIAL", {
+      orderId: initialOrder.id,
+      positionId,
+      symbol,
+      side: direction,
+      type: orderType,
+      fillPrice: entryPrice,
+      filledQty,
+      remainingQty: unfilledQty,
+      slippageBps: fill.slippageBps,
+      feeUSD,
+      latencyMs: filledAt - now,
+      method: fill.method,
+    });
+  }
   appendEvent("ORDER_FILLED", {
-    orderId,
+    orderId: initialOrder.id,
     positionId,
     symbol,
     side: direction,
-    qty,
+    type: orderType,
     fillPrice: entryPrice,
+    qty: filledQty,
+    remainingQty: unfilledQty,
     slippageBps: fill.slippageBps,
-    feeUSD: fill.feeUSD,
-    notional: r2(notional),
-    leverage: r2(leverage),
-    marginRequired: r2(marginUSD),
-    executionLatencyMs: fill.latencyMs,
-    fillMethod: fill.method,
-    signature: signed.signature,
-    payloadHash: signed.payloadHash,
+    feeUSD,
+    latencyMs: filledAt - now,
+    method: fill.method,
   });
 
   // P1: atomic — position + order + snapshot + audit dalam satu transaksi
-  // supaya crash/kill tidak menyisakan posisi tanpa order (state korup).
   try {
     beginTx();
     dbSavePosition(position);
     dbSaveOrder(order);
     persistSnapshot();
-    // F-01: jangan swallow error audit di dalam tx — kalau appendAudit gagal,
-    // tangkap di catch luar → rollbackTx() seluruh transaksi (fail-closed).
     appendAudit("order", {
       id: order.id,
       symbol: order.symbol,
@@ -847,7 +1040,7 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis posisi/order ke DB: ${(err as Error).message}`);
   }
 
-  return { position: { ...position }, order: { ...order }, account: getPaperAccount() };
+  return { position, order, account: getPaperAccount() };
 }
 
 export interface ClosePaperPositionResult {
@@ -885,6 +1078,8 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
       feeUSD: exitFee,
       method: "LIQUIDATION",
       latencyMs: 0,
+      filledQty: pos.qty,
+      unfilledQty: 0,
     };
   } else {
     if (exitReason === "STOP_LOSS") {
@@ -1172,11 +1367,15 @@ export async function runBracketMonitorPass(): Promise<void> {
   monitorPassRunning = true;
   try {
     const open = state.positions.filter((p) => p.status === "OPEN");
-    if (open.length === 0) return;
+    const pendingLimits = state.orders.filter((o) => o.status === "NEW" && o.type === "limit" && o.limitPrice && o.limitPrice > 0);
+    if (open.length === 0 && pendingLimits.length === 0) return;
 
-    const symbols = [...new Set(open.map((p) => p.symbol))];
+    const symbols = [...new Set([...open.map((p) => p.symbol), ...pendingLimits.map((o) => o.symbol)])];
     const results = await Promise.all(symbols.map(async (symbol) => ({ symbol, ...(await fetchMarkTicker(symbol)) })));
     const marks = new Map(results.map((r) => [r.symbol, r]));
+
+    // Fill pending limit orders whose price threshold has been hit (maker fill)
+    await fillPendingLimitOrders(marks);
 
     let persisted = false;
     for (const pos of open) {
@@ -1259,6 +1458,149 @@ export function startBracketMonitor(intervalMs = 3000): void {
     });
   }, intervalMs);
   console.log(`[paperBook] Bracket monitor started (interval ${intervalMs}ms)`);
+}
+
+/**
+ * Fill pending NEW limit orders when the 1m range crosses the limit price.
+ * - buy limit fills when rangeLow <= limitPrice (maker fill at limit price)
+ * - sell limit fills when rangeHigh >= limitPrice
+ * Maker fee (0.02%) applies; reserved margin is converted to position margin.
+ */
+async function fillPendingLimitOrders(
+  marks: Map<string, { mark: number; high1m: number; low1m: number; ok: boolean }>
+): Promise<void> {
+  const pending = state.orders.filter((o) => o.status === "NEW" && o.type === "limit" && o.limitPrice && o.limitPrice > 0);
+  let changed = false;
+  for (const order of pending) {
+    const entry = marks.get(order.symbol);
+    if (!entry || !entry.ok) continue;
+    const rangeHigh = Number.isFinite(entry.high1m) && entry.high1m > 0 ? entry.high1m : entry.mark;
+    const rangeLow = Number.isFinite(entry.low1m) && entry.low1m > 0 ? entry.low1m : entry.mark;
+    const limit = order.limitPrice!;
+    const crossed = order.side === "buy" ? rangeLow <= limit : rangeHigh >= limit;
+    if (!crossed) continue;
+
+    const side: PaperSide = order.side === "sell" ? "SHORT" : "LONG";
+    const dup = state.positions.find((p) => p.symbol === order.symbol && p.side === side && p.status === "OPEN");
+    const now = Date.now();
+    const notional = limit * order.amount;
+    const leverage = order.leverage && order.leverage > 0 ? order.leverage : 1;
+    const marginUSD = notional / leverage;
+    const feeUSD = r4(notional * MAKER_FEE_RATE);
+
+    if (dup) {
+      // Duplicate direction at fill time → cancel + refund reserved margin.
+      order.status = "CANCELLED";
+      order.cancelledAt = now;
+      order.reason = "DUPLICATE_POSITION_DIRECTION_ON_FILL";
+      state.cash = r2(state.cash + marginUSD);
+      appendEvent("ORDER_CANCELLED", { orderId: order.id, symbol: order.symbol, reason: "DUPLICATE_POSITION_DIRECTION_ON_FILL" });
+      changed = true;
+      continue;
+    }
+
+    const positionId = newId("pos");
+    const position: PaperPosition = {
+      id: positionId,
+      symbol: order.symbol,
+      side,
+      qty: order.amount,
+      entryPrice: limit,
+      notionalUSD: r2(notional),
+      leverage: r2(leverage),
+      marginUSD: r2(marginUSD),
+      stopLoss: order.stopLoss || 0,
+      takeProfit: order.takeProfit || 0,
+      liquidationPrice: liquidationPrice(limit, leverage, side),
+      maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
+      openedAt: now,
+      status: "OPEN",
+      entryReasoning: order.meta?.reasoning,
+      confidence: order.meta?.confidence,
+      timeframe: order.meta?.timeframe,
+      marketType: order.meta?.marketType,
+      targetPool: order.meta?.targetPool,
+      sourceOrderId: order.id,
+      lastMark: entry.mark,
+      lastMarkUpdatedAt: now,
+      feesPaidUSD: feeUSD,
+    };
+
+    order.status = "FILLED";
+    order.filledAt = now;
+    order.fillPrice = limit;
+    order.slippageBps = 0; // maker fill at limit — no slippage
+    order.feeUSD = feeUSD;
+    order.notional = r2(notional);
+    order.marginRequired = r2(marginUSD);
+    order.filledQty = order.amount;
+    order.remainingQty = 0;
+    order.positionId = positionId;
+    order.executionLatencyMs = now - (order.submittedAt || order.timestamp);
+
+    state.positions.push(position);
+    state.cash = r2(state.cash - feeUSD); // margin already reserved at submit
+
+    appendEvent("ORDER_FILLED", {
+      orderId: order.id,
+      positionId,
+      symbol: order.symbol,
+      side: order.side,
+      type: "limit",
+      fillPrice: limit,
+      qty: order.amount,
+      slippageBps: 0,
+      feeUSD,
+      latencyMs: order.executionLatencyMs,
+      method: "LIMIT_MAKER",
+    });
+
+    try {
+      beginTx();
+      dbSavePosition(position);
+      dbSaveOrder(order);
+      persistSnapshot();
+      appendAudit("order", {
+        id: order.id,
+        symbol: order.symbol,
+        side: order.side,
+        amount: order.amount,
+        fillPrice: limit,
+        status: "FILLED",
+        reason: "PAPER_LIMIT_FILL",
+        timestamp: now,
+      });
+      commitTx();
+    } catch (err) {
+      rollbackTx();
+      console.error(`[paperBook] Gagal persist limit fill ${order.id}: ${(err as Error).message}`);
+    }
+    changed = true;
+  }
+  if (changed) persistSnapshotTolerant();
+}
+
+/**
+ * Cancel a pending (NEW) limit order and refund its reserved margin.
+ */
+export function cancelPaperOrder(orderId: string): PaperOrderReceipt {
+  const order = state.orders.find((o) => o.id === orderId);
+  if (!order) throw new PaperOrderError("ORDER_NOT_FOUND", `Order ${orderId} tidak ditemukan.`);
+  if (order.status !== "NEW") {
+    throw new PaperOrderError("ORDER_NOT_CANCELLABLE", `Order ${orderId} berstatus ${order.status}; hanya NEW yang bisa dibatalkan.`);
+  }
+  const now = Date.now();
+  order.status = "CANCELLED";
+  order.cancelledAt = now;
+  order.reason = "MANUAL_CANCEL";
+  if (order.limitPrice && order.limitPrice > 0) {
+    const margin = (order.limitPrice * order.amount) / (order.leverage || 1);
+    state.cash = r2(state.cash + margin);
+  }
+  appendEvent("ORDER_CANCELLED", { orderId: order.id, symbol: order.symbol, reason: "MANUAL_CANCEL", cancelledAt: now });
+  dbSaveOrderTolerant(order);
+  persistSnapshotTolerant();
+  return { ...order };
 }
 
 export function stopBracketMonitor(): void {

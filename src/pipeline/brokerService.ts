@@ -19,6 +19,8 @@ export interface OrderExecutionParams {
   entryReasoning?: string;
   confidence?: number;
   leverage?: number;
+  /** AI decision id (dari saveAgentDecisionDb) — diteruskan ke paper book. */
+  decisionId?: string;
 }
 
 export interface ExecutionResult {
@@ -88,12 +90,14 @@ export async function executeBrokerOrder(
     leverage: params.leverage || 10,
     stopLoss: params.stopLoss,
     takeProfit: params.takeProfit,
+    decisionId: params.decisionId,
     meta: {
       reasoning: params.entryReasoning,
       confidence: params.confidence,
       timeframe: params.timeframe,
       marketType: params.marketType,
       targetPool: params.targetPool,
+      decisionId: params.decisionId,
     },
   };
 

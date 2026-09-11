@@ -1,6 +1,16 @@
 export type MarginSide = "LONG" | "SHORT";
 
-export const MAINTENANCE_MARGIN_RATE = 0.005;
+// ---------------------------------------------------------------------------
+// Binance USDT-M Futures — tiered maintenance margin (verified 2026-09-10)
+// Tier-1 (BTC notional 0–2,000,000 USDT): MMR 0.4%, cushion 0.
+// Paper sizes are ALWAYS tier-1 (notional « 2M), so the training engine uses
+// MMR 0.4%. The old 0.005 was close but slightly conservative.
+// Positions that ever exceed the tier-1 cap keep tier-1 liquidations so the
+// replay book fails closed deterministically instead of guessing unknown
+// symbol brackets.
+// ---------------------------------------------------------------------------
+export const MAINTENANCE_MARGIN_RATE = 0.004;
+export const TIER1_NOTIONAL_CAP_USD = 2_000_000;
 export const MAX_LEVERAGE = 50;
 
 export function clampLeverage(leverage: number): number {

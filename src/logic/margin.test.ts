@@ -1,13 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { liquidationPrice, calculateMargin, calculateEquity, clampLeverage } from "./margin";
+import { liquidationPrice, calculateMargin, calculateEquity, clampLeverage, MAINTENANCE_MARGIN_RATE, TIER1_NOTIONAL_CAP_USD } from "./margin";
 
 describe("liquidationPrice", () => {
-  it("LONG lev10 entry 100 → harga likuidasi di ~90.x (100 × 0.905)", () => {
-    expect(liquidationPrice(100, 10, "LONG")).toBe(90.5);
+  it("LONG lev10 entry 100 → 100 × (1 - 0.1 + 0.004) = 90.4 (Binance USDT-M tier-1 MMR 0.4%)", () => {
+    expect(liquidationPrice(100, 10, "LONG")).toBe(90.4);
   });
 
-  it("SHORT lev10 entry 100 → harga likuidasi di ~110.x", () => {
-    expect(liquidationPrice(100, 10, "SHORT")).toBe(109.5);
+  it("SHORT lev10 entry 100 → 100 × (1 + 0.1 - 0.004) = 109.6 (Binance USDT-M tier-1 MMR 0.4%)", () => {
+    expect(liquidationPrice(100, 10, "SHORT")).toBe(109.6);
+  });
+
+  it("MMR uses Binance USDT-M tier-1 rate (0.004), not 0.005", () => {
+    expect(MAINTENANCE_MARGIN_RATE).toBe(0.004);
+    expect(TIER1_NOTIONAL_CAP_USD).toBe(2_000_000);
   });
 
   it("lev50 lebih ketat (lebih dekat ke entry) daripada lev10", () => {
@@ -20,8 +25,8 @@ describe("liquidationPrice", () => {
   });
 
   it("lev 0 diperlakukan sebagai leverage 1 (bukan divide-by-zero)", () => {
-    expect(liquidationPrice(100, 0, "LONG")).toBe(0.5);
-    expect(liquidationPrice(100, -3, "LONG")).toBe(0.5);
+    expect(liquidationPrice(100, 0, "LONG")).toBe(0.4);
+    expect(liquidationPrice(100, -3, "LONG")).toBe(0.4);
   });
 
   it("lev > 50 di-clamp ke maksimum 50", () => {

@@ -45,6 +45,11 @@ export interface PipelineCycleInput {
   recentTrades?: import("../data/marketFetcher").RecentTrade[];
   /** Futures institutional metrics untuk keel quant engine (opsional). */
   futures?: import("../data/marketFetcher").FuturesMetrics;
+  /**
+   * AI decision id (dari saveAgentDecisionDb / /api/ai-decision) — diteruskan
+   * ke paper book sebagai order.meta.decisionId untuk training join.
+   */
+  decisionId?: string;
 }
 
 export interface PipelineCycleOutput {
@@ -144,6 +149,7 @@ export async function runTradingPipelineCycle(
         entryReasoning: decision.reasoning,
         confidence: decision.confidence,
         leverage: 10,
+        decisionId: input.decisionId,
       });
 
       brokerExecutionMs = brokerRes.executionLatencyMs;
