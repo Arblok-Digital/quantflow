@@ -1,98 +1,133 @@
-# AI Trading Agent Engine
+# ⚡ QuantFlow — AI Trading Terminal
 
-Autonomous AI-driven trading agent with **paper trading** (realistic fills on real order books, zero risk) and guarded **live trading** via [ccxt](https://github.com/ccxt/ccxt) (a single connector for 100+ exchanges). The decision layer runs on **Gemini 2.0 Flash** combined with the **Keel Quantitative Institutional MM Engine** and an algorithmic MTF liquidation-hunt fallback.
+> Full-stack trading terminal dengan **paper-trading engine yang realistis**, **backtest deterministik**, quant engine institusional, dan **live execution yang dijaga berlapis** — dibangun end-to-end oleh satu developer.
 
-> This project is under active production hardening. See
-> [PRODUCTION_ROADMAP.md](./PRODUCTION_ROADMAP.md) for the phased plan and
-> [IMPLEMENTATION.md](./IMPLEMENTATION.md) for the **current implementation
-> status** (module map, endpoints, replay/auto-strategy, DB, TODO) — read that
-> one first before touching code.
+![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![Node](https://img.shields.io/badge/Node-24-339933?logo=node.js&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-76%2F76_passing-22c55e)
 
-## Architecture
+**Screenshots:** *(tambahkan GIF dashboard di sini — replay mode, order ticket, guardrails cockpit)*
 
-The trading pipeline is an explicit chain of stages, each with measured latency, server-side risk gates, and an audit trail:
+---
+
+## ✨ Kenapa project ini beda
+
+Kebanyakan "trading bot" di GitHub cuma wrapper API. QuantFlow dibangun seperti **exchange microservice sungguhan**:
+
+- 🎯 **Paper engine yang jujur** — fill dihitung VWAP dari order book asli (top-20 level), dengan *partial fill* fail-closed, fee maker/taker terpisah (2/4 bps), slippage terukur, dan liquidation price per Binance USDT-M tier-1 (MMR 0.4%). Bukan simulasi harga random.
+- 🧪 **Backtest deterministik, bebas lookahead bias** — replay engine mengolah candle historis asli per-candle (indikator hanya melihat data ≤ index aktif), isolated book yang 100% terpisah dari akun paper, dan **export dataset training CSV 18 kolom** (termasuk `risk_r`, `hold_candles`, `decision_id`) siap dipakai ML.
+- 🔐 **Audit yang bisa diverifikasi** — setiap order ditandatangani HMAC-SHA256 dan dirantai ke hash-chain ledger append-only di SQLite. Verifikasi: `GET /api/ledger/verify`.
+- 🛡️ **Guardrails berlapis** — kill switch, daily-loss limiter, max posisi, cooldown, rate limit di server; mode live butuh *double-lock* (credentials di vault AES-256-GCM + flag `armed`).
+- 🧠 **Dual decision engine** — Gemini 2.0 Flash (validasi Zod + sanity check harga) dengan fallback **Keel Quant Engine** deterministik: smart-money tracker, absorption engine, wall dynamics, confluence matrix, dan 11 aturan risiko institusional.
+- 🖥️ **UI terminal ala broker pro** — React 19: order ticket dengan confirmation gate live (ketik simbol + countdown), toast eksekusi real-time, guardrails cockpit dengan daily-loss meter, trade journal, replay playback, reconciliation panel.
+
+---
+
+## 🏗️ Arsitektur
+
+Setiap keputusan trading melewati pipeline eksplisit dengan latensi terukur per tahap:
 
 ```
-Data Feeder (Binance WS/REST -> SSE Proxy) 
-   -> MTF Liquidity-Hunt Analysis 
-   -> Decision Engine (Gemini 2.0 Flash + Keel Quant MM Engine Fallback)
-   -> Risk Gate (Server Guardrails + Keel Institutional Risk Engine) 
-   -> Broker Gateway (ccxt / paper book) 
-   -> Audit Ledger (HMAC-Signed SHA-256 Chain in SQLite)
+Data Feeder (Binance WS/REST → SSE, fallback chain Binance→Bybit→Synthetic)
+   → MTF Liquidity-Hunt Analysis (15m futures / 4h spot, BSL/SSL pools)
+   → Decision Engine (Gemini 2.0 Flash ⭄ Keel Quant Engine)
+   → Risk Gate (Server Guardrails + Keel Institutional Risk)
+   → Broker Gateway (paper book server-truth ⭄ ccxt live)
+   → Audit Ledger (HMAC-SHA256 chain, SQLite)
 ```
 
-- **Feeder** — Real-time Binance WebSocket (trade + depth@100ms) streamed via Server-Sent Events (SSE) to frontend; multi-exchange fallback REST chain (Binance -> Bybit -> Synthetic), multi-timeframe candles (1s to 1W), order books, on-chain BTC snapshots (blockchain.com), macro calendar.
-- **MTF Analysis** — Multi-timeframe liquidation-hunt engine (15m futures / 4h spot) locating buy-side (BSL) and sell-side (SSL) liquidity pools, sweep detection, and wick rejection absorption.
-- **Decision Engine** — Dual-engine architecture:
-  1. Primary: **Gemini 2.0 Flash** (`/api/ai-decision`) with Zod schema validation and price-order sanity check.
-  2. Institutional Fallback: **Keel Quantitative Engine** (`keelAdapter.ts`) — featuring Smart Money Tracker (flow classification), Absorption Engine, Wall Dynamics, and Confluence Matrix.
-  3. Direct Quant API: `POST /api/keel/signal` for direct Keel signal and risk assessment queries.
-- **Risk Gate & Guardrails** — Dual-layer risk enforcement:
-  1. Server Guardrails (`guardrails.ts`): Kill switch, max open positions, max daily loss limit, order rate limiter, cooldown window.
-  2. Keel Institutional Risk Engine (`keelAdapter.ts`): Intraday High-Water Mark tracking, drawdown breach monitoring, and 11 institutional risk rules.
-- **Broker Gateway** — `src/pipeline/brokerService.ts` executes through the server (`POST /api/broker/order`).
-  - **Paper Mode** (default): Server fills orders against the real ccxt order book (measured VWAP slippage, 0.04% fee), stored in SQLite (`trading.db`).
-  - **Bracket Monitor**: Background loop (every 3s) checks open positions against real mark price and auto-closes on SL/TP/Liquidation.
-  - **Live Mode**: Pass-through to exchange via ccxt with double-lock protection (`liveArmed` flag + passcode authentication).
-- **Audit Ledger** — Persistent SQLite table (`audit_ledger`) backed by HMAC-SHA256 signature chain. Verification endpoint at `GET /api/ledger/verify`.
+### Struktur modul (full-stack, modular)
 
-## Setup & Run
+```
+server.ts                 → thin bootstrap + security middleware (helmet, rate-limit, CORS)
+src/server/routes/        → REST routes: auth, broker, market, ledger, ai, replay, wsProxy
+src/broker/               → paperBroker.ts / liveBroker.ts (mode router, response contract seragam)
+src/paperbook/            → fill engine (VWAP, partial fill), store, bracket monitor, mark cache
+src/replay/               → deterministic backtest engine + training CSV export
+src/pipeline/             → orchestrator: Data → MTF → Decision → Risk → Broker → Ledger
+src/logic/                → decision engine, indicators, liquidity hunt, keel/** (subtree lengkap)
+src/db/                   → SQLite core (WAL, synchronous=FULL) + persistence + audit chain
+src/hooks/ + components/  → React 19 FE: domain hooks + ~30 panel, server-truth reader pattern
+```
 
-Prerequisites: Node.js 18+ (tested on Node 22+).
+---
+
+## 🚀 Quick Start
 
 ```bash
+git clone https://github.com/Arblok-Digital/quantflow.git
+cd quantflow
 npm install
-cp .env.example .env    # then edit .env
-npm run dev             # dev server (tsx + Vite HMR) on http://localhost:3000
+cp .env.example .env    # isi GEMINI_API_KEY (opsional) & AUTH_PASSCODE
+npm run dev             # http://localhost:3000
 ```
 
-Production build & run:
+Production:
 
 ```bash
-npm run build           # Vite client build + esbuild server bundle -> dist/
-npm start               # node dist/server.cjs
+npm run build && npm start
 ```
 
-Testing & Code Quality:
+**Quality gates** (semua harus hijau sebelum merge):
 
 ```bash
-npm test                # Run Vitest test suite (48 tests PASS)
-npm run lint            # Type-check with tsc --noEmit
+npx tsc --noEmit        # type-safe, zero errors
+npx vitest run          # 76/76 tests (unit + integration)
+npm run test:smoke      # end-to-end API smoke test
 ```
 
-### Environment (`.env`)
+---
 
-| Variable             | Purpose                                                                         |
-| -------------------- | ------------------------------------------------------------------------------- |
-| `PORT`               | HTTP port (default `3000`)                                                      |
-| `TRADING_MODE`       | `paper` (default) or `live`                                                     |
-| `GEMINI_API_KEY`     | Gemini key for AI decision layer (optional; falls back to Keel Quant Engine)    |
-| `AUTH_PASSCODE`      | Security passcode for session authentication                                    |
-| `AUDIT_SECRET`       | HMAC key for cryptographic audit ledger                                         |
-| `BROKER_EXCHANGE`    | ccxt exchange id (default `binance`)                                            |
-| `BROKER_API_KEY`     | Exchange API key (required for live)                                            |
-| `BROKER_API_SECRET`  | Exchange API secret (required for live)                                         |
-| `BROKER_TESTNET`     | `true` to use exchange sandbox/testnet where supported                          |
+## 🎮 Mode Paper vs Live
 
-## Paper vs Live Mode
+| | 📄 Paper (default) | 🔴 Live (opt-in) |
+|---|---|---|
+| Eksekusi | VWAP fill di order book asli | ccxt → exchange asli |
+| SL/TP otomatis | Bracket monitor 3s (mark + 1m range) | Double-lock + guardrails |
+| Persistensi | SQLite (WAL, synchronous=FULL) | Audit chain identik |
+| Konfirmasi UI | 1 klik | Ketik simbol + countdown 3s |
 
-**Paper Mode (Default, `TRADING_MODE=paper`)**:
+Mode adalah **server-truth** — FE hanya reader, tidak pernah menghitung eksekusi sendiri. Satu dashboard, beda perilaku & visual per mode.
 
-- Orders filled against real ccxt order book depth: VWAP execution through bid/ask ladder, measured slippage, 0.04% taker fee.
-- Open positions & order history persisted to SQLite database (`trading.db`, WAL mode with synchronous=FULL for zero data loss).
-- Server **bracket monitor** polls open positions every 3s against WebSocket mark price cache and executes automatic SL/TP/Liquidation closes.
-- Equity, margin, unrealized PnL, and realized PnL computed server-side (`paperBook.ts`) and served via `/api/broker/positions` & `/api/broker/balance`.
+## 📊 Backtest & ML Pipeline
 
-**Live Mode (Opt-in, `TRADING_MODE=live` + credentials + armed)**:
+1. Jalankan replay pada candle historis asli (auto-strategy: RSI + EMA50/volume surge, SL/TP dari ATR).
+2. Statistik otomatis: win rate, profit factor, expectancy, avg R, max drawdown.
+3. Export **training dataset** (CSV/JSON) — setiap trade traceable ke `decisionId` dari engine (join decision → fill → trade → PnL).
+4. Hasil backtest otomatis dikalibrasi ke prompt AI advisor (confidence gating).
 
-- Guarded by `assertLiveAllowed` in `broker.ts`: orders execute only when mode is `live`, API credentials stored in encrypted AES-256-GCM vault, AND `liveArmed=true`.
-- Requires explicit passcode login and manual arming via UI/API (`POST /api/broker/arm`).
+---
 
-## Production Roadmap & Status
+## 🛠️ Tech Stack
 
-- **Phase 1-3**: Real-time market feed, server paper position book, SQLite database, HMAC audit ledger — **100% Complete**
-- **Phase 4**: Decision Integrity (Gemini 2.0 Flash + price-order validation) — **100% Complete**
-- **Phase 5-6**: WebSocket-to-SSE Proxy & Keel Quant Engine Integration — **100% Complete**
-- **Phase 7**: Integration Tests & Test Suite (48 unit/integration tests PASS) — **100% Complete**
+**Backend:** Node 24 · TypeScript 5.8 · Express 4 · SQLite (`node:sqlite`) · ccxt 4 · Pino · WebSocket→SSE proxy
+**Frontend:** React 19 · Vite 6 · Tailwind 4 · Zod
+**AI/Quant:** Gemini 2.0 Flash (`@google/genai`) + Keel Quant Engine (custom, deterministik)
+**Testing:** Vitest (unit + integration, supertest)
 
-See [PRODUCTION_ROADMAP.md](./PRODUCTION_ROADMAP.md) for full phase documentation.
+## 🔒 Security Notes
+
+- Credential exchange disimpan terenkripsi **AES-256-GCM** di local vault (bukan plaintext, bukan env).
+- Session auth 32-byte token; rate limiting berlapis; fail-closed signature di production.
+- File sensitif (`.env`, vault, DB) di-gitignore — repo ini **tidak menyimpan secret apa pun**.
+
+## 🗺️ Roadmap
+
+- ✅ Paper engine, replay/backtest + training export, audit chain, FE terminal upgrade
+- 🔜 Exchange-native TP/SL untuk live (stopMarket/takeProfitMarket), WebSocket user stream, reconciliation otomatis, backtest matrix paralel
+
+Lihat [PRODUCTION_ROADMAP.md](./PRODUCTION_ROADMAP.md) & [IMPLEMENTATION.md](./IMPLEMENTATION.md) untuk detail teknis lengkap.
+
+---
+
+## 👤 Author
+
+Dibangun end-to-end (arsitektur, backend, frontend, quant logic, testing) oleh **Arblok** — full-stack developer.
+
+📌 **Terbuka untuk freelance/contract work** — full-stack TypeScript, trading systems, dashboards real-time.
+📬 Hubungi saya via [GitHub](https://github.com/Arblok-Digital).
+
+---
+
+*⚠️ Disclaimer: software ini untuk edukasi & development. Trading crypto berisiko tinggi — gunakan mode live dengan pemahaman penuh atas risikonya.*

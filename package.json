@@ -1,7 +1,8 @@
 {
-  "name": "ai-trading-agent-engine",
-  "private": true,
-  "version": "0.0.0",
+  "name": "quantflow",
+  "productName": "QuantFlow — AI Trading Terminal",
+  "version": "1.0.0",
+  "description": "Full-stack AI trading terminal: realistic paper-trading engine, deterministic backtest/replay, Keel quant engine, and guarded live execution via ccxt.",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
