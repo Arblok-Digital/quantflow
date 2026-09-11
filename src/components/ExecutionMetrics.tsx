@@ -13,7 +13,7 @@ interface ExecutionMetricsProps {
   portfolio: Portfolio;
   positions: Position[];
   latestLatency: LatencyBreakdown;
-  onClosePosition: (symbol: string) => void;
+  onClosePosition: (positionId: string) => void;
   averageSlippageBps: number;
   /** Trade tertutup (riwayat) untuk metrik Profit Factor & R:R yang jujur. */
   closedTrades?: ClosedTrade[];
@@ -230,7 +230,7 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
                       </td>
                       <td className="py-2.5 text-right">
                         <button
-                          onClick={() => onClosePosition(pos.symbol)}
+                          onClick={() => onClosePosition(pos.id || pos.symbol)}
                           className="rounded bg-zinc-800 hover:bg-rose-500 text-zinc-300 hover:text-white px-2.5 py-1 text-[10px] transition-colors border border-zinc-700 hover:border-rose-500"
                         >
                           CLOSE

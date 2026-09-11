@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ClosedTrade, Portfolio, Position, MarketType, Timeframe } from "../types";
 import { authFetch, useAuth } from "./useAuth";
+import { useBrokerPositions, ServerPosition } from "./useBrokerPositions";
+import { useLedgerStats, LedgerClosedTrade } from "./useLedgerStats";
+import { derivePortfolio, INITIAL_PAPER_CASH } from "./usePaperPortfolio";
 
 // ---------------------------------------------------------------------------
 // usePaperTrading — reader murni dari BE (roadmap 3.6)
+// Composes shared domain hooks: useBrokerPositions + useLedgerStats.
 // Sumber kebenaran: server paper book + ledger DB.
-// - positions dari GET /api/broker/positions (polling 3.5s, pause saat hidden)
-// - closedTrades + stats dari GET /api/ledger/stats
-// - equity/PnL dari server account (cash/equity/unrealized/realized)
 // TIDAK ada seed data palsu, TIDAK ada mark-to-market ganda di client.
 // Kompat shape: tetap expose addPosition/commitPortfolio/etc. sebagai no-op
 // yang memicu refresh, agar PaperTradingPanel & pipeline tetap kompak.
@@ -18,9 +19,6 @@ export interface UsePaperTradingOptions {
   currentPrice?: number;
   prependAudit?: (entry: any) => void;
 }
-
-const INITIAL_PAPER_CASH = 10000;
-const POLL_MS = 5000;
 
 function isSimPositionId(id?: string): boolean {
   return typeof id === "string" && id.startsWith("pos_sim_");
@@ -74,7 +72,6 @@ function mapClosedTrade(t: any): ClosedTrade {
   const notionalUSD = Number((entryPrice * amount).toFixed(2));
   const pnlUSD = t.realizedPnlUsd != null ? Number(t.realizedPnlUsd) : t.realized_pnl_usd != null ? Number(t.realized_pnl_usd) : Number(t.realizedPnlUSD ?? 0);
   const pnlPercent = notionalUSD > 0 ? (pnlUSD / notionalUSD) * 100 : 0;
-  // attempt to derive R multiple if stopLoss available
   let rMultiple = 0;
   const sl = t.stopLoss != null ? Number(t.stopLoss) : t.stop_loss != null ? Number(t.stop_loss) : 0;
   if (sl > 0 && amount > 0) {
@@ -99,18 +96,6 @@ function mapClosedTrade(t: any): ClosedTrade {
     rMultiple,
   };
 }
-
-const EMPTY_PORTFOLIO: Portfolio = {
-  cash: 0,
-  equity: 0,
-  initialBalance: INITIAL_PAPER_CASH,
-  realizedPnl: 0,
-  winCount: 0,
-  lossCount: 0,
-  totalTrades: 0,
-  maxDrawdownPercent: 0,
-  currentDrawdownPercent: 0,
-};
 
 export type OrderTypeInput = "market" | "limit";
 
@@ -160,7 +145,16 @@ function mapPendingOrder(o: any): PendingOrder | null {
 
 export function usePaperTrading(options: UsePaperTradingOptions) {
   const { symbol, currentPrice } = options;
-  const [portfolio, setPortfolio] = useState<Portfolio>(EMPTY_PORTFOLIO);
+
+  // Compose shared domain hooks
+  const brokerPositions = useBrokerPositions();
+  const ledgerStats = useLedgerStats();
+
+  const [portfolio, setPortfolio] = useState<Portfolio>({
+    cash: 0, equity: 0, initialBalance: INITIAL_PAPER_CASH,
+    realizedPnl: 0, winCount: 0, lossCount: 0,
+    totalTrades: 0, maxDrawdownPercent: 0, currentDrawdownPercent: 0,
+  });
   const [positions, setPositions] = useState<Position[]>([]);
   const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
@@ -173,117 +167,48 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
   positionsRef.current = positions;
 
   const mountedRef = useRef(false);
-  // Running peak equity (untuk currentDrawdown yang jujur — bukan max hist
-  // yang bikin gate lock permanen. F10)
   const runningPeakRef = useRef<number>(INITIAL_PAPER_CASH);
 
-  const load = useCallback(async () => {
-    if (!mountedRef.current) return;
-    if (typeof document !== "undefined" && document.hidden) return;
-    try {
-      const [posRes, statsRes, ordersRes] = await Promise.all([
-        authFetch("/api/broker/positions").then((r) => r.json().catch(() => null)),
-        authFetch("/api/ledger/stats").then((r) => r.json().catch(() => null)),
-        authFetch("/api/broker/orders").then((r) => r.json().catch(() => null)),
-      ]);
-
-      // positions + account
-      if (posRes && posRes.success) {
-        const rawPositions: any[] = Array.isArray(posRes.positions) ? posRes.positions : [];
-        const openOnly = rawPositions.filter((p) => (p.status || "OPEN") === "OPEN");
-        const mapped = openOnly.map(mapServerPosition);
-        if (mountedRef.current) setPositions(mapped);
-
-        // pendingOrders (server truth from /api/broker/orders; fallback: keep
-        // client-side state when the server does not return the array yet).
-        const serverOrders: any[] = ordersRes && Array.isArray(ordersRes.orders) ? ordersRes.orders : [];
-        const pendingFromServer = serverOrders
-          .map(mapPendingOrder)
-          .filter((o): o is PendingOrder => o !== null);
-        if (Array.isArray((posRes as any).pendingOrders)) {
-          const pendingFromPos = ((posRes as any).pendingOrders as any[])
-            .map(mapPendingOrder)
-            .filter((o): o is PendingOrder => o !== null);
-          if (mountedRef.current) setPendingOrders(pendingFromServer.length > 0 ? pendingFromServer : pendingFromPos);
-        } else if (mountedRef.current) {
-          setPendingOrders(pendingFromServer);
-        }
-
-        const acc = posRes.account as any | null;
-        const stats = statsRes && statsRes.success ? statsRes : null;
-
-        // derive portfolio from account + stats
-        const cash = acc ? Number(acc.cash ?? 0) : 0;
-        const equity = acc ? Number(acc.equity ?? cash) : cash;
-        const realizedPnl = acc ? Number(acc.realizedPnl ?? 0) : stats ? Number(stats.realizedPnlUSD ?? 0) : 0;
-        const totalTrades = stats ? Number(stats.totalTrades ?? 0) : 0;
-        const maxDD = stats ? Number(stats.maxDrawdownPct ?? 0) : 0;
-        // win/loss from stats closedTrades
-        let winCount = 0;
-        let lossCount = 0;
-        if (stats && Array.isArray(stats.closedTrades)) {
-          for (const ct of stats.closedTrades as any[]) {
-            const pnl = Number(ct.realizedPnlUsd ?? ct.realized_pnl_usd ?? 0);
-            if (pnl > 0) winCount++;
-            else if (pnl < 0) lossCount++;
-          }
-          // if some trades have 0 pnl (breakeven), count as not win nor loss but include in total
-          // ensure win+loss <= total
-          if (winCount + lossCount > totalTrades) {
-            lossCount = Math.max(0, totalTrades - winCount);
-          }
-        } else {
-          // fallback from closedTrades state already mapped
-          winCount = 0;
-          lossCount = 0;
-        }
-
-        if (mountedRef.current) {
-          // Current drawdown jujur: dari running peak equity, bukan max
-          // historis — supaya gate bisa unlock setelah equity pulih (F10).
-          const ec = Number(equity) || 0;
-          runningPeakRef.current = Math.max(runningPeakRef.current, ec);
-          const currentDD = runningPeakRef.current > 0 ? ((runningPeakRef.current - ec) / runningPeakRef.current) * 100 : 0;
-          setPortfolio({
-            cash: Number(cash.toFixed(2)),
-            equity: ec,
-            initialBalance: INITIAL_PAPER_CASH,
-            realizedPnl: Number(realizedPnl.toFixed(2)),
-            winCount,
-            lossCount,
-            totalTrades,
-            maxDrawdownPercent: Number(maxDD.toFixed(2)),
-            currentDrawdownPercent: Number(Math.max(0, currentDD).toFixed(2)),
-          });
-        }
-      }
-
-      // closed trades from stats
-      if (statsRes && statsRes.success && Array.isArray(statsRes.closedTrades)) {
-        const mappedClosed = (statsRes.closedTrades as any[]).map(mapClosedTrade);
-        if (mountedRef.current) setClosedTrades(mappedClosed);
-      }
-    } catch {
-      // keep previous state, don't fabricate
-    }
-  }, []);
-
-  const { isAuthenticated } = useAuth();
-
+  // Re-derive portfolio when broker/ledger data changes
   useEffect(() => {
-    mountedRef.current = true;
-    if (!isAuthenticated) return;
-    load();
-    const iv = setInterval(load, POLL_MS);
-    const onVis = () => {
-      if (!document.hidden) load();
-    };
-    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVis);
-    return () => {
-      clearInterval(iv);
-      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [isAuthenticated, load]);
+    if (brokerPositions.loading || ledgerStats.loading) return;
+    const pnlList = ledgerStats.closedTrades.map((t) =>
+      Number(t.realizedPnlUsd ?? t.realized_pnl_usd ?? 0)
+    );
+    const { portfolio: newPortfolio, newPeak } = derivePortfolio({
+      account: brokerPositions.account,
+      totalTrades: ledgerStats.totalTrades,
+      closedTradesPnl: pnlList,
+      maxDrawdownPct: ledgerStats.maxDrawdownPct,
+      runningPeak: runningPeakRef.current,
+    });
+    runningPeakRef.current = newPeak;
+    setPortfolio(newPortfolio);
+  }, [brokerPositions.account, brokerPositions.loading, ledgerStats.totalTrades, ledgerStats.realizedPnlUSD, ledgerStats.maxDrawdownPct, ledgerStats.loading, ledgerStats.closedTrades]);
+
+  // Map positions from broker hook
+  useEffect(() => {
+    if (brokerPositions.loading) return;
+    const openOnly = brokerPositions.positions.filter(
+      (p: ServerPosition) => (p.status || "OPEN") === "OPEN"
+    );
+    setPositions(openOnly.map(mapServerPosition));
+  }, [brokerPositions.positions, brokerPositions.loading]);
+
+  // Map closed trades from ledger hook
+  useEffect(() => {
+    if (ledgerStats.loading) return;
+    setClosedTrades(ledgerStats.closedTrades.map(mapClosedTrade));
+  }, [ledgerStats.closedTrades, ledgerStats.loading]);
+
+  // Map pending orders from broker hook
+  useEffect(() => {
+    setPendingOrders(
+      brokerPositions.pendingOrders
+        .map(mapPendingOrder)
+        .filter((o): o is PendingOrder => o !== null)
+    );
+  }, [brokerPositions.pendingOrders]);
 
   useEffect(() => {
     return () => { mountedRef.current = false; };
@@ -292,53 +217,57 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
   // No-op mark-to-market: server is source of truth
   const processPriceTick = useCallback((_price: number) => {}, []);
 
+  const load = useCallback(async () => {
+    await Promise.all([brokerPositions.refresh(), ledgerStats.refresh()]);
+  }, [brokerPositions.refresh, ledgerStats.refresh]);
+
   const addPosition = useCallback(
-    (_position: Position) => {
-      // reader mode: just refresh from server
-      load();
-    },
+    (_position: Position) => { load(); },
     [load]
   );
 
   const commitPortfolio = useCallback(
-    (_next: Portfolio) => {
-      load();
-    },
+    (_next: Portfolio) => { load(); },
     [load]
   );
 
   const pruneServerPositions = useCallback((openServerIds: string[]) => {
-    // server is already truth; no client rows to prune except legacy sim.
-    // Keep guard for any local sim that slipped in.
-    setPositions((prev) => prev.filter((p) => (isServerBackedId(p.id) ? openServerIds.includes(p.id as string) : !isSimPositionId(p.id) ? true : false)));
-    // also trigger reload to stay sync
+    setPositions((prev) =>
+      prev.filter((p) =>
+        isServerBackedId(p.id)
+          ? openServerIds.includes(p.id as string)
+          : !isSimPositionId(p.id)
+          ? true
+          : false
+      )
+    );
     load();
   }, [load]);
 
+  // Close position — now uses positionId directly (TASK 2)
   const closePosition = useCallback(
-    async (sym: string, _reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => {
-      const targetPos = positionsRef.current.find((p) => p.symbol === sym);
-      if (!targetPos) return;
-      // sim guard: if somehow sim position exists locally (should not happen), just drop it
-      if (isSimPositionId(targetPos.id)) {
-        setPositions((prev) => prev.filter((p) => p.symbol !== sym));
-        return;
+    async (positionId: string, _reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => {
+      // If it looks like a symbol (no "pos-" prefix), find the position by symbol
+      // for backwards compat with callers that still pass symbol
+      let targetId = positionId;
+      if (!positionId.startsWith("pos-")) {
+        const targetPos = positionsRef.current.find((p) => p.symbol === positionId);
+        if (!targetPos) return;
+        if (isSimPositionId(targetPos.id)) {
+          setPositions((prev) => prev.filter((p) => p.symbol !== positionId));
+          return;
+        }
+        targetId = targetPos.id as string;
       }
       try {
         const res = await authFetch("/api/broker/close", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ positionId: targetPos.id }),
+          body: JSON.stringify({ positionId: targetId }),
         });
         const payload = await res.json().catch(() => null);
         if (!res.ok || !payload?.success) {
-          if (payload?.reason === "POSITION_NOT_FOUND") {
-            setPositions((prev) => prev.filter((p) => p.symbol !== sym));
-            await load();
-            return;
-          }
-          if (payload?.reason === "POSITION_ALREADY_CLOSED") {
-            setPositions((prev) => prev.filter((p) => p.symbol !== sym));
+          if (payload?.reason === "POSITION_NOT_FOUND" || payload?.reason === "POSITION_ALREADY_CLOSED") {
             await load();
             return;
           }
@@ -358,7 +287,6 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
       const targetPos = positionsRef.current.find((p) => p.symbol === sym);
       if (!targetPos) return;
       if (isSimPositionId(targetPos.id)) {
-        // sim: just update locally
         setPositions((prev) => prev.map((p) => (p.symbol === sym ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
         return;
       }
@@ -387,8 +315,6 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
 
   const resetPaperAccount = useCallback(
     (_initialCapital: number) => {
-      // No server reset endpoint — just refresh to show honest empty state.
-      // Keep compat: do not fabricate cash.
       console.warn("[usePaperTrading] resetPaperAccount di mode reader: tidak ada endpoint reset server; melakukan refresh saja.");
       load();
     },
@@ -408,7 +334,6 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
           console.error(`Cancel order ditolak (${payload?.reason || res.status}): ${payload?.message || "unknown"}`);
           return;
         }
-        // Optimistic prune: drop canceled order locally, then refresh server truth.
         setPendingOrders((prev) => prev.filter((o) => o.id !== orderId));
         await load();
       } catch (err) {
@@ -426,12 +351,8 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         console.warn("[usePaperTrading] simulateTradeEntry: currentPrice tidak tersedia, batal.");
         return;
       }
-      // allocate similar to before but honest via server order
-      // need cash/equity from current portfolio (server truth)
-      // fallback to 10000 if not yet loaded -> keep honest by using whatever cash is
       let cash = portfolio.cash;
       let equity = portfolio.equity;
-      // If still 0 (initial load not done), fetch synchronously via positions endpoint to get real cash
       if (cash === 0 && equity === 0) {
         try {
           const posRes = await authFetch("/api/broker/positions").then((r) => r.json().catch(() => null));
@@ -453,10 +374,6 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         return;
       }
       const isLong = side === "LONG";
-      // Pre-flight guard: server paper book menolak duplikat arah yang sama
-      // pada symbol yang masih OPEN (DUPLICATE_POSITION_DIRECTION). Cek di
-      // client supaya tidak hit server + console.error tidak perlu. `positions`
-      // hanya berisi posisi OPEN (filter server di load()).
       const dupSameSide = positions.find((p) => p.symbol === sym && p.side === side);
       if (dupSameSide) {
         console.warn(
@@ -505,8 +422,6 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         const order = payload?.order as any | undefined;
         const orderState = String(order?.state ?? order?.status ?? "").toUpperCase();
         if (effectiveType === "limit" && (orderState === "NEW" || orderState === "PARTIALLY_FILLED")) {
-          // Client-side fallback: populate pendingOrders locally in case the
-          // server positions response does not include pendingOrders yet.
           const mapped = mapPendingOrder({
             id: order?.id,
             symbol: order?.symbol ?? sym,
