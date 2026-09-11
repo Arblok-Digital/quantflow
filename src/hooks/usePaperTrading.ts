@@ -283,11 +283,11 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
   );
 
   const moveToBreakEven = useCallback(
-    async (sym: string) => {
-      const targetPos = positionsRef.current.find((p) => p.symbol === sym);
+    async (positionId: string) => {
+      const targetPos = positionsRef.current.find((p) => p.id === positionId);
       if (!targetPos) return;
       if (isSimPositionId(targetPos.id)) {
-        setPositions((prev) => prev.map((p) => (p.symbol === sym ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
+        setPositions((prev) => prev.map((p) => (p.id === positionId ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
         return;
       }
       try {
@@ -299,7 +299,7 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         const payload = await res.json().catch(() => null);
         if (!res.ok || !payload?.success) {
           if (payload?.reason === "POSITION_NOT_FOUND") {
-            setPositions((prev) => prev.map((p) => (p.symbol === sym ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
+            setPositions((prev) => prev.map((p) => (p.id === positionId ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
           } else {
             console.error(`Broker move-to-BE gagal (${payload?.reason || res.status}): ${payload?.message || "unknown"}`);
           }

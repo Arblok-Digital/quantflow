@@ -1,33 +1,22 @@
 import React from "react";
-import { Portfolio, Position, LatencyBreakdown, ClosedTrade } from "../types";
+import { Portfolio, LatencyBreakdown } from "../types";
 import { 
-  Zap, 
-  TrendingUp, 
   Clock, 
-  Target,
-  Crosshair,
-  ShieldCheck
+  Crosshair
 } from "lucide-react";
 
 interface ExecutionMetricsProps {
   portfolio: Portfolio;
-  positions: Position[];
   latestLatency: LatencyBreakdown;
-  onClosePosition: (positionId: string) => void;
   averageSlippageBps: number;
-  /** Trade tertutup (riwayat) untuk metrik Profit Factor & R:R yang jujur. */
-  closedTrades?: ClosedTrade[];
 }
 
 const fmtMs = (v: number) => (v > 0 ? `${v}ms` : "-");
 
 export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
   portfolio,
-  positions,
   latestLatency,
-  onClosePosition,
   averageSlippageBps,
-  closedTrades,
 }) => {
   const winRate =
     portfolio.totalTrades > 0
@@ -37,26 +26,7 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
   const totalPnl = portfolio.realizedPnl;
   const isPnlPositive = totalPnl >= 0;
   const roiPercent = ((totalPnl / portfolio.initialBalance) * 100).toFixed(2);
-
-  const closed = closedTrades || [];
-  const wins = closed.filter((t) => t.pnlUSD > 0);
-  const losses = closed.filter((t) => t.pnlUSD < 0);
-  const grossWin = wins.reduce((s, t) => s + t.pnlUSD, 0);
-  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnlUSD, 0));
-  const rMultiples = closed.filter((t) => t.rMultiple !== 0);
-  const profitFactor =
-    closed.length > 0
-      ? grossLoss > 0
-        ? (grossWin / grossLoss).toFixed(2)
-        : grossWin > 0
-        ? "∞"
-        : "0.00"
-      : "-";
-  const avgRR =
-    rMultiples.length > 0
-      ? (rMultiples.reduce((s, t) => s + t.rMultiple, 0) / rMultiples.length).toFixed(2)
-      : "-";
-
+  
   return (
     <div className="space-y-4">
       {/* Top Bento Grid: High-contrast Bento Performance Card + Pipeline Telemetry Card */}
@@ -83,19 +53,7 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
               </div>
             </div>
 
-            <div className="mt-4 pt-3 border-t border-zinc-200 grid grid-cols-4 gap-2 font-mono">
-              <div>
-                <p className="text-[10px] uppercase font-bold text-zinc-500">Win Rate</p>
-                <p className="text-base font-black text-zinc-900">{winRate}%</p>
-              </div>
-              <div>
-                <p className="text-[10px] uppercase font-bold text-zinc-500">Profit Fac</p>
-                <p className="text-base font-black text-zinc-900">{profitFactor}</p>
-              </div>
-              <div>
-                <p className="text-[10px] uppercase font-bold text-zinc-500">Avg R:R</p>
-                <p className="text-base font-black text-zinc-900">{avgRR === "-" ? "-" : `1:${avgRR}`}</p>
-              </div>
+            <div className="mt-4 pt-3 border-t border-zinc-200 grid grid-cols-1 gap-2 font-mono">
               <div>
                 <p className="text-[10px] uppercase font-bold text-zinc-500">Avg Slip</p>
                 <p className="text-base font-black text-zinc-900">{averageSlippageBps.toFixed(2)} bps</p>
@@ -161,88 +119,6 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
             </div>
           </div>
         </div>
-      </div>
-
-      {/* Active Positions Table Bento Card */}
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 relative overflow-hidden shadow-sm">
-        <div className="flex items-center justify-between mb-3 border-b border-zinc-800 pb-3">
-          <div className="flex items-center gap-2">
-            <h3 className="text-xs font-semibold text-zinc-300 uppercase tracking-wider font-mono">
-              Active Swing Positions ({positions.length})
-            </h3>
-            <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] font-mono">
-              MTF LIQUIDATION TARGETS
-            </span>
-          </div>
-          <span className="text-[11px] font-mono text-zinc-400">
-            Realized PnL: <strong className={isPnlPositive ? "text-emerald-400" : "text-rose-400"}>${totalPnl.toFixed(2)}</strong>
-          </span>
-        </div>
-
-        {positions.length === 0 ? (
-          <div className="text-center py-5 text-zinc-500 font-mono text-xs bg-zinc-950/60 rounded-xl border border-zinc-800/60">
-            Belum ada posisi terbuka. Agent sedang memindai area swing high/low untuk sinyal Liquidation Hunt.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left font-mono text-xs">
-              <thead>
-                <tr className="border-b border-zinc-800 text-zinc-500 text-[10px] uppercase">
-                  <th className="pb-2">ASSET</th>
-                  <th className="pb-2">HORIZON</th>
-                  <th className="pb-2">SIDE</th>
-                  <th className="pb-2">ENTRY</th>
-                  <th className="pb-2">TARGET LIQ POOL</th>
-                  <th className="pb-2">STOP LOSS</th>
-                  <th className="pb-2">PNL ($ / %)</th>
-                  <th className="pb-2 text-right">ACTION</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800/60">
-                {positions.map((pos) => {
-                  const isPosProfitable = pos.unrealizedPnl >= 0;
-                  return (
-                    <tr key={pos.id} className="hover:bg-zinc-800/40 transition-colors">
-                      <td className="py-2.5 font-bold text-zinc-200">{pos.symbol}</td>
-                      <td className="py-2.5">
-                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
-                          {pos.timeframe || "15m"} {pos.marketType || "FUTURES"}
-                        </span>
-                      </td>
-                      <td className="py-2.5">
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                            pos.side === "LONG"
-                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                              : "bg-rose-500/20 text-rose-400 border border-rose-500/30"
-                          }`}
-                        >
-                          {pos.side}
-                        </span>
-                      </td>
-                      <td className="py-2.5 text-zinc-300">${pos.entryPrice.toFixed(2)}</td>
-                      <td className="py-2.5 text-amber-300 font-semibold">
-                        ${pos.takeProfit.toFixed(2)} ({pos.targetLiquidityPool || "Opposite Pool"})
-                      </td>
-                      <td className="py-2.5 text-rose-400">${pos.stopLoss.toFixed(2)}</td>
-                      <td className={`py-2.5 font-bold ${isPosProfitable ? "text-emerald-400" : "text-rose-400"}`}>
-                        {isPosProfitable ? "+" : ""}${pos.unrealizedPnl.toFixed(2)} ({isPosProfitable ? "+" : ""}{pos.unrealizedPnlPercent.toFixed(2)}%)
-                      </td>
-                      <td className="py-2.5 text-right">
-                        <button
-                          onClick={() => onClosePosition(pos.id || pos.symbol)}
-                          className="rounded bg-zinc-800 hover:bg-rose-500 text-zinc-300 hover:text-white px-2.5 py-1 text-[10px] transition-colors border border-zinc-700 hover:border-rose-500"
-                        >
-                          CLOSE
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
     </div>
   );

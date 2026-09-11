@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Header } from "./components/Header";
 import { SubBar } from "./components/SubBar";
+import { EnvironmentBar } from "./components/EnvironmentBar";
 import { MarketChart } from "./components/MarketChart";
 import { DecisionStream } from "./components/DecisionStream";
 import { LiquidityHuntPanel } from "./components/LiquidityHuntPanel";
@@ -39,6 +40,8 @@ import { evaluateTradingDecision } from "./logic/decisionEngine";
 import { LoginGate } from "./components/LoginGate";
 import { GuardrailsPanel } from "./components/GuardrailsPanel";
 import { useLiveMode } from "./hooks/useLiveMode";
+import { ModeProvider } from "./hooks/useMode";
+import { ToastProvider } from "./components/ExecutionToasts";
 import { TradeJournalPanel } from "./components/TradeJournalPanel";
 import type { RecentTrade, FuturesMetrics } from "./data/marketFetcher";
 
@@ -335,40 +338,29 @@ export default function App() {
   }
 
   return (
+    <ToastProvider>
+    <ModeProvider live={live}>
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-amber-500 selection:text-zinc-950">
-      {/* LIVE banner — non-dismissable, red when armed */}
-      {live.armedForLive ? (
-        <div className="sticky top-0 z-[60] w-full bg-rose-600 text-white text-center py-1.5 font-mono font-black tracking-widest text-xs border-b border-rose-700 shadow-lg shadow-rose-600/20">
-          <span className="inline-flex items-center gap-2">
-            <span className="w-2 h-2 bg-white rounded-full animate-pulse" />
-            🔴 LIVE TRADING ARMED — real orders enabled
-            <span className="hidden sm:inline opacity-90">— {live.exchangeId.toUpperCase()} • {live.testnet ? "TESTNET" : "MAINNET"}</span>
-          </span>
-        </div>
-      ) : (
-        <div className="sticky top-0 z-[60] w-full bg-zinc-900 text-zinc-400 text-center py-1 font-mono font-bold tracking-widest text-[11px] border-b border-zinc-800">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full" />
-            PAPER MODE — dry-run • LIVE equity vs PAPER shown below
-          </span>
-        </div>
-      )}
+      {/* Zone 1 — Environment bar (sticky, single source of truth paper/live;
+          banner duplikat lama dihapus — EnvironmentBar yang menangani semua state) */}
+      <EnvironmentBar
+        liveMode={live.mode}
+        isLiveArmed={live.armedForLive}
+        exchangeId={live.exchangeId}
+        testnet={live.testnet}
+        equity={live.equity}
+      />
 
-      {/* Slim header: brand, exchange status, tabs, price, modal menu, live badge, logout */}
+      {/* Zone 2 + 3 — Brand/Account + Navigation */}
       <Header
         geminiActive={geminiActive}
         currentPrice={market.currentPrice}
         priceDelta={market.priceDelta}
         exchangeStatus={market.exchangeStatus}
-        onSyncLiveExchange={market.syncLiveExchangeData}
-        isSyncingFeed={market.isSyncingFeed}
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         openPositionsCount={openPositionsCount}
         floatingPnl={floatingPnl}
-        tickCount={market.microTicks.length}
-        isLiveArmed={live.armedForLive}
-        liveMode={live.mode}
         liveEquity={live.equity}
         onOpenArchitecture={() => setIsArchitectureOpen(true)}
         onOpenAuditLedger={() => setIsAuditLedgerOpen(true)}
@@ -393,14 +385,75 @@ export default function App() {
           setRiskConfig((prev) => ({ ...prev, isEmergencyStopActive: !prev.isEmergencyStopActive }))
         }
         isAnalyzing={pipeline.isAnalyzing}
+        activeTab={activeTab}
       />
 
       {/* Main Content — each tab renders its panels exactly once */}
       <main className="flex-1 p-3 sm:p-5 max-w-7xl w-full mx-auto space-y-4">
-        {/* 📊 DASHBOARD */}
+        {/* 📊 DASHBOARD — High-level summary + trading interface */}
         {activeTab === "dashboard" && (
           <>
-            {/* Real-time MTF Feeder Chart with Liquidation Hunt Bands */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
+                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Equity</div>
+                <div className="text-lg font-mono font-bold text-zinc-100">${paper.portfolio.equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+              </div>
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
+                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Open P&L</div>
+                <div className={`text-lg font-mono font-bold ${floatingPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{floatingPnl >= 0 ? "+" : ""}${floatingPnl.toFixed(2)}</div>
+              </div>
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
+                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Positions</div>
+                {/* Server book hanya mengirim posisi OPEN — count = length (status tidak dimapping di reader hook) */}
+                <div className="text-lg font-mono font-bold text-zinc-100">{paper.positions.length}</div>
+              </div>
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
+                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Win Rate</div>
+                <div className="text-lg font-mono font-bold text-zinc-100">
+                  {paper.portfolio.totalTrades > 0
+                    ? ((paper.portfolio.winCount / paper.portfolio.totalTrades) * 100).toFixed(1)
+                    : "0.0"}
+                  %
+                </div>
+              </div>
+            </div>
+
+            {pipeline.latestDecision && (
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mb-2">Latest AI Signal</div>
+                <div className="flex items-center gap-4">
+                  <span className={`px-2 py-1 rounded text-xs font-mono font-bold ${pipeline.latestDecision.action === "BUY" ? "bg-emerald-500/20 text-emerald-300" : pipeline.latestDecision.action === "SELL" ? "bg-rose-500/20 text-rose-300" : "bg-zinc-800 text-zinc-400"}`}>
+                    {pipeline.latestDecision.action}
+                  </span>
+                  <span className="text-xs font-mono text-zinc-400">{pipeline.latestDecision.reasoning?.slice(0, 120)}...</span>
+                </div>
+              </div>
+            )}
+
+            <ExecutionConsole />
+            <PositionsPanel onServerPositions={handleServerPositions} />
+
+            <PaperTradingPanel
+              portfolio={paper.portfolio}
+              positions={paper.positions}
+              currentPrice={market.currentPrice}
+              symbol={symbol}
+              mtfLiquidity={market.mtfLiquidity}
+              latestDecision={pipeline.latestDecision}
+              onClosePosition={paper.closePosition}
+              onMoveToBreakEven={paper.moveToBreakEven}
+              onResetPaperAccount={paper.resetPaperAccount}
+              onSimulateTradeEntry={paper.simulateTradeEntry}
+              actionableRunKeel={runKeelSignal}
+            />
+
+            <TradeJournalPanel />
+          </>
+        )}
+
+        {/* 📈 ANALYTICS — Full chart + indicators + confluence + order book */}
+        {activeTab === "analytics" && (
+          <>
             <MarketChart
               candles={activeDisplayCandles}
               symbol={symbol}
@@ -415,7 +468,6 @@ export default function App() {
               exchangeStatus={market.exchangeStatus}
             />
 
-            {/* Decision Engine Stream + LIVE Guardrails (server truth): 2-col */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <DecisionStream
                 decision={pipeline.latestDecision}
@@ -428,10 +480,8 @@ export default function App() {
               <GuardrailsPanel />
             </div>
 
-            {/* Institutional Quant Engine (full width) */}
             <KeelEnginePanel result={keelResult} loading={keelLoading} onAnalyze={runKeelSignal} />
 
-            {/* Risk Management + Probability Badge: 2-col */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <RiskManagementPanel
                 config={riskConfig}
@@ -454,57 +504,6 @@ export default function App() {
               />
             </div>
 
-            {/* Swing Execution Metrics & Modular Pipeline Telemetry */}
-            <ExecutionMetrics
-              portfolio={paper.portfolio}
-              positions={paper.positions}
-              latestLatency={pipeline.latestLatency}
-              onClosePosition={paper.closePosition}
-              averageSlippageBps={typeof avgSlippageDisplay === "number" ? avgSlippageDisplay : 0}
-              closedTrades={paper.closedTrades}
-            />
-          </>
-        )}
-
-        {/* 💰 PAPER TRADING */}
-        {activeTab === "paper" && (
-          <>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-xs font-mono uppercase tracking-wider text-amber-400 font-semibold">
-                Server-Backed Execution &amp; Positions
-              </h3>
-              <span className="text-[10px] font-mono text-zinc-500">
-                data dari server broker &mdash; sumber kebenaran (polling /api/broker/events + /api/broker/positions)
-              </span>
-            </div>
-
-            <ExecutionConsole />
-            <PositionsPanel onServerPositions={handleServerPositions} />
-            <ReplayControlPanel />
-
-            <PaperTradingPanel
-              portfolio={paper.portfolio}
-              positions={paper.positions}
-              closedTrades={paper.closedTrades}
-              currentPrice={market.currentPrice}
-              symbol={symbol}
-              mtfLiquidity={market.mtfLiquidity}
-              latestDecision={pipeline.latestDecision}
-              onClosePosition={paper.closePosition}
-              onMoveToBreakEven={paper.moveToBreakEven}
-              onResetPaperAccount={paper.resetPaperAccount}
-              onSimulateTradeEntry={paper.simulateTradeEntry}
-              actionableRunKeel={runKeelSignal}
-            />
-
-            <TradeJournalPanel />
-          </>
-        )}
-
-        {/* 📈 ANALYTICS (on-chain + macro merged) */}
-        {activeTab === "analytics" && (
-          <>
-            {/* MTF Liquidity Hunt Radar Panel (full width) */}
             <LiquidityHuntPanel
               mtfLiquidity={market.mtfLiquidity}
               currentPrice={market.currentPrice}
@@ -513,7 +512,6 @@ export default function App() {
               orderBook={market.orderBook}
             />
 
-            {/* On-Chain + Macro: 2-col */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <OnChainPanel metrics={onChainMetrics} onRefresh={() => handleRefreshOnChain()} />
               <MacroCalendarPanel
@@ -521,6 +519,13 @@ export default function App() {
                 onRefresh={() => setMacroSummary(fetchMacroCalendar())}
               />
             </div>
+
+            <ExecutionMetrics
+              portfolio={paper.portfolio}
+              latestLatency={pipeline.latestLatency}
+              averageSlippageBps={typeof avgSlippageDisplay === "number" ? avgSlippageDisplay : 0}
+              closedTrades={paper.closedTrades}
+            />
 
             <ReconciliationPanel />
           </>
@@ -581,5 +586,7 @@ export default function App() {
         onClose={() => setIsBrokerOpen(false)}
       />
     </div>
+    </ModeProvider>
+    </ToastProvider>
   );
 }

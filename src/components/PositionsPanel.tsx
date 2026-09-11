@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ShieldCheck, Zap, XCircle } from "lucide-react";
 import { authFetch, useAuth } from "../hooks/useAuth";
 import { normalizeSide } from "../lib/sideNormalize";
+import { useToast } from "./ExecutionToasts";
+
 
 // ---------------------------------------------------------------------------
 // Positions Panel — server-backed open positions table (roadmap 1.8).
@@ -71,6 +73,8 @@ function unrealizedFor(pos: ServerPosition): { pnlUSD: number; pnlPct: number } 
 
 export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPositions }) => {
   const { isAuthenticated } = useAuth();
+  const { pushToast } = useToast();
+
   const [data, setData] = useState<PositionsResponse | null>(null);
   const [conn, setConn] = useState<"ok" | "error" | "hidden">("hidden");
   const [lastSync, setLastSync] = useState<number | null>(null);
@@ -149,11 +153,19 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
           message: String(payload?.message || "Close gagal."),
           duplicatePositionId: duplicateId,
         });
+        pushToast("error", `Close ${pos.symbol} gagal`, String(payload?.reason || `HTTP ${res.status}`));
         return;
       }
+      const realized = Number(payload?.realizedPnlUSD ?? 0);
+      pushToast(
+        realized >= 0 ? "success" : "warning",
+        `Posisi ${pos.symbol} ditutup`,
+        `${realized >= 0 ? "Profit" : "Loss"} $${Math.abs(realized).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      );
       await load();
     } catch (err) {
       setActionError({ reason: "NETWORK", message: (err as Error).message });
+      pushToast("error", `Close ${pos.symbol} gagal`, "Kesalahan jaringan/server.");
     } finally {
       setBusyId(null);
     }
@@ -174,11 +186,14 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
           reason: String(payload?.reason || `HTTP ${res.status}`),
           message: String(payload?.message || "Update posisi gagal."),
         });
+        pushToast("error", `Break-even ${pos.symbol} gagal`, String(payload?.reason || `HTTP ${res.status}`));
         return;
       }
+      pushToast("success", `SL ${pos.symbol} → Break-even`, "Stop loss digeser ke harga entry (+buffer fee).");
       await load();
     } catch (err) {
       setActionError({ reason: "NETWORK", message: (err as Error).message });
+      pushToast("error", `Break-even ${pos.symbol} gagal`, "Kesalahan jaringan/server.");
     } finally {
       setBusyId(null);
     }

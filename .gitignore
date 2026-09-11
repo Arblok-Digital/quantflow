@@ -19,3 +19,6 @@ trading.db
 
 # OpenCode task artifacts
 .oc-tasks/
+
+# workflow butuh token scope 'workflow' — push manual aja kalau dibutuhkin
+.github/workflows/

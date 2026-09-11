@@ -1,5 +1,7 @@
-import React from "react";
+import React, { useState } from "react";
 import { authFetch } from "../hooks/useAuth";
+import { useToast } from "./ExecutionToasts";
+import { ConfirmOrderModal } from "./ConfirmOrderModal";
 import {
   TrendingUp,
   TrendingDown,
@@ -60,6 +62,43 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
   onResetPaperAccount,
   selectedCapital,
 }) => {
+  const { pushToast } = useToast();
+  const [confirmSide, setConfirmSide] = useState<"LONG" | "SHORT" | null>(null);
+  const [sending, setSending] = useState(false);
+
+  // Eksekusi order (setelah confirm gate di live). Toast feedback ala exchange.
+  const executeOrder = async (side: "LONG" | "SHORT") => {
+    setSending(true);
+    pushToast(
+      "info",
+      `Order ${side} dikirim`,
+      `${symbol} • ${orderType.toUpperCase()}${orderType === "limit" && limitPrice ? ` @ $${Number(limitPrice).toLocaleString()}` : ` @ $${currentPrice.toLocaleString()}`}`
+    );
+    try {
+      const maybe = (handleSimulate as unknown as (s: "LONG" | "SHORT") => Promise<unknown> | void)(side);
+      const res = maybe instanceof Promise ? await maybe : undefined;
+      if (res === null) {
+        pushToast("error", `Order ${side} ditolak server`, "Cek Execution Console / Guardrails untuk alasan lengkap.");
+      } else if (res && typeof res === "object") {
+        pushToast("success", `Order ${side} diterima`, `${symbol} — detail fill di panel posisi & console.`);
+      }
+    } catch (err) {
+      pushToast("error", `Order ${side} gagal`, (err as Error)?.message || "Kesalahan jaringan/server.");
+    } finally {
+      setSending(false);
+      setConfirmSide(null);
+    }
+  };
+
+  const handleOrderClick = (side: "LONG" | "SHORT") => {
+    if (isLiveMode) {
+      // LIVE: wajib lewat confirmation gate (type-symbol + countdown).
+      setConfirmSide(side);
+      return;
+    }
+    void executeOrder(side);
+  };
+
   const handleCancelLastPending = async () => {
     if (!lastPendingOrder) return;
     if (!window.confirm(`Batalkan limit order ${lastPendingOrder.id}?`)) return;
@@ -127,8 +166,9 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
           {/* Quick Simulation Trigger Buttons */}
           <div className="flex items-center gap-2 shrink-0 flex-wrap">
             <button
-              onClick={() => handleSimulate("LONG")}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold font-mono text-xs shadow-md transition ${
+              onClick={() => handleOrderClick("LONG")}
+              disabled={sending}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold font-mono text-xs shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed ${
                 isLiveMode
                   ? "bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/30"
                   : "bg-emerald-600 hover:bg-emerald-500 text-zinc-950 shadow-emerald-600/20"
@@ -136,11 +176,12 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
               title={isLiveMode ? "KIRIM order LONG REAL ke exchange (konfirmasi dulu)" : "Simulasikan Entry LONG pada sinyal 15m"}
             >
               {isLiveMode ? <ShieldAlert className="w-3.5 h-3.5" /> : <TrendingUp className="w-3.5 h-3.5" />}
-              <span>{isLiveMode ? "EXECUTE LONG (live)" : "Simulate LONG"}</span>
+              <span>{sending ? "SENDING…" : isLiveMode ? "EXECUTE LONG (live)" : "Simulate LONG"}</span>
             </button>
             <button
-              onClick={() => handleSimulate("SHORT")}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-zinc-100 font-bold font-mono text-xs shadow-md transition ${
+              onClick={() => handleOrderClick("SHORT")}
+              disabled={sending}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-zinc-100 font-bold font-mono text-xs shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed ${
                 isLiveMode
                   ? "bg-rose-700 hover:bg-rose-600 shadow-rose-700/30"
                   : "bg-rose-600 hover:bg-rose-500 shadow-rose-600/20"
@@ -148,7 +189,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
               title={isLiveMode ? "KIRIM order SHORT REAL ke exchange (konfirmasi dulu)" : "Simulasikan Entry SHORT pada sinyal 15m"}
             >
               {isLiveMode ? <ShieldAlert className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
-              <span>{isLiveMode ? "EXECUTE SHORT (live)" : "Simulate SHORT"}</span>
+              <span>{sending ? "SENDING…" : isLiveMode ? "EXECUTE SHORT (live)" : "Simulate SHORT"}</span>
             </button>
             {actionableRunKeel && (
               <button
@@ -257,6 +298,21 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* Confirmation gate — LIVE mode wajib konfirmasi sebelum eksekusi */}
+      <ConfirmOrderModal
+        isOpen={confirmSide !== null}
+        symbol={symbol}
+        side={confirmSide || "LONG"}
+        qty={currentPrice > 0 ? Number((selectedCapital / currentPrice).toFixed(4)) : 0}
+        orderType={orderType}
+        price={orderType === "limit" && limitPrice ? Number(limitPrice) : currentPrice}
+        leverage={10}
+        mode={isLiveMode ? "live" : "paper"}
+        busy={sending}
+        onConfirm={() => confirmSide && void executeOrder(confirmSide)}
+        onCancel={() => setConfirmSide(null)}
+      />
     </>
   );
 };

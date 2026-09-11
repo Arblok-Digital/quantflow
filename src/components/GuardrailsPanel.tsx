@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { authFetch, useAuth } from "../hooks/useAuth";
+import { useToast } from "./ExecutionToasts";
 import {
   ShieldCheck,
   ShieldAlert,
@@ -44,6 +45,7 @@ function fmtMoney(n: number): string {
 
 export const GuardrailsPanel: React.FC = () => {
   const { isAuthenticated } = useAuth();
+  const { pushToast } = useToast();
   const [data, setData] = useState<GuardrailsSnapshot | null>(null);
   const [conn, setConn] = useState<"ok" | "error" | "hidden" | "loading">("loading");
   const [killBusy, setKillBusy] = useState(false);
@@ -140,6 +142,11 @@ export const GuardrailsPanel: React.FC = () => {
         setMsg({ type: "err", text: errMsg });
       } else {
         setMsg({ type: "ok", text: nextActive ? "Kill-switch AKTIF — order diblokir." : "Kill-switch NONAKTIF — order kembali diizinkan." });
+        pushToast(
+          nextActive ? "warning" : "success",
+          nextActive ? "KILL SWITCH AKTIF" : "Kill switch dinonaktifkan",
+          nextActive ? "Semua order baru ditolak server sampai dimatikan." : "Order kembali diizinkan (guardrails tetap aktif)."
+        );
       }
       await load();
     } catch (e: any) {
@@ -174,6 +181,11 @@ export const GuardrailsPanel: React.FC = () => {
         setMsg({ type: "err", text: display });
       } else {
         setMsg({ type: "ok", text: arm ? "LIVE ARMED — order live aktif." : "LIVE DISARMED — kembali ke paper." });
+        pushToast(
+          arm ? "warning" : "info",
+          arm ? "LIVE ARMED" : "LIVE DISARMED",
+          arm ? "Order real akan terkirim ke exchange. Hati-hati." : "Sistem kembali ke paper mode."
+        );
       }
       await load();
     } catch (e: any) {
