@@ -15,6 +15,8 @@ interface MarketChartProps {
   candlesByTimeframe?: Partial<Record<Timeframe, Candle[]>>;
   feedMode?: import("../types").FeedMode;
   exchangeStatus?: import("../types").ExchangeFeedStatus;
+  /** Candle count aktual TF aktif (untuk label jujur pill indikator). */
+  activeTfCandleCount?: number;
 }
 
 const ALL_TIMEFRAMES: { id: Timeframe; label: string; tag?: string; desc: string }[] = [
@@ -40,6 +42,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   candlesByTimeframe,
   feedMode,
   exchangeStatus,
+  activeTfCandleCount,
 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
@@ -274,8 +277,14 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           </div>
         </div>
 
-        {/* Technical Indicators Pill */}
+        {/* Technical Indicators Pill — mengikuti TF aktif (lihat label TF) */}
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <div className="flex items-center gap-1.5 rounded-xl bg-cyan-500/10 px-2.5 py-1.5 border border-cyan-500/30">
+            <span className="text-cyan-300 text-[10px] font-black uppercase">TF {timeframe}</span>
+            {activeTfCandleCount != null && (
+              <span className="text-[10px] text-zinc-400">• {activeTfCandleCount}n</span>
+            )}
+          </div>
           <div className="flex items-center gap-1.5 rounded-xl bg-zinc-950 px-2.5 py-1.5 border border-zinc-800">
             <span className="text-zinc-500 text-[10px] font-semibold uppercase">RSI(14):</span>
             <span
@@ -362,6 +371,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
           <span className="flex items-center gap-1.5 text-zinc-400 font-semibold">
             <Crosshair className="w-3 h-3 text-amber-400" />
+            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[10px] font-black">TF {timeframe}</span>
             <span className="text-zinc-200">{inspectedCandle ? formatTimeLabel(inspectedCandle.timestamp, timeframe) : "LIVE"}</span>
           </span>
           {inspectedCandle && (

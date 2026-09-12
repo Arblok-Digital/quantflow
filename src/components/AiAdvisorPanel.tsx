@@ -22,19 +22,85 @@ export interface AiAdvisorKeelSummary {
   } | null;
 }
 
+export interface AiAdvisorTechnicals {
+  rsi: number | null;
+  ema20: number | null;
+  ema50: number | null;
+  macdHistogram: number | null;
+  orderBookImbalance: number | null;
+  volatility: string | null;
+}
+
+export interface AiAdvisorFuturesDetail {
+  fundingBps: number | null;
+  markPrice: number | null;
+  openInterestUsd: number | null;
+  lsrTaker: number | null;
+  lsrAccount: number | null;
+  longLiqUsd: number | null;
+  shortLiqUsd: number | null;
+  volume24hUsd: number | null;
+  biasReason: string | null;
+  source: string | null;
+}
+
+export interface AiAdvisorDataHealth {
+  source: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface AiAdvisorMultiTfEntry {
+  rsi: number | null;
+  ema20: number | null;
+  ema50: number | null;
+  macdHistogram: number | null;
+  trend: string | null;
+}
+
+export interface AiAdvisorMacroReal {
+  source: string;
+  vix: number | null;
+  riskIndex: number;
+  upcomingCount: number;
+  upcoming: Array<{ title: string; dateUtc: string; forecast: string; previous: string }>;
+  fetchedAt: number;
+}
+
 export interface AiAdvisorResponse {
   success: boolean;
   mode: "ai" | "keel";
   geminiConfigured: boolean;
   timestamp: number;
+  model?: string;
   keelSummary: AiAdvisorKeelSummary;
+  technicals?: AiAdvisorTechnicals | null;
+  multiTfTechnicals?: Record<string, AiAdvisorMultiTfEntry | null> | null;
+  futuresDetail?: AiAdvisorFuturesDetail | null;
+  macroReal?: AiAdvisorMacroReal | null;
+  onChainEcho?: {
+    netflowStatus: string | null;
+    smartMoneyBias: string | null;
+    onChainConfidence: number | null;
+    sopr: number | null;
+    soprStatus: string | null;
+    activeAddressesGrowth24h: number | null;
+  } | null;
+  macroEcho?: {
+    upcomingHighImpactCount: number | null;
+    macroTradingAdvice: string | null;
+    nearestEventImpact: string | null;
+    nearestEventImplication: string | null;
+  } | null;
   backtest?: { symbol: string; context: string };
+  dataHealth?: AiAdvisorDataHealth[];
   ai: {
     insight: string;
-    suggestedBias?: "BULLISH" | "BEARISH" | "NEUTRAL";
+    suggestedBias?: "LONG" | "SHORT" | "NEUTRAL" | "BULLISH" | "BEARISH";
     keyLevels?: { entry: number | null; stopLoss: number | null; takeProfit: number | null };
     risks?: string[];
     caveat?: string;
+    dataGaps?: string[];
   };
   latencyMs?: number;
 }
@@ -80,6 +146,19 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
   const [requestedSymbol, setRequestedSymbol] = useState<string>(symbol);
 
   const requestInsight = useCallback(async () => {
+    const diagT0 = Date.now();
+    // Logging diagnostik: payload yang dikirim ke LLM (sumber data per pilar).
+    try {
+      // eslint-disable-next-line no-console
+      console.log("[advisor-diag] request", {
+        symbol,
+        currentPrice,
+        hasOnChain: !!onChainMetrics,
+        hasMacro: !!macroSummary,
+        onChainKeys: onChainMetrics ? Object.keys(onChainMetrics) : [],
+        macroKeys: macroSummary ? Object.keys(macroSummary) : [],
+      });
+    } catch {}
     setLoading(true);
     setError(null);
     setRequestedSymbol(symbol);
@@ -103,6 +182,24 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
         setError("Endpoint tidak mengembalikan respons sukses.");
         return;
       }
+      // Logging diagnostik: sumber data yang benar-benar dipakai server + mode.
+      try {
+        // eslint-disable-next-line no-console
+        console.log("[advisor-diag] response", {
+          ms: Date.now() - diagT0,
+          symbol,
+          mode: data.mode,
+          geminiConfigured: data.geminiConfigured,
+          model: (data as any).model ?? null,
+          hasKeelSummary: !!data.keelSummary,
+          keelAction: data.keelSummary?.action,
+          hasTechnicals: !!(data as any).technicals,
+          hasFuturesDetail: !!(data as any).futuresDetail,
+          hasOnChainEcho: !!(data as any).onChainEcho,
+          hasMacroEcho: !!(data as any).macroEcho,
+          hasBacktest: !!(data as any).backtest,
+        });
+      } catch {}
       setResult(data as AiAdvisorResponse);
     } catch (e: any) {
       setError(e?.message || "Kesalahan jaringan saat meminta insight.");
@@ -121,8 +218,32 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
   const isAi = mode === "ai";
   const keel = result?.keelSummary;
   const ai = result?.ai;
+  const tech = result?.technicals ?? null;
+  const fut = result?.futuresDetail ?? null;
+  const multiTf = result?.multiTfTechnicals ?? null;
+  const macroReal = result?.macroReal ?? null;
+  const TF_ORDER = ["15m", "1h", "4h"] as const;
+  const TF_ROLE: Record<string, string> = {
+    "15m": "Scalping / timing entry",
+    "1h": "Intraday / konfirmasi",
+    "4h": "Swing / arah utama",
+  };
+  const hasMultiTf = multiTf != null && TF_ORDER.some((tf) => multiTf[tf] != null);
   const act = keel ? actionBadge(keel.action) : null;
   const futuresBias = keel ? biasBadge(keel.futuresBias) : null;
+  const hasTech = tech != null && (
+    (tech.rsi != null && isFinite(Number(tech.rsi))) ||
+    (tech.ema20 != null && isFinite(Number(tech.ema20))) ||
+    (tech.macdHistogram != null && isFinite(Number(tech.macdHistogram))) ||
+    (tech.orderBookImbalance != null && isFinite(Number(tech.orderBookImbalance)))
+  );
+  const hasFutDetail = fut != null && (
+    fut.fundingBps != null || fut.lsrTaker != null || fut.openInterestUsd != null ||
+    fut.longLiqUsd != null || fut.shortLiqUsd != null || fut.volume24hUsd != null
+  );
+  const dataHealth = Array.isArray(result?.dataHealth) ? result.dataHealth : [];
+  const failedHealth = dataHealth.filter((d) => !d.ok);
+  const llmGaps: string[] = Array.isArray(ai?.dataGaps) ? ai.dataGaps : [];
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 sm:p-5 shadow-sm relative overflow-hidden">
@@ -199,11 +320,47 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
 
         {result && (
           <>
+            {/* DATA HEALTH — konfirmasi sumber per pilar (LLM wajib akui yang GAGAL) */}
+            {dataHealth.length > 0 && (
+              <div className={`rounded-xl border p-3 ${failedHealth.length > 0 ? "bg-amber-950/30 border-amber-500/40" : "bg-emerald-950/20 border-emerald-500/30"}`}>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className={`text-[10px] font-mono uppercase tracking-wider font-bold ${failedHealth.length > 0 ? "text-amber-300" : "text-emerald-300"}`}>
+                    Status Data {failedHealth.length > 0 ? `— ${failedHealth.length} sumber GAGAL` : "— semua OK"}
+                  </p>
+                  {result.model && (
+                    <span className="px-1.5 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-[9px] font-mono text-zinc-400">
+                      {result.model}
+                    </span>
+                  )}
+                </div>
+                <div className="grid gap-1">
+                  {dataHealth.map((d) => (
+                    <div key={d.source} className="flex items-start gap-2 font-mono text-[11px]">
+                      <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${d.ok ? "bg-emerald-400" : "bg-amber-400 animate-pulse"}`} />
+                      <span className={`font-bold uppercase w-24 shrink-0 ${d.ok ? "text-zinc-300" : "text-amber-300"}`}>
+                        {d.source}
+                      </span>
+                      <span className={d.ok ? "text-zinc-400" : "text-amber-200"}>{d.detail}</span>
+                    </div>
+                  ))}
+                </div>
+                {isAi && llmGaps.length > 0 && (
+                  <p className="mt-2 text-[10px] font-mono text-cyan-300">
+                    LLM konfirmasi gap: {llmGaps.join(", ")}
+                  </p>
+                )}
+                {isAi && failedHealth.length > 0 && llmGaps.length === 0 && (
+                  <p className="mt-2 text-[10px] font-mono text-rose-300">
+                    Peringatan: LLM tidak mengembalikan dataGaps — anggap insight terdegradasi.
+                  </p>
+                )}
+              </div>
+            )}
             {/* STRATEGIC RECOMMENDATION — Headline Arahan */}
             {ai?.suggestedBias && (
               <div className={`mb-4 rounded-2xl border-4 p-5 flex items-center justify-between shadow-[0_0_30px_rgba(0,0,0,0.5)] ${
-                ai.suggestedBias === "LONG" ? "bg-emerald-950/60 border-emerald-500/80 shadow-emerald-500/20" : 
-                ai.suggestedBias === "SHORT" ? "bg-rose-950/60 border-rose-500/80 shadow-rose-500/20" : 
+                ai.suggestedBias === "LONG" || ai.suggestedBias === "BULLISH" ? "bg-emerald-950/60 border-emerald-500/80 shadow-emerald-500/20" :
+                ai.suggestedBias === "SHORT" || ai.suggestedBias === "BEARISH" ? "bg-rose-950/60 border-rose-500/80 shadow-rose-500/20" :
                 "bg-zinc-900/80 border-zinc-600/50"
               }`}>
                 <div className="space-y-1">
@@ -212,25 +369,25 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                     <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-[9px] text-zinc-500 font-bold border border-zinc-700">SWING 4H</span>
                   </div>
                   <h3 className={`text-3xl font-black font-mono tracking-tighter uppercase leading-none ${
-                    ai.suggestedBias === "LONG" ? "text-emerald-400" : 
-                    ai.suggestedBias === "SHORT" ? "text-rose-400" : 
+                    ai.suggestedBias === "LONG" || ai.suggestedBias === "BULLISH" ? "text-emerald-400" :
+                    ai.suggestedBias === "SHORT" || ai.suggestedBias === "BEARISH" ? "text-rose-400" :
                     "text-zinc-100"
                   }`}>
-                    {ai.suggestedBias === "LONG" ? "INSTITUTIONAL LONG" : 
-                     ai.suggestedBias === "SHORT" ? "INSTITUTIONAL SHORT" : 
+                    {ai.suggestedBias === "LONG" || ai.suggestedBias === "BULLISH" ? "INSTITUTIONAL LONG" :
+                     ai.suggestedBias === "SHORT" || ai.suggestedBias === "BEARISH" ? "INSTITUTIONAL SHORT" :
                      "WAIT & OBSERVE"}
                   </h3>
                   <p className="text-[10px] font-medium text-zinc-500 italic">Targeting liquidity pools (BSL/SSL)</p>
                 </div>
                 <div className="flex flex-col items-end gap-2">
                   <span className={`text-sm font-mono font-black px-4 py-1.5 rounded-full border-2 shadow-sm ${biasBadge(ai.suggestedBias).cls}`}>
-                    {ai.suggestedBias}
+                    {biasBadge(ai.suggestedBias).label}
                   </span>
                   <div className="flex gap-1">
                     {[1,2,3].map(i => (
                       <div key={i} className={`w-1.5 h-1.5 rounded-full ${
-                        ai.suggestedBias === "NEUTRAL" ? "bg-zinc-700" : 
-                        ai.suggestedBias === "LONG" ? "bg-emerald-500 animate-pulse" : "bg-rose-500 animate-pulse"
+                        ai.suggestedBias === "NEUTRAL" ? "bg-zinc-700" :
+                        ai.suggestedBias === "LONG" || ai.suggestedBias === "BULLISH" ? "bg-emerald-500 animate-pulse" : "bg-rose-500 animate-pulse"
                       }`} style={{ animationDelay: `${i*0.2}s` }} />
                     ))}
                   </div>
@@ -248,7 +405,7 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                 <p className="text-[10px] font-mono uppercase tracking-wider font-bold text-zinc-400">Insight</p>
                 {ai?.suggestedBias && (
                   <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[10px] font-mono font-black ${biasBadge(ai.suggestedBias).cls}`}>
-                    BIAS: {ai.suggestedBias}
+                    BIAS: {biasBadge(ai.suggestedBias).label}
                   </span>
                 )}
               </div>
@@ -296,6 +453,140 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                     {keel.confluenceScore != null ? `${keel.confluenceScore}%` : "—"} CONF
                   </span>
                 </div>
+
+                {/* TEKNIKAL MULTI-TF — tiap TF dilabel eksplisit (15m/1h/4h) */}
+                {(hasMultiTf || hasTech) && (
+                  <div>
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 font-bold mb-1.5">
+                      Teknikal per Timeframe (RSI/EMA/MACD)
+                    </p>
+                    {hasMultiTf && multiTf ? (
+                      <div className="grid gap-2">
+                        {TF_ORDER.map((tf) => {
+                          const t = multiTf[tf];
+                          return (
+                            <div key={tf} className="rounded-lg bg-zinc-900 border border-zinc-800 p-2">
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[10px] font-mono font-black">
+                                  TF {tf}
+                                </span>
+                                <span className="text-[10px] font-mono text-zinc-500">{TF_ROLE[tf]}</span>
+                                {t?.trend && (
+                                  <span className={`ml-auto px-1.5 py-0.5 rounded border text-[10px] font-mono font-bold ${t.trend === "UP" ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : t.trend === "DOWN" ? "bg-rose-500/15 text-rose-300 border-rose-500/30" : "bg-zinc-800 text-zinc-400 border-zinc-700"}`}>
+                                    {t.trend}
+                                  </span>
+                                )}
+                              </div>
+                              {t ? (
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs">
+                                  <div>
+                                    <span className="text-[10px] uppercase text-zinc-500 block font-semibold">RSI 14</span>
+                                    <span className={`text-sm font-bold ${Number(t.rsi) < 30 ? "text-emerald-400" : Number(t.rsi) > 70 ? "text-rose-400" : "text-zinc-100"}`}>
+                                      {t.rsi != null ? Number(t.rsi).toFixed(1) : "—"}
+                                    </span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] uppercase text-zinc-500 block font-semibold">EMA 20/50</span>
+                                    <span className="text-sm font-bold text-zinc-100">
+                                      {t.ema20 != null ? fmtPrice(Number(t.ema20)) : "—"}
+                                      <span className="text-zinc-600"> / </span>
+                                      {t.ema50 != null ? fmtPrice(Number(t.ema50)) : "—"}
+                                    </span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] uppercase text-zinc-500 block font-semibold">MACD hist</span>
+                                    <span className={`text-sm font-bold ${Number(t.macdHistogram) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                                      {t.macdHistogram != null ? (Number(t.macdHistogram) >= 0 ? "+" : "") + Number(t.macdHistogram).toFixed(2) : "—"}
+                                    </span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Sumber candle</span>
+                                    <span className="text-[11px] text-zinc-400">server klines</span>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="text-[11px] font-mono text-amber-300">TF {tf} GAGAL fetch — tidak dianalisis.</p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                    tech && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-xs">
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 col-span-2 sm:col-span-3">
+                        <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[10px] font-mono font-black">TF 15m (legacy)</span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">RSI 14</span>
+                        <span className={`text-sm font-bold ${Number(tech.rsi) < 30 ? "text-emerald-400" : Number(tech.rsi) > 70 ? "text-rose-400" : "text-zinc-100"}`}>
+                          {tech.rsi != null && isFinite(Number(tech.rsi)) ? Number(tech.rsi).toFixed(1) : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">EMA 20 / 50</span>
+                        <span className="text-sm font-bold text-zinc-100">
+                          {tech.ema20 != null && isFinite(Number(tech.ema20)) ? fmtPrice(Number(tech.ema20)) : "—"}
+                          <span className="text-zinc-600"> / </span>
+                          {tech.ema50 != null && isFinite(Number(tech.ema50)) ? fmtPrice(Number(tech.ema50)) : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">MACD hist</span>
+                        <span className={`text-sm font-bold ${Number(tech.macdHistogram) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                          {tech.macdHistogram != null && isFinite(Number(tech.macdHistogram)) ? Number(tech.macdHistogram).toFixed(2) : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">OB Imbalance</span>
+                        <span className="text-sm font-bold text-zinc-100">
+                          {tech.orderBookImbalance != null && isFinite(Number(tech.orderBookImbalance)) ? Number(tech.orderBookImbalance).toFixed(2) : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Volatilitas</span>
+                        <span className="text-sm font-bold text-zinc-100">{tech.volatility ?? "—"}</span>
+                      </div>
+                    </div>
+                    )
+                    )}
+                  </div>
+                )}
+
+                {/* FUTURES DETAIL — sebelumnya hanya funding yang tampil */}
+                {hasFutDetail && fut && (
+                  <div>
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 font-bold mb-1.5">
+                      Futures Detail (Gate.io perp)
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-xs">
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Mark Price</span>
+                        <span className="text-sm font-bold text-zinc-100">{fut.markPrice != null ? fmtPrice(Number(fut.markPrice)) : "—"}</span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">LSR Taker / Akun</span>
+                        <span className="text-sm font-bold text-zinc-100">
+                          {fut.lsrTaker != null ? Number(fut.lsrTaker).toFixed(2) : "—"}
+                          <span className="text-zinc-600"> / </span>
+                          {fut.lsrAccount != null ? Number(fut.lsrAccount).toFixed(2) : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Liq LONG / SHORT</span>
+                        <span className="text-sm font-bold text-zinc-100">
+                          {fut.longLiqUsd != null ? `$${(Number(fut.longLiqUsd) / 1000).toFixed(0)}k` : "—"}
+                          <span className="text-zinc-600"> / </span>
+                          {fut.shortLiqUsd != null ? `$${(Number(fut.shortLiqUsd) / 1000).toFixed(0)}k` : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 col-span-2 sm:col-span-3">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Bias Reason</span>
+                        <span className="text-[11px] text-zinc-300">{fut.biasReason || "—"}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-xs">
                   <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
@@ -351,6 +642,61 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                         {keel.mtfState.recentSweep ? `${keel.mtfState.recentSweep.type} (${keel.mtfState.recentSweep.wickRejectionPercent}%)` : "belum ada"}
                       </span>
                     </div>
+                  </div>
+                )}
+
+                {/* MACRO REAL — FF mirror + VIX (sebelumnya selalu no-data) */}
+                {macroReal && (
+                  <div>
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 font-bold mb-1.5">
+                      Makro Real ({macroReal.source})
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-xs">
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">VIX</span>
+                        <span className={`text-sm font-bold ${macroReal.vix != null && macroReal.vix >= 30 ? "text-rose-400" : macroReal.vix != null && macroReal.vix >= 22 ? "text-amber-300" : "text-emerald-400"}`}>
+                          {macroReal.vix != null ? Number(macroReal.vix).toFixed(2) : "—"}
+                        </span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">Risk Index</span>
+                        <span className="text-sm font-bold text-amber-300">{macroReal.riskIndex}/100</span>
+                      </div>
+                      <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <span className="text-[10px] uppercase text-zinc-500 block font-semibold">HIGH upcoming</span>
+                        <span className="text-sm font-bold text-zinc-100">{macroReal.upcomingCount}</span>
+                      </div>
+                      {macroReal.upcoming.slice(0, 3).map((e, i) => (
+                        <div key={i} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 col-span-2 sm:col-span-3">
+                          <span className="text-[10px] uppercase text-zinc-500 block font-semibold">
+                            {e.title} • {new Date(e.dateUtc).toLocaleString("id-ID")}
+                          </span>
+                          <span className="text-[11px] text-zinc-300">
+                            forecast {e.forecast || "?"} vs prev {e.previous || "?"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ON-CHAIN + MACRO ECHO — sebelumnya panel buta konteks yang dikirimnya */}
+                {(result.onChainEcho || result.macroEcho) && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono text-[11px]">
+                    {result.onChainEcho && (
+                      <div className="px-2 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 flex flex-col gap-0.5">
+                        <span className="text-zinc-500 text-[10px] uppercase font-bold">On-chain dipakai LLM</span>
+                        <span className="text-zinc-200">{result.onChainEcho.smartMoneyBias || "—"} <span className="text-zinc-500">({result.onChainEcho.netflowStatus || "?"})</span></span>
+                        <span className="text-zinc-400">SOPR {result.onChainEcho.sopr ?? "—"} ({result.onChainEcho.soprStatus || "?"}) • conf {result.onChainEcho.onChainConfidence ?? "—"}%</span>
+                      </div>
+                    )}
+                    {result.macroEcho && (
+                      <div className="px-2 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 flex flex-col gap-0.5">
+                        <span className="text-zinc-500 text-[10px] uppercase font-bold">Makro dipakai LLM</span>
+                        <span className="text-zinc-200">{result.macroEcho.upcomingHighImpactCount ?? "—"} high-impact upcoming{result.macroEcho.nearestEventImpact ? ` • ${result.macroEcho.nearestEventImpact}` : ""}</span>
+                        <span className="text-zinc-400 whitespace-pre-wrap">{result.macroEcho.macroTradingAdvice || result.macroEcho.nearestEventImplication || "—"}</span>
+                      </div>
+                    )}
                   </div>
                 )}
 

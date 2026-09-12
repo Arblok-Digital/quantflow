@@ -300,8 +300,7 @@ export interface LedgerEntry {
   createdAt: number;
 }
 
-export function getLedgerEntries(opts: { limit: number; cursor?: number }): { entries: LedgerEntry[]; nextCursor: number | null } {
-  const _db = getDb();
+export function getLedgerEntries(opts: { limit: number; cursor?: number }): { entries: LedgerEntry[]; nextCursor: number | null } {  const _db = getDb();
   const limit = Math.min(100, Math.max(1, Math.floor(opts.limit || 50)));
   const cursor = opts.cursor && Number.isFinite(opts.cursor) ? Math.floor(opts.cursor) : null;
 
@@ -401,6 +400,56 @@ export interface LedgerStats {
     status: string;
   }>;
   equityCurve: Array<{ ts: number; equity: number }>;
+}
+
+// ------------------------------------------------------------------
+// Agent decisions (DB → FE kini tersambung via GET /api/agent-decisions)
+// ------------------------------------------------------------------
+export interface AgentDecisionRow {
+  id: string;
+  createdAt: number;
+  symbol: string;
+  action: string;
+  confidence: number;
+  modelId: string;
+  latencyMs: number;
+  prompt: string;
+  response: string;
+  sourceTags: string | null;
+}
+
+export function listAgentDecisions(opts: { limit: number; cursor?: number }): { decisions: AgentDecisionRow[]; nextCursor: number | null } {
+  const _db = getDb();
+  const limit = Math.min(100, Math.max(1, Math.floor(opts.limit || 50)));
+  const cursor = opts.cursor && Number.isFinite(opts.cursor) ? Math.floor(opts.cursor) : null;
+  let rows: any[];
+  if (cursor !== null && cursor > 0) {
+    rows = _db
+      .prepare(
+        "SELECT id, created_at as createdAt, symbol, action, confidence, model_id as modelId, latency_ms as latencyMs, prompt, response, source_tags as sourceTags FROM agent_decisions WHERE created_at < ? ORDER BY created_at DESC LIMIT ?"
+      )
+      .all(cursor, limit) as any[];
+  } else {
+    rows = _db
+      .prepare(
+        "SELECT id, created_at as createdAt, symbol, action, confidence, model_id as modelId, latency_ms as latencyMs, prompt, response, source_tags as sourceTags FROM agent_decisions ORDER BY created_at DESC LIMIT ?"
+      )
+      .all(limit) as any[];
+  }
+  const decisions: AgentDecisionRow[] = rows.map((r) => ({
+    id: String(r.id),
+    createdAt: Number(r.createdAt),
+    symbol: String(r.symbol),
+    action: String(r.action),
+    confidence: Number(r.confidence),
+    modelId: String(r.modelId),
+    latencyMs: Number(r.latencyMs),
+    prompt: String(r.prompt ?? ""),
+    response: String(r.response ?? ""),
+    sourceTags: r.sourceTags != null ? String(r.sourceTags) : null,
+  }));
+  const nextCursor = decisions.length === limit ? decisions[decisions.length - 1].createdAt : null;
+  return { decisions, nextCursor };
 }
 
 export function getLedgerStats(): LedgerStats {

@@ -24,13 +24,15 @@ export interface OrderExecutionParams {
 }
 
 export interface ExecutionResult {
-  status: "FILLED" | "REJECTED";
+  status: "FILLED" | "REJECTED" | "NEW";
   executedPrice: number;
   slippageBps: number;
   signature: string;
   payloadHash: string;
   executionLatencyMs: number;
   position?: Position;
+  /** Terisi saat server mengembalikan limit NEW (belum ada posisi). */
+  pendingOrder?: PendingOrderReceipt;
 }
 
 interface ServerOrderReceipt {
@@ -69,6 +71,18 @@ interface ServerPaperPosition {
   confidence?: number;
 }
 
+/** Limit NEW yang belum jadi posisi — diteruskan agar pipeline/FE bisa tampilkan pending. */
+export interface PendingOrderReceipt {
+  id: string;
+  symbol: string;
+  side: string;
+  type: string;
+  status: string;
+  amount: number;
+  limitPrice?: number;
+  leverage?: number;
+}
+
 /**
  * Broker Gateway Service
  * Executes orders through the server's real broker gateway (POST /api/broker/order).
@@ -104,9 +118,25 @@ export async function executeBrokerOrder(
   const response = await postJson("/api/broker/order", body);
 
   const order: ServerOrderReceipt = response?.order || {};
-  const status: "FILLED" | "REJECTED" =
-    order.status === "REJECTED" || response?.status === "REJECTED" ? "REJECTED" : "FILLED";
+  const rawStatus = String(order.status ?? response?.status ?? "FILLED").toUpperCase();
+  const status: "FILLED" | "REJECTED" | "NEW" =
+    rawStatus === "REJECTED" ? "REJECTED" : rawStatus === "NEW" || rawStatus === "PARTIALLY_FILLED" ? "NEW" : "FILLED";
   const position = response?.position ? mapServerPosition(response.position) : undefined;
+  // Limit NEW: server mengembalikan { order, position: null } — teruskan
+  // receipt agar pipeline/FE bisa tampilkan sebagai pending, bukan dibuang.
+  const pendingOrder: PendingOrderReceipt | undefined =
+    status === "NEW"
+      ? {
+          id: String(order.id ?? ""),
+          symbol: String((order as any).symbol ?? params.symbol),
+          side: String((order as any).side ?? (params.action === "BUY" ? "buy" : "sell")),
+          type: String((order as any).type ?? "limit"),
+          status: rawStatus,
+          amount: Number((order as any).amount ?? (order as any).qty ?? params.qty),
+          limitPrice: (order as any).limitPrice != null ? Number((order as any).limitPrice) : undefined,
+          leverage: (order as any).leverage != null ? Number((order as any).leverage) : undefined,
+        }
+      : undefined;
 
   return {
     status,
@@ -118,6 +148,7 @@ export async function executeBrokerOrder(
     // not a fabricated round-trip constant.
     executionLatencyMs: Number(order.executionLatencyMs ?? Math.max(0, Date.now() - startTime)),
     position,
+    pendingOrder,
   };
 }
 

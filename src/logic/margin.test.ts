@@ -53,3 +53,16 @@ describe("calculateEquity", () => {
     expect(calculateEquity(5000, 2500, -300)).toBe(7200);
   });
 });
+
+describe("Binance USDT-M liquidation invariants", () => {
+  it("liquidation consumes initial margin net of maintenance buffer before fees", () => {
+    const entry = 100;
+    const qty = 1;
+    const lev = 10;
+    const margin = entry * qty / lev;
+    const longGrossLoss = (entry - liquidationPrice(entry, lev, "LONG")) * qty;
+    const shortGrossLoss = (liquidationPrice(entry, lev, "SHORT") - entry) * qty;
+    expect(longGrossLoss).toBeCloseTo(margin - entry * qty * MAINTENANCE_MARGIN_RATE, 6);
+    expect(shortGrossLoss).toBeCloseTo(margin - entry * qty * MAINTENANCE_MARGIN_RATE, 6);
+  });
+});

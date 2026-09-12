@@ -224,15 +224,24 @@ function newId(prefix: string): string {
 }
 
 function r2(v: number): number {
-  return Math.round(v * 100) / 100;
+  return Math.round((v + Number.EPSILON) * 100) / 100;
 }
 function r4(v: number): number {
-  return Math.round(v * 10000) / 10000;
+  return Math.round((v + Number.EPSILON) * 10000) / 10000;
+}
+function r6(v: number): number {
+  return Math.round((v + Number.EPSILON) * 1000000) / 1000000;
+}
+
+function clampLeverage(leverage: number): number {
+  if (!Number.isFinite(leverage) || leverage <= 0) return 1;
+  return Math.min(leverage, MAX_LEVERAGE);
 }
 
 function liquidationPrice(entry: number, leverage: number, side: ReplaySide): number {
-  if (side === "LONG") return entry * (1 - 1 / leverage + MAINTENANCE_MARGIN_RATE);
-  return entry * (1 + 1 / leverage - MAINTENANCE_MARGIN_RATE);
+  const lev = clampLeverage(leverage);
+  if (side === "LONG") return r6(entry * (1 - 1 / lev + MAINTENANCE_MARGIN_RATE));
+  return r6(entry * (1 + 1 / lev - MAINTENANCE_MARGIN_RATE));
 }
 
 function freshSession(symbol: string, timeframe: string, candles: ReplayCandle[], initialCash: number): ReplaySession {
@@ -353,9 +362,16 @@ function closeReplayPosition(pos: ReplayPosition, exitPrice: number, reason: Rep
   session.lastAutoExitCandle = candleIndex;
   const grossPnl = pos.side === "LONG" ? (exitPrice - pos.entryPrice) * pos.qty : (pos.entryPrice - exitPrice) * pos.qty;
   const exitFee = r4(exitPrice * pos.qty * TAKER_FEE_RATE);
-  const netPnl = r2(grossPnl - exitFee - pos.feesPaidUSD);
+  let netPnl = r2(grossPnl - exitFee - pos.feesPaidUSD);
+  let cashRelease = pos.marginUSD + grossPnl - exitFee;
+  if (netPnl <= -pos.marginUSD) {
+    pos.exitPrice = pos.liquidationPrice;
+    pos.exitReason = "LIQUIDATED";
+    netPnl = -pos.marginUSD;
+    cashRelease = pos.feesPaidUSD;
+  }
   pos.realizedPnlUSD = netPnl;
-  session.cash = r2(session.cash + pos.marginUSD + grossPnl - exitFee);
+  session.cash = r2(session.cash + cashRelease);
   session.realizedPnl = r2(session.realizedPnl + netPnl);
   const closeCandle = session.candles[candleIndex];
   session.trades.push({
@@ -364,8 +380,8 @@ function closeReplayPosition(pos: ReplayPosition, exitPrice: number, reason: Rep
     side: pos.side,
     qty: pos.qty,
     entryPrice: pos.entryPrice,
-    exitPrice,
-    exitReason: reason,
+    exitPrice: pos.exitPrice,
+    exitReason: pos.exitReason,
     openedAt: pos.openedAt,
     openedCandleIndex: pos.openedCandleIndex,
     openedCandleTs: session.candles[pos.openedCandleIndex]?.timestamp,
@@ -378,13 +394,13 @@ function closeReplayPosition(pos: ReplayPosition, exitPrice: number, reason: Rep
     leverage: pos.leverage,
     decisionId: pos.decisionId,
   });
-  pushEvent(reason === "LIQUIDATED" ? "LIQUIDATED" : "POSITION_CLOSED", {
+  pushEvent(pos.exitReason === "LIQUIDATED" ? "LIQUIDATED" : "POSITION_CLOSED", {
     positionId: pos.id,
     symbol: pos.symbol,
     side: pos.side,
     qty: pos.qty,
-    exitPrice,
-    exitReason: reason,
+    exitPrice: pos.exitPrice,
+    exitReason: pos.exitReason,
     realizedPnlUSD: netPnl,
     feesPaidUSD: r2(pos.feesPaidUSD + exitFee),
     candleIndex,
@@ -455,20 +471,20 @@ function processCandle(candle: ReplayCandle): void {
   const open = session.positions.filter((p) => p.status === "OPEN");
   for (const pos of open) {
     if (pos.side === "LONG") {
-      if (pos.stopLoss > 0 && candle.low <= pos.stopLoss) {
+      if (candle.low <= pos.liquidationPrice) {
+        closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
+      } else if (pos.stopLoss > 0 && candle.low <= pos.stopLoss) {
         closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx);
       } else if (pos.takeProfit > 0 && candle.high >= pos.takeProfit) {
         closeReplayPosition(pos, pos.takeProfit, "TAKE_PROFIT", idx);
-      } else if (candle.low <= pos.liquidationPrice) {
-        closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
       }
     } else {
-      if (pos.stopLoss > 0 && candle.high >= pos.stopLoss) {
+      if (candle.high >= pos.liquidationPrice) {
+        closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
+      } else if (pos.stopLoss > 0 && candle.high >= pos.stopLoss) {
         closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx);
       } else if (pos.takeProfit > 0 && candle.low <= pos.takeProfit) {
         closeReplayPosition(pos, pos.takeProfit, "TAKE_PROFIT", idx);
-      } else if (candle.high >= pos.liquidationPrice) {
-        closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
       }
     }
   }

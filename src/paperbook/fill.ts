@@ -8,7 +8,9 @@ import {
   getPaperAccount,
   dbSavePosition,
   dbSaveOrder,
+  dbSaveOrderTolerant,
   persistSnapshot,
+  persistSnapshotTolerant,
   normalizeSymbol,
 } from "./store";
 import {
@@ -300,7 +302,10 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
   });
 
   if (orderType !== "market") {
-    // Limit order: reserve margin, store pending; filled later via bracket monitor
+    // Limit order: reserve margin, store pending; filled later via bracket monitor.
+    // Persist NEW ke SQLite + snapshot + audit agar survive restart dan
+    // terlihat di FE (orders NEW, ledger kind=order). Margin sudah dipotong
+    // di memori SEBELUM persist agar cash konsisten dengan snapshot.
     const estimatedNotional = limitPrice! * qty;
     const estimatedMargin = estimatedNotional / leverage;
     if (estimatedMargin > state.cash) {
@@ -308,6 +313,26 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     }
     state.cash = roundTo(state.cash - estimatedMargin, 2);
     state.orders.push(initialOrder);
+    dbSaveOrderTolerant(initialOrder);
+    persistSnapshotTolerant();
+    try {
+      appendAudit("order", {
+        id: initialOrder.id,
+        symbol,
+        side: direction,
+        amount: qty,
+        status: "NEW",
+        orderType: "limit",
+        limitPrice,
+        leverage,
+        stopLoss,
+        takeProfit,
+        reason: "PAPER_LIMIT_NEW",
+        timestamp: now,
+      });
+    } catch (err) {
+      console.error("[audit] GAGAL tulis audit limit NEW: ", (err as Error)?.message);
+    }
     return { position: null as any, order: initialOrder, account: getPaperAccount() };
   }
   return handleMarketOpenFill(
@@ -409,10 +434,43 @@ async function handleMarketOpenFill(
     filledQty,
     remainingQty: unfilledQty,
   };
-  state.positions.push(position);
-  state.orders.push(order);
-  state.cash = roundTo(state.cash - marginUSD - feeUSD, 2);
+  // P1: atomic — position + order + snapshot + audit dalam satu transaksi
+  // Snapshot state for in-memory rollback if DB transaction fails
+  const cashBefore = state.cash;
+  const positionsLenBefore = state.positions.length;
+  const ordersLenBefore = state.orders.length;
 
+  try {
+    beginTx();
+    // Mutate in-memory state INSIDE the transaction boundary
+    state.positions.push(position);
+    state.orders.push(order);
+    state.cash = roundTo(state.cash - marginUSD - feeUSD, 2);
+
+    dbSavePosition(position);
+    dbSaveOrder(order);
+    persistSnapshot();
+    appendAudit("order", {
+      id: order.id,
+      symbol: order.symbol,
+      side: order.side,
+      amount: order.amount,
+      fillPrice: order.fillPrice,
+      status: order.status,
+      reason: "PAPER_OPEN",
+      timestamp: Date.now(),
+    });
+    commitTx();
+  } catch (err) {
+    // In-memory rollback
+    state.cash = cashBefore;
+    state.positions.length = positionsLenBefore;
+    state.orders.length = ordersLenBefore;
+    rollbackTx();
+    throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis posisi/order ke DB: ${(err as Error).message}`);
+  }
+
+  // Events emitted AFTER successful commit (notification only)
   if (isPartial) {
     appendEvent("ORDER_PARTIAL", {
       orderId: initialOrder.id,
@@ -443,28 +501,6 @@ async function handleMarketOpenFill(
     latencyMs: filledAt - now,
     method: fill.method,
   });
-
-  // P1: atomic — position + order + snapshot + audit dalam satu transaksi
-  try {
-    beginTx();
-    dbSavePosition(position);
-    dbSaveOrder(order);
-    persistSnapshot();
-    appendAudit("order", {
-      id: order.id,
-      symbol: order.symbol,
-      side: order.side,
-      amount: order.amount,
-      fillPrice: order.fillPrice,
-      status: order.status,
-      reason: "PAPER_OPEN",
-      timestamp: Date.now(),
-    });
-    commitTx();
-  } catch (err) {
-    rollbackTx();
-    throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis posisi/order ke DB: ${(err as Error).message}`);
-  }
 
   return { position, order, account: getPaperAccount() };
 }
@@ -536,6 +572,11 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
   });
   const signed = signPayload(payload);
 
+  const closeCashDelta = grossPnl - fill.feeUSD;
+  const cashRelease = effectiveExitReason === "LIQUIDATED" && realizedPnl === -pos.marginUSD
+    ? pos.marginUSD + realizedPnl + pos.feesPaidUSD
+    : pos.marginUSD + closeCashDelta;
+
   const result: ClosePaperPositionResult = {
     position: { ...pos },
     order: {
@@ -560,14 +601,14 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
       payloadHash: signed.payloadHash,
     },
     realizedPnlUSD: roundTo(realizedPnl, 2),
-    cashAfter: roundTo(state.cash + pos.marginUSD + realizedPnl, 2),
+    cashAfter: roundTo(state.cash + cashRelease, 2),
     exitFillPrice: roundTo(effectiveExitPrice, 6),
     exitSlippageBps: fill.slippageBps,
     exitFeeUSD: roundTo(fill.feeUSD, 4),
     exitReason: effectiveExitReason,
   };
 
-  state.cash += pos.marginUSD + realizedPnl;
+  state.cash += cashRelease;
   state.cash = roundTo(state.cash, 2);
   state.realizedPnl += realizedPnl;
   state.realizedPnl = roundTo(state.realizedPnl, 2);

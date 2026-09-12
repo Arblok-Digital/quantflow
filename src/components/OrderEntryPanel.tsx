@@ -107,7 +107,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
       if (cancelPendingOrder) {
         await cancelPendingOrder(lastPendingOrder.id);
       } else {
-        await authFetch("/api/broker/order/cancel", {
+        await authFetch("/api/broker/cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ orderId: lastPendingOrder.id }),
@@ -284,7 +284,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
               onClick={handleCancelLastPending}
               disabled={cancellingPending}
               className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-200 hover:text-white border border-zinc-700 hover:border-rose-500 font-mono text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Batalkan limit order via POST /api/broker/order/cancel"
+              title="Batalkan limit order via POST /api/broker/cancel"
             >
               {cancellingPending ? "Cancelling…" : "Cancel"}
             </button>

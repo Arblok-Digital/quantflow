@@ -6,7 +6,7 @@ import { appendAudit, saveAgentDecisionDb, listReplayRunsDb } from "@/db";
 import { getPaperAccount } from "@/paperBook";
 import { runKeelQuantEngine, evaluateKeelRisk, type FuturesAnalysis } from "@/src/logic/keelAdapter";
 import { analyzeMTFLiquidity } from "@/src/logic/liquidityHunt";
-import { fetchMarketData, fetchRecentTrades, fetchFuturesMetrics, type RecentTrade, type FuturesMetrics } from "@/src/data/marketFetcher";
+import { fetchMarketData, fetchRecentTrades, fetchFuturesMetrics, fetchMacroReal, deriveMacroRiskIndex, type RecentTrade, type FuturesMetrics } from "@/src/data/marketFetcher";
 import { calculateRSI, calculateEMA, calculateMACD } from "@/src/logic/indicators";
 import type { Candle, OrderBook, MTFLiquidityAnalysis, OnChainMetrics, MacroSummary } from "@/src/types";
 
@@ -38,6 +38,9 @@ export function registerAiRoutes(app: Express): void {
       portfolioEquity,
       riskParams,
     } = req.body;
+    const reqOrderBook = (req.body as any)?.orderBook;
+    const reqRecentTrades = (req.body as any)?.recentTrades;
+    const reqFutures = (req.body as any)?.futures;
 
     const client = getGeminiClient();
 
@@ -141,9 +144,9 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
             .optional(),
         });
 
-        const candidateModels = ["gemini-3-flash-preview", "gemini-3.5-flash-lite"];
+      const candidateModels = ["gemini-3.8-flash", "gemini-3.7-flash"];
         let responseText: string = "{}";
-        let usedModel = "gemini-3-flash-preview";
+        let usedModel = "gemini-3.8-flash";
         let lastErr: any = null;
         for (const model of candidateModels) {
           try {
@@ -164,17 +167,27 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
           } catch (modelErr: any) {
             lastErr = modelErr;
             const msg = String(modelErr?.message || "");
+            const status = (modelErr as any)?.status;
             if (/INVALID_MODEL|not found|does not exist|404/i.test(msg)) {
               console.warn(`Gemini model ${model} tidak valid, coba fallback...`);
               continue;
             }
-            throw modelErr;
+            // Sama seperti advisor: jangan throw ke Express — 503/429/overload
+            // harus jadi 503 JSON + fallback keel, bukan crash proses.
+            if (status === 503 || status === 429 || /503|429|UNAVAILABLE|overloaded|high demand|timeout|fetch failed|ECONN|ETIMEDOUT/i.test(msg)) {
+              console.warn(`Gemini decision model ${model} sibuk/transien (${status ?? msg.slice(0, 120)}), coba model berikutnya...`);
+              continue;
+            }
+            console.warn(`Gemini decision model ${model} error, fallback ke keel: ${msg.slice(0, 160)}`);
+            break;
           }
         }
         if (!responseText || /^\s*\{?\s*\}$/.test(responseText.trim())) {
           responseText = "{}";
           if (lastErr) {
-            throw lastErr;
+            // Semua model gagal (termasuk transien): jangan throw — biarkan
+            // jatuh ke fallback keel di bawah (503 JSON informatif).
+            console.warn(`Gemini decision semua model gagal: ${String(lastErr?.message || lastErr).slice(0, 160)}`);
           }
         }
 
@@ -348,6 +361,11 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         currentPrice: Number(currentPrice) || 64250,
         technicals,
         mtfLiquidity,
+        // Flow/futures diteruskan bila FE mengirimnya (mode AI full-context).
+        // Absen → keel fail-closed lokal (HOLD jujur), bukan fabricate.
+        orderBook: reqOrderBook,
+        recentTrades: Array.isArray(reqRecentTrades) ? reqRecentTrades : undefined,
+        futures: reqFutures,
       });
       const keelDecision = keelResult.decision;
 
@@ -485,6 +503,8 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     currentPrice?: number;
     onChainMetrics?: OnChainMetrics | null;
     macroCalendar?: MacroSummary | null;
+    technicals?: unknown;
+    mtfLiquidity?: MTFLiquidityAnalysis | null;
   }
 
   function buildBacktestContextFor(symbol: string): string {
@@ -534,6 +554,40 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     };
   }
 
+  // Multi-TF technicals: derivasi RSI/EMA/MACD per timeframe dari candle real.
+  // candleMap: { "15m": Candle[], "1h": Candle[], "4h": Candle[] } — hanya TF
+  // yang punya >= 26 candle yang dihitung (MACD butuh 26); sisanya null jujur.
+  function deriveMultiTfTechnicals(candleMap: Record<string, Candle[] | undefined>): Record<
+    string,
+    { rsi: number | null; ema20: number | null; ema50: number | null; macdHistogram: number | null; trend: string | null } | null
+  > {
+    const out: Record<string, any> = {};
+    for (const tf of Object.keys(candleMap)) {
+      const candles = candleMap[tf];
+      if (!candles || candles.length < 26) {
+        out[tf] = null;
+        continue;
+      }
+      const closes = candles.map((c) => c.close);
+      const ema20 = calculateEMA(closes, 20);
+      const ema50 = calculateEMA(closes, 50);
+      const macd = calculateMACD(closes);
+      out[tf] = {
+        rsi: calculateRSI(closes, 14),
+        ema20,
+        ema50,
+        macdHistogram: macd.histogram,
+        trend:
+          ema20 > ema50 && macd.histogram >= 0
+            ? "UP"
+            : ema20 < ema50 && macd.histogram < 0
+              ? "DOWN"
+              : "MIXED",
+      };
+    }
+    return out;
+  }
+
   app.post("/api/ai-advisor", requireAuth, async (req, res) => {
     const startTime = Date.now();
     const body: AiAdvisorBody = req.body || {};
@@ -541,9 +595,17 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     const price = Number(body.currentPrice) || 64250;
 
     let market: any = null;
+    let marketSource = "NONE";
     try {
       const m = await fetchMarketData(sym);
-      if (m && m.success !== false) market = m;
+      if (m && m.success !== false) {
+        market = m;
+        marketSource = String((m as any).source || "LIVE");
+      } else if (m) {
+        // success:false = synthetic fallback — jangan dipakai sebagai harga real.
+        console.warn(`[ai-advisor] market fallback synthetic untuk ${sym}; pakai harga client + tandai.`);
+        marketSource = "SYNTHETIC_IGNORED";
+      }
     } catch (e: any) {
       console.warn(`[ai-advisor] market fetch failed: ${e?.message}`);
     }
@@ -553,13 +615,39 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     const candles4h: Candle[] = Array.isArray(market?.candles4h) ? market.candles4h : [];
     const livePrice = market?.currentPrice ? Number(market.currentPrice) : price;
 
+    // Status fetch per sumber — diteruskan ke LLM (wajib konfirmasi di UI)
+    // dan ke FE (banner + echo). LLM menerima daftar eksplisit mana yang OK
+    // dan mana yang GAGAL agar tidak mengarang dari data yang tidak ada.
+    const dataHealth: Array<{ source: string; ok: boolean; detail: string }> = [];
+    const pushHealth = (source: string, ok: boolean, detail: string) => {
+      dataHealth.push({ source, ok, detail });
+    };
+    pushHealth(
+      "market",
+      market != null,
+      market != null
+        ? `${marketSource} candles15m=${candles15m.length} candles4h=${candles4h.length} depth=${orderBook ? `${orderBook.bids?.length ?? 0}x${orderBook.asks?.length ?? 0}` : "null"}`
+        : `GAGAL (${marketSource}) — harga pakai kiriman client $${price}`
+    );
+
     let recentTrades: RecentTrade[] = [];
+    let recentTradesSource = "NONE";
     try {
       const tr = await fetchRecentTrades(sym, 60);
-      if (tr.success) recentTrades = tr.trades;
+      if (tr.success) {
+        recentTrades = tr.trades;
+        recentTradesSource = tr.source;
+      }
     } catch (e: any) {
       console.warn(`[ai-advisor] recent trades fetch failed: ${e?.message}`);
     }
+    pushHealth(
+      "orderflow",
+      recentTrades.length > 0,
+      recentTrades.length > 0
+        ? `${recentTradesSource} ${recentTrades.length} prints`
+        : "GAGAL — flow NEUTRAL, keel fail-closed (HOLD jujur)"
+    );
 
     let futures: FuturesMetrics = { success: false, source: "NONE" };
     try {
@@ -567,12 +655,117 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     } catch (e: any) {
       console.warn(`[ai-advisor] futures metrics fetch failed: ${e?.message}`);
     }
+    pushHealth(
+      "futures",
+      futures.success === true,
+      futures.success === true
+        ? `${futures.source} funding=${futures.fundingBps ?? "?"}bps OI=$${futures.openInterestUsd != null ? (Number(futures.openInterestUsd) / 1e9).toFixed(2) + "B" : "?"}`
+        : "GAGAL — bias futures NEUTRAL"
+    );
+
+    // Macro real gratisan (server-side): FF mirror kalender + Stooq VIX.
+    // Paralel dengan futures agar tidak menambah latency serial.
+    let macroReal: Awaited<ReturnType<typeof fetchMacroReal>> | null = null;
+    try {
+      macroReal = await fetchMacroReal();
+    } catch (e: any) {
+      console.warn(`[ai-advisor] macro real fetch failed: ${e?.message}`);
+    }
+    const macroRealOk = !!macroReal?.ok;
+    const macroRealRisk = macroRealOk && macroReal ? deriveMacroRiskIndex(macroReal) : 0;
+    const macroRealNext = macroRealOk && macroReal ? macroReal.highImpactUpcoming[0] ?? null : null;
+    pushHealth(
+      "macro_real",
+      macroRealOk,
+      macroRealOk && macroReal
+        ? `${macroReal.source} upcoming=${macroReal.highImpactUpcoming.length} vix=${macroReal.vix ?? "?"} risk=${macroRealRisk}`
+        : "GAGAL — kalender+VIX tak tersedia, LLM pakai body client saja"
+    );
+
+    // Logging diagnostik: sumber data per pilar yang masuk ke LLM.
+    console.log(
+      `[ai-advisor-diag] symbol=${sym} market=${marketSource} ` +
+      `candles15m=${candles15m.length} candles4h=${candles4h.length} ` +
+      `orderBook=${orderBook ? `${orderBook.bids?.length ?? 0}x${orderBook.asks?.length ?? 0}` : "null"} ` +
+      `recentTrades=${recentTrades.length}(${recentTradesSource}) ` +
+      `futures=${futures.success ? futures.source : "NONE"} ` +
+      `macroReal=${macroRealOk ? `${macroReal?.source} risk=${macroRealRisk}` : "NONE"} ` +
+      `hasClientTechnicals=${!!(req.body && (req.body as any).technicals)} ` +
+      `hasClientMtf=${!!(req.body && (req.body as any).mtfLiquidity)} ` +
+      `hasOnChain=${!!body.onChainMetrics} hasMacro=${!!body.macroCalendar} ` +
+      `gemini=${getGeminiClient() ? "on" : "off"}`
+    );
+
+    // Multi-TF klines server-side (1h + 4h + 15m yang sudah ada) untuk teknikal
+    // per-TF real. Paralel; gagal per-TF -> null jujur (bukan sintetis).
+    let candles1h: Candle[] = [];
+    try {
+      const { fetchOHLCVWithFallback } = await import("@/src/data/marketFetcher");
+      const [h1, h4] = await Promise.all([
+        fetchOHLCVWithFallback(sym, "1h", 60),
+        fetchOHLCVWithFallback(sym, "4h", 60),
+      ]);
+      if (Array.isArray(h1) && h1.length > 0) candles1h = h1;
+    } catch (e: any) {
+      console.warn(`[ai-advisor] 1h klines gagal: ${e?.message}`);
+    }
+    pushHealth(
+      "klines_1h",
+      candles1h.length >= 26,
+      candles1h.length >= 26 ? `${candles1h.length} candle` : "GAGAL — teknikal 1h kosong"
+    );
+    pushHealth(
+      "klines_4h",
+      candles4h.length >= 26,
+      candles4h.length >= 26 ? `${candles4h.length} candle` : "GAGAL — teknikal 4h kosong"
+    );
+
+    const multiTf = deriveMultiTfTechnicals({ "15m": candles15m, "1h": candles1h, "4h": candles4h });
+    const multiTfLabel: Record<string, string> = { "15m": "scalping/eksekusi", "1h": "intraday/konfirmasi", "4h": "swing/arah utama" };
+    pushHealth(
+      "technicals_mtf",
+      Object.values(multiTf).some((t) => t != null),
+      Object.entries(multiTf)
+        .map(([tf, t]) => (t ? `${tf}:RSI ${Number(t.rsi).toFixed(1)} ${t.trend}` : `${tf}:KOSONG`))
+        .join(" | ")
+    );
 
     let technicals = (req.body && req.body.technicals) || (candles15m.length > 0 ? deriveTechnicals(candles15m, orderBook) : undefined);
+    pushHealth(
+      "technicals",
+      !!technicals,
+      technicals ? "RSI/EMA/MACD/imbalance tersedia" : "GAGAL — tidak ada candle/orderbook untuk derivasi"
+    );
     let mtfLiquidity = (req.body && req.body.mtfLiquidity) || undefined;
     if (!mtfLiquidity && candles15m.length > 0 && candles4h.length > 0) {
       mtfLiquidity = analyzeMTFLiquidity(candles15m, candles4h, livePrice, "SPOT", orderBook || { bids: [], asks: [], spread: 0 });
     }
+    pushHealth(
+      "mtf",
+      !!mtfLiquidity,
+      mtfLiquidity ? `state=${(mtfLiquidity as any).activeState ?? "?"}` : "GAGAL — struktur likuiditas tak tersedia"
+    );
+    pushHealth(
+      "onchain",
+      !!body.onChainMetrics,
+      body.onChainMetrics
+        ? `client-sent${(body.onChainMetrics as any)?.realData ? " + REAL anchor blockchain.com" : " (simulasi murni)"}`
+        : "GAGAL/tidak dikirim — bobot on-chain harus diturunkan"
+    );
+    pushHealth(
+      "macro",
+      !!body.macroCalendar,
+      body.macroCalendar
+        ? Number((body.macroCalendar as any).macroRiskIndex) > 0
+          ? "client-sent (ada event/risiko)"
+          : "client-sent tapi no-data/fail-closed"
+        : "GAGAL/tidak dikirim — jangan anggap pasar aman"
+    );
+    pushHealth(
+      "backtest",
+      true,
+      "DB replay_runs (bisa kosong — LLM wajib sebut bila tidak ada run)"
+    );
 
     let keelDecision: any = null;
     let rawSignal: any = null;
@@ -596,6 +789,77 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     const mtf: MTFLiquidityAnalysis | undefined = mtfLiquidity;
     const liquidityDepthUsd =
       rawSignal && typeof rawSignal.liquidityDepthUsd === "number" ? rawSignal.liquidityDepthUsd : null;
+
+    // Echo teknikal server-side (sebelumnya dihitung tapi TIDAK pernah masuk
+    // prompt LLM maupun respons FE — LLM buta RSI/EMA/MACD/imbalance).
+    const technicalsEcho = technicals
+      ? {
+          rsi: Number((technicals as any).rsi ?? NaN),
+          ema20: Number((technicals as any).ema20 ?? NaN),
+          ema50: Number((technicals as any).ema50 ?? NaN),
+          macdHistogram: Number((technicals as any)?.macd?.histogram ?? NaN),
+          orderBookImbalance: Number((technicals as any).orderBookImbalance ?? NaN),
+          volatility: String((technicals as any).volatility ?? "UNKNOWN"),
+        }
+      : null;
+
+    // Detail futures penuh (sebelumnya prompt hanya funding+bias — OI, LSR,
+    // liq magnet, volume, biasReason hilang dari pertimbangan LLM).
+    const futuresDetail = fa
+      ? {
+          fundingBps: fa.fundingBps ?? null,
+          markPrice: fa.markPrice ?? null,
+          openInterestUsd: fa.openInterestUsd ?? null,
+          lsrTaker: fa.lsrTaker ?? null,
+          lsrAccount: fa.lsrAccount ?? null,
+          longLiqUsd: fa.longLiqUsd ?? null,
+          shortLiqUsd: fa.shortLiqUsd ?? null,
+          volume24hUsd: fa.volume24hUsd ?? null,
+          biasReason: fa.biasReason ?? null,
+          source: fa.source ?? null,
+        }
+      : null;
+
+    // Macro real (FF mirror + VIX) untuk LLM + echo UI. macroEcho body client
+    // tetap dipertahankan; macroReal jadi sumber utama bila ok.
+    const macroRealEcho = macroRealOk && macroReal
+      ? {
+          source: macroReal.source,
+          vix: macroReal.vix,
+          riskIndex: macroRealRisk,
+          upcomingCount: macroReal.highImpactUpcoming.length,
+          upcoming: macroReal.highImpactUpcoming.slice(0, 4).map((e) => ({
+            title: e.title,
+            dateUtc: e.dateUtc,
+            forecast: e.forecast,
+            previous: e.previous,
+          })),
+          fetchedAt: macroReal.fetchedAt,
+        }
+      : null;
+
+    // Echo on-chain/macro dari body FE (LLM sebelumnya hanya dapat 3 field
+    // on-chain + 3 field makro — sisanya tak terlihat).
+    const oc: any = body.onChainMetrics;
+    const mc: any = body.macroCalendar;
+    const onChainEcho = oc
+      ? {
+          netflowStatus: oc.netflowStatus ?? null,
+          smartMoneyBias: oc.smartMoneyBias ?? null,
+          onChainConfidence: oc.onChainConfidence ?? null,
+          sopr: oc.sopr ?? null,
+          soprStatus: oc.soprStatus ?? null,
+          activeAddressesGrowth24h: oc.activeAddressesGrowth24h ?? null,
+        }
+      : null;
+    const macroEcho = mc
+      ? {
+          upcomingHighImpactCount: mc.upcomingHighImpactCount ?? null,
+          macroTradingAdvice: mc.macroTradingAdvice ?? null,
+          nearestEventImpact: mc.nearestEvent?.impact ?? null,
+          nearestEventImplication: mc.nearestEvent?.implicationNotes ?? null,
+        }
+      : null;
 
     const keelSummary = {
       action: String(keelDecision?.action ?? "HOLD"),
@@ -624,13 +888,22 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     const client = getGeminiClient();
 
     if (client && keelDecision) {
-      const oc = body.onChainMetrics;
-      const mc = body.macroCalendar;
       const backtestCtx = buildBacktestContextFor(sym);
+      const failedSources = dataHealth.filter((d) => !d.ok).map((d) => d.source);
+      const healthLines = dataHealth
+        .map((d) => `- ${d.source}: ${d.ok ? "OK" : "GAGAL"} — ${d.detail}`)
+        .join("\n");
       const prompt = `Anda adalah STRATEGIST & ANALYST QUANT SENIOR dari institusi elit (seperti Jane Street atau BlackRock Aladdin).
 Peran Anda: memberikan INTELLIGENCE & REKOMENDASI STRATEGIS berdasarkan sintesis data mikro (Keel/MTF), on-chain, makroekonomi, DAN hasil backtest historis.
 
 Aset: ${sym} | Harga saat ini: $${livePrice}
+
+[STATUS DATA (WAJIB JADIKAN KONFIRMASI DI OUTPUT — JANGAN DIAM-DIAM ABAIKAN YANG GAGAL)]:
+${healthLines}
+ATURAN KONFIRMASI WAJIB:
+- Setiap sumber berstatus GAGAL di atas HARUS Anda sebutkan eksplisit di "insight" (contoh: "orderflow gagal terfetch → flow NEUTRAL, bukan sinyal") dan di "dataGaps" pada JSON.
+- DILARANG mengarang angka dari sumber yang GAGAL. Kalau futures GAGAL, tulis funding/OI/LSR sebagai tidak tersedia, jangan substitusi.
+- Kalau SEMUA sumber mikro GAGAL, suggestedBias HARUS "NEUTRAL" + caveat menyebut degradasi data.
 
 [DATA MIKRO & FLOW (KEEL ENGINE)]:
 - Aksi: ${keelSummary.action} | Confidence: ${keelSummary.confidence}%
@@ -638,6 +911,18 @@ Aset: ${sym} | Harga saat ini: $${livePrice}
 - Bias futures: ${keelSummary.futuresBias} | Funding: ${keelSummary.fundingBps != null ? keelSummary.fundingBps.toFixed(2) + " bps" : "N/A"}
 - Confluence: ${keelSummary.confluenceScore ?? "N/A"}% | Liquidity: ${keelSummary.liquidityDepthUsd != null ? "$" + (keelSummary.liquidityDepthUsd / 1000).toFixed(0) + "k" : "N/A"}
 - Reasoning: ${keelSummary.reasoning}
+- Futures detail: mark ${futuresDetail?.markPrice != null ? "$" + Number(futuresDetail.markPrice).toLocaleString() : "N/A"} | LSR taker ${futuresDetail?.lsrTaker ?? "N/A"} / akun ${futuresDetail?.lsrAccount ?? "N/A"} | liq LONG $${futuresDetail?.longLiqUsd != null ? (Number(futuresDetail.longLiqUsd) / 1000).toFixed(0) + "k" : "N/A"} / SHORT $${futuresDetail?.shortLiqUsd != null ? (Number(futuresDetail.shortLiqUsd) / 1000).toFixed(0) + "k" : "N/A"} | vol24h $${futuresDetail?.volume24hUsd != null ? (Number(futuresDetail.volume24hUsd) / 1e6).toFixed(1) + "M" : "N/A"} | biasReason: ${futuresDetail?.biasReason || "N/A"} (sumber: ${futuresDetail?.source || "N/A"})
+
+[TEKNIKAL MULTI-TF (RSI/EMA/MACD PER TIMEFRAME — WAJIB SEBUT TF TIAP ANALISIS)]:
+${(["15m", "1h", "4h"] as const)
+  .map((tf) => {
+    const t = multiTf[tf];
+    const role = multiTfLabel[tf];
+    if (!t) return `- [${tf}] (${role}): KOSONG/GAGAL fetch — jangan analisis TF ini, sebut eksplisit di insight.`;
+    return `- [${tf}] (${role}): RSI ${Number(t.rsi).toFixed(1)} | EMA20 ${Number(t.ema20).toLocaleString()} vs EMA50 ${Number(t.ema50).toLocaleString()} | MACD hist ${Number(t.macdHistogram) >= 0 ? "+" : ""}${Number(t.macdHistogram).toFixed(2)} | Tren TF: ${t.trend}`;
+  })
+  .join("\n")}
+- Konfirmasi antar-TF: sebutkan apakah 15m/1h/4h SEARAH atau DIVERGEN, dan TF mana yang dominan untuk keputusan (4h = arah, 1h = konfirmasi, 15m = timing entry).
 
 [MTF & LIQUIDITY STRUCTURE]:
 - State: ${keelSummary.mtfState?.activeState || "N/A"}
@@ -646,14 +931,22 @@ Aset: ${sym} | Harga saat ini: $${livePrice}
 - Sweep: ${keelSummary.mtfState?.recentSweep ? keelSummary.mtfState.recentSweep.type + " (" + keelSummary.mtfState.recentSweep.wickRejectionPercent + "%)" : "None"}
 
 [ON-CHAIN METRICS]:
-- Netflow: ${oc?.exchangeNetflow24hUSD != null ? oc.exchangeNetflow24hUSD : "N/A"}
+- Netflow: ${oc?.exchangeNetflow24hUSD != null ? oc.exchangeNetflow24hUSD : "N/A"} (${onChainEcho?.netflowStatus || "N/A"})
+- Smart money: ${onChainEcho?.smartMoneyBias || "N/A"} (confidence ${onChainEcho?.onChainConfidence ?? "N/A"}%)
 - MVRV Z-score: ${oc?.mvrvZScore ?? "N/A"} (${oc?.mvrvTerritory || "N/A"})
+- SOPR: ${onChainEcho?.sopr ?? "N/A"} (${onChainEcho?.soprStatus || "N/A"})
+- Active addr growth 24h: ${onChainEcho?.activeAddressesGrowth24h ?? "N/A"}%
 - Whale Move: ${oc?.whaleAlerts?.[0] ? oc.whaleAlerts[0].type + " $" + (oc.whaleAlerts[0].usdValue / 1e6).toFixed(1) + "M" : "None"}
+${oc?.realData ? `- REAL anchor blockchain.com: block ${oc.realData.blockHeight}, tx24h ${oc.realData.txCount24h}, mempool ${oc.realData.mempoolSizeMB}MB, hashrate ${oc.realData.hashrateEH}EH (fetched ${new Date(oc.realData.fetchedAt).toISOString()})` : "- Tanpa anchor real blockchain.com (simulasi murni) — turunkan bobot on-chain dalam sintesis."}
 
 [MACRO CONTEXT]:
 - Fed Stance: ${mc?.fedPolicyStance || "N/A"}
-- Risk Index: ${mc?.macroRiskIndex ?? "N/A"}/100
-- Nearest Event: ${mc?.nearestEvent ? mc.nearestEvent.name + " (" + mc.nearestEvent.relativeTime + ")" : "None"}
+- Risk Index (client): ${mc?.macroRiskIndex ?? "N/A"}/100 (0 = mode no-data/fail-closed, BUKAN pasar aman)
+${macroRealEcho ? `- REAL gratisan (${macroRealEcho.source}): VIX ${macroRealEcho.vix ?? "?"} | risk ${macroRealEcho.riskIndex}/100 | high-impact upcoming ${macroRealEcho.upcomingCount}` : "- Macro real GAGAL terfetch — pakai body client saja, turunkan bobot makro."}
+${macroRealEcho?.upcoming?.map((e) => `  • ${e.title} @ ${e.dateUtc} (forecast ${e.forecast || "?"} vs prev ${e.previous || "?"})`).join("\n") || ""}
+- High-impact upcoming (client): ${macroEcho?.upcomingHighImpactCount ?? "N/A"} | Nearest Event: ${mc?.nearestEvent ? mc.nearestEvent.name + " (" + mc.nearestEvent.relativeTime + ", impact " + (macroEcho?.nearestEventImpact || "?") + ")" : "None (tidak ada katalis terjadwal)"}
+- Implikasi event: ${macroEcho?.nearestEventImplication || "N/A"}
+- Panduan makro: ${macroEcho?.macroTradingAdvice || "N/A"}
 
 [BACKTEST CONTEXT (HASIL REPLAY HISTORIS — kalibrasi keyakinan)]:
 ${backtestCtx}
@@ -667,11 +960,12 @@ TUGAS ANDA:
 
 Jawab HANYA JSON valid tanpa markdown:
 {
-  "insight": "analisis tajam ala Jane Street",
+  "insight": "analisis tajam ala Jane Street (WAJIB sebut sumber GAGAL: ${failedSources.length > 0 ? failedSources.join(", ") : "tidak ada — semua sumber OK"})",
   "suggestedBias": "LONG" | "SHORT" | "NEUTRAL" | "BULLISH" | "BEARISH",
   "keyLevels": { "entry": number, "stopLoss": number, "takeProfit": number },
   "risks": ["string", "string"],
-  "caveat": "disclaimer singkat"
+  "caveat": "disclaimer singkat (WAJIB sebut degradasi data bila ada GAGAL)",
+  "dataGaps": ["daftar sumber GAGAL dari STATUS DATA, atau [] bila semua OK"]
 }`;
 
       const advisorSchema = z.object({
@@ -686,9 +980,11 @@ Jawab HANYA JSON valid tanpa markdown:
           .optional(),
         risks: z.array(z.string()).max(3).optional(),
         caveat: z.string().optional(),
+        // Konfirmasi LLM atas sumber yang gagal terfetch (wajib diisi bila ada GAGAL).
+        dataGaps: z.array(z.string()).max(10).optional(),
       });
 
-      const candidateModels = ["gemini-3-flash-preview", "gemini-3.5-flash-lite"];
+      const candidateModels = ["gemini-3.8-flash", "gemini-3.7-flash"];
       let responseText = "";
       let usedModel = "";
       let lastErr: any = null;
@@ -708,11 +1004,21 @@ Jawab HANYA JSON valid tanpa markdown:
         } catch (modelErr: any) {
           lastErr = modelErr;
           const msg = String(modelErr?.message || "");
+          const status = (modelErr as any)?.status;
+          // JANGAN pernah throw dari sini — throw lolos dari route handler async
+          // (Express 4) dan membunuh seluruh proses server (crash yang terlihat
+          // sebagai ERR_CONNECTION_REFUSED massal di FE). Catat + coba model
+          // berikutnya, lalu fallback ke respons keel-only di bawah.
           if (/INVALID_MODEL|not found|does not exist|404/i.test(msg)) {
             console.warn(`Gemini advisor model ${model} tidak valid, coba fallback...`);
             continue;
           }
-          throw modelErr;
+          if (status === 503 || status === 429 || /503|429|UNAVAILABLE|overloaded|high demand|timeout|fetch failed|ECONN|ETIMEDOUT/i.test(msg)) {
+            console.warn(`Gemini advisor model ${model} sibuk/transien (${status ?? msg.slice(0, 120)}), coba model berikutnya...`);
+            continue;
+          }
+          console.warn(`Gemini advisor model ${model} error, fallback ke keel: ${msg.slice(0, 160)}`);
+          break;
         }
       }
 
@@ -722,23 +1028,48 @@ Jawab HANYA JSON valid tanpa markdown:
           const validation = advisorSchema.safeParse(parsed);
           if (validation.success) {
             const ai = validation.data;
-            return res.json({
-              success: true,
-              mode: "ai",
-              geminiConfigured: true,
-              model: usedModel,
-              timestamp: Date.now(),
-              keelSummary,
-              backtest: { symbol: sym, context: backtestCtx },
-              ai: {
-                insight: ai.insight,
-                suggestedBias: ai.suggestedBias,
-                keyLevels: ai.keyLevels,
-                risks: ai.risks || [],
-                caveat: ai.caveat || "",
-              },
-              latencyMs: Date.now() - startTime,
-            });
+            // Fail-closed: LLM yang mengklaim semua OK padahal ada sumber GAGAL
+            // ditolak — paksa LLM konfirmasi degradasi data di UI.
+            const llmGaps = Array.isArray(ai.dataGaps) ? ai.dataGaps.map((g) => String(g).toLowerCase()) : [];
+            const unacked = failedSources.filter(
+              (s) => !llmGaps.some((g) => g.includes(String(s).toLowerCase()))
+            );
+            const insightMentionsGaps =
+              failedSources.length === 0 ||
+              failedSources.every((s) =>
+                String(ai.insight || "").toLowerCase().includes(String(s).toLowerCase())
+              );
+            if (unacked.length > 0 || !insightMentionsGaps) {
+              console.warn(
+                `[ai-advisor] LLM output ditolak: tidak konfirmasi data GAGAL [${failedSources.join(", ")}] di insight/dataGaps.`
+              );
+            } else {
+              return res.json({
+                success: true,
+                mode: "ai",
+                geminiConfigured: true,
+                model: usedModel,
+                timestamp: Date.now(),
+                keelSummary,
+                technicals: technicalsEcho,
+                multiTfTechnicals: multiTf,
+                futuresDetail,
+                onChainEcho,
+                macroEcho,
+                macroReal: macroRealEcho,
+                dataHealth,
+                backtest: { symbol: sym, context: backtestCtx },
+                ai: {
+                  insight: ai.insight,
+                  suggestedBias: ai.suggestedBias,
+                  keyLevels: ai.keyLevels,
+                  risks: ai.risks || [],
+                  caveat: ai.caveat || "",
+                  dataGaps: ai.dataGaps || [],
+                },
+                latencyMs: Date.now() - startTime,
+              });
+            }
           }
           console.warn(`[ai-advisor] Gemini output gagal validasi: ${validation.error.message}`);
         } catch (parseErr: any) {
@@ -749,12 +1080,47 @@ Jawab HANYA JSON valid tanpa markdown:
       }
     }
 
+    // Keel-only: rangkai insight dari SEMUA sumber yang ada (bukan cuma
+    // flow+bias seperti sebelumnya — teknikal/futures/on-chain/macro ikut
+    // dirangkum agar FE tetap informatif tanpa Gemini).
     const connFlow = String(keelSummary.flow || "NEUTRAL");
     const bias = String(keelSummary.futuresBias || "NEUTRAL");
-    const insightKeel =
+    const techBits: string[] = [];
+    if (technicalsEcho && isFinite(technicalsEcho.rsi)) techBits.push(`RSI ${technicalsEcho.rsi.toFixed(1)}`);
+    if (technicalsEcho && isFinite(technicalsEcho.ema20) && isFinite(technicalsEcho.ema50)) {
+      techBits.push(technicalsEcho.ema20 > technicalsEcho.ema50 ? "EMA20>EMA50 (uptrend)" : "EMA20<EMA50 (downtrend)");
+    }
+    if (technicalsEcho && isFinite(technicalsEcho.macdHistogram)) {
+      techBits.push(`MACD hist ${technicalsEcho.macdHistogram >= 0 ? "+" : ""}${technicalsEcho.macdHistogram.toFixed(2)}`);
+    }
+    if (technicalsEcho && isFinite(technicalsEcho.orderBookImbalance)) {
+      techBits.push(`OB imbalance ${technicalsEcho.orderBookImbalance.toFixed(2)}`);
+    }
+    const futBits: string[] = [];
+    if (futuresDetail?.fundingBps != null) futBits.push(`funding ${Number(futuresDetail.fundingBps).toFixed(2)}bps`);
+    if (futuresDetail?.lsrTaker != null) futBits.push(`LSR ${Number(futuresDetail.lsrTaker).toFixed(2)}`);
+    if (futuresDetail?.openInterestUsd != null) {
+      const oi = Number(futuresDetail.openInterestUsd);
+      futBits.push(`OI ${oi >= 1e9 ? "$" + (oi / 1e9).toFixed(2) + "B" : "$" + (oi / 1e6).toFixed(1) + "M"}`);
+    }
+    if (futuresDetail?.biasReason) futBits.push(futuresDetail.biasReason);
+    const ocBits: string[] = [];
+    if (onChainEcho?.smartMoneyBias) ocBits.push(`smart money ${onChainEcho.smartMoneyBias}`);
+    if (onChainEcho?.sopr != null) ocBits.push(`SOPR ${onChainEcho.sopr} (${onChainEcho.soprStatus || "?"})`);
+    const mcNote =
+      mc && mc.macroRiskIndex > 0
+        ? `Makro: ${mc.fedPolicyStance || "?"} risk ${mc.macroRiskIndex}/100.`
+        : "Makro: no-data (fail-closed, jangan anggap aman).";
+    const base =
       keelSummary.action === "HOLD"
-        ? `Keel belum menemukan sinyal kuat. Flow ${connFlow}, bias futures ${bias}. ${keelSummary.discardedReason || "Belum ada konvergensi institusional."} Saran: tunggu, jangan paksa entry.`
-        : `Keel cenderung ${keelSummary.action} dengan confidence ${keelSummary.confidence}% (flow ${connFlow}, bias futures ${bias}). Tapi eksekusi TETAP keputusan Anda — periksa level SL/TP dan konfirmasi harga sebelum bertindak.`;
+        ? `Keel HOLD — flow ${connFlow}, bias futures ${bias}. ${keelSummary.discardedReason || "Belum ada konvergensi institusional."}`
+        : `Keel ${keelSummary.action} conf ${keelSummary.confidence}% — flow ${connFlow}, bias futures ${bias}.`;
+    const insightKeel =
+      `${base}` +
+      (techBits.length > 0 ? ` Teknikal: ${techBits.join(", ")}.` : "") +
+      (futBits.length > 0 ? ` Futures: ${futBits.join("; ")}.` : "") +
+      (ocBits.length > 0 ? ` On-chain: ${ocBits.join(", ")}.` : "") +
+      ` ${mcNote} Eksekusi TETAP keputusan Anda — periksa level SL/TP sebelum bertindak.`;
 
     return res.json({
       success: true,
@@ -762,6 +1128,13 @@ Jawab HANYA JSON valid tanpa markdown:
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"),
       timestamp: Date.now(),
       keelSummary,
+      technicals: technicalsEcho,
+      multiTfTechnicals: multiTf,
+      futuresDetail,
+      onChainEcho,
+      macroEcho,
+      macroReal: macroRealEcho,
+      dataHealth,
       backtest: { symbol: sym, context: buildBacktestContextFor(sym) },
       ai: {
         insight: `Mode AI nonaktif (GEMINI_API_KEY belum di-set). Berikut ringkasan data keel: ${insightKeel}`,

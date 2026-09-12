@@ -22,6 +22,7 @@ import { PaperTradingPanel } from "./components/PaperTradingPanel";
 import { ExecutionConsole } from "./components/ExecutionConsole";
 import { PositionsPanel } from "./components/PositionsPanel";
 import { ReplayControlPanel } from "./components/ReplayControlPanel";
+import { ReplayRunsPanel } from "./components/ReplayRunsPanel";
 import { ProbabilityBadge } from "./components/ProbabilityBadge";
 import { ReconciliationPanel } from "./components/ReconciliationPanel";
 
@@ -43,6 +44,7 @@ import { useLiveMode } from "./hooks/useLiveMode";
 import { ModeProvider } from "./hooks/useMode";
 import { ToastProvider } from "./components/ExecutionToasts";
 import { TradeJournalPanel } from "./components/TradeJournalPanel";
+import { AgentDecisionsPanel } from "./components/AgentDecisionsPanel";
 import type { RecentTrade, FuturesMetrics } from "./data/marketFetcher";
 
 export default function App() {
@@ -191,6 +193,7 @@ export default function App() {
     prependAudit,
     onPositionOpened: paper.addPosition,
     onPortfolioUpdated: paper.commitPortfolio,
+    onPendingOrder: paper.addPendingOrder,
     orderBook: market.orderBook,
     recentTrades: keelContext.recentTrades,
     futures: keelContext.futures,
@@ -265,9 +268,10 @@ export default function App() {
         setMarketType("FUTURES");
       }
       setTimeframe(newTf);
-      market.loadTimeframe(newTf);
+      // Pill indikator (RSI/EMA/MACD) mengikuti TF yang diklik — bukan 15m.
+      market.setActiveIndicatorTimeframe(newTf);
     },
-    [market.loadTimeframe]
+    [market.setActiveIndicatorTimeframe]
   );
 
   const handleSelectMarketType = useCallback(
@@ -466,6 +470,7 @@ export default function App() {
               candlesByTimeframe={market.candlesByTimeframe}
               feedMode={market.feedMode}
               exchangeStatus={market.exchangeStatus}
+              activeTfCandleCount={activeDisplayCandles.length}
             />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -527,6 +532,8 @@ export default function App() {
               closedTrades={paper.closedTrades}
             />
 
+            <AgentDecisionsPanel />
+
             <ReconciliationPanel />
           </>
         )}
@@ -557,6 +564,14 @@ export default function App() {
         {/* 📡 PUMP RADAR — scanner microcap Gate.io SPOT (alert only, tanpa eksekusi) */}
         {activeTab === "pump" && (
           <PumpRadarPanel />
+        )}
+
+        {/* 🕰️ REPLAY — forward-test isolated book + riwayat runs tersimpan (DB) */}
+        {activeTab === "replay" && (
+          <>
+            <ReplayControlPanel />
+            <ReplayRunsPanel />
+          </>
         )}
       </main>
 

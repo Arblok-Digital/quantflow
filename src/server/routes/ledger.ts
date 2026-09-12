@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { requireAuth } from "@/auth";
-import { appendAudit, getLedgerEntries, verifyLedger, getLedgerStats } from "@/db";
+import { appendAudit, getLedgerEntries, verifyLedger, getLedgerStats, listAgentDecisions } from "@/db";
 
 export function registerLedgerRoutes(app: Express): void {
   app.get("/api/ledger", requireAuth, (req, res) => {
@@ -27,5 +27,15 @@ export function registerLedgerRoutes(app: Express): void {
   app.get("/api/ledger/stats", requireAuth, (_req, res) => {
     const stats = getLedgerStats();
     res.json({ success: true, ...stats });
+  });
+
+  // Agent decisions (tabel agent_decisions) — sebelumnya write-only dari
+  // /api/ai-decision tanpa ada pembaca FE. Endpoint ini menutup jalur DB→FE.
+  app.get("/api/agent-decisions", requireAuth, (req, res) => {
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"), 10) || 50));
+    const cursorRaw = req.query.cursor != null ? String(req.query.cursor) : undefined;
+    const cursor = cursorRaw ? parseInt(cursorRaw, 10) : undefined;
+    const { decisions, nextCursor } = listAgentDecisions({ limit, cursor: cursor && isFinite(cursor) ? cursor : undefined });
+    res.json({ success: true, decisions, nextCursor });
   });
 }

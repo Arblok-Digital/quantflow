@@ -45,22 +45,46 @@ export async function handleLiveOrder(req: Request, res: Response): Promise<Resp
 
 /**
  * Close di LIVE MODE — kirim reduceOnly market order lawan arah via ccxt.
- * Request body: { symbol: "BTC/USDT", side: "buy"|"sell", amount: 0.001 }
- *   - side = posisi yang mau ditutup (misal "buy" = long position → close sell)
- *   - amount = jumlah asset yang mau ditutup
+ * Request body (dipakai FE): { positionId: "SYMBOL-SIDE-ts", symbol?, side?, amount? }
+ *   - Bentuk utama { positionId } — encode dari id posisi live
+ *     `${symbol}-${side}-${ts}` (dibuat di routes/broker.ts GET positions).
+ *     side di id bisa LONG/SHORT/buy/sell (case-insensitive).
+ *   - Bentuk legacy eksplisit { symbol, side: buy|sell, amount } tetap
+ *     didukung untuk kompatibilitas.
+ * Lookup ke exchange (fetchPositions) dipakai untuk amount aktual +
+ * validasi posisi masih open sebelum reduceOnly close dikirim.
  */
 export async function handleLiveClose(req: Request, res: Response): Promise<Response> {
   const body = req.body || {};
-  const symbol = String(body.symbol || "").trim();
-  const side = String(body.side || "").toLowerCase(); // "buy" or "sell" = position side to close
-  const amount = Number(body.amount);
+  // 1) Bentuk utama dari FE: { positionId: "SYMBOL-SIDE-ts" }
+  const positionId = String(body.positionId || "").trim();
+  let symbol = String(body.symbol || "").trim();
+  let side = String(body.side || "").toLowerCase(); // "buy" or "sell" = position side to close
+  let amount = Number(body.amount);
 
-  if (!symbol || (side !== "buy" && side !== "sell") || !isFinite(amount) || amount <= 0) {
+  if (positionId) {
+    const m = /^(.*)-((?:LONG|SHORT|long|short|buy|sell))-\d+$/.exec(positionId);
+    if (!m) {
+      return res.status(400).json({
+        success: false,
+        status: "REJECTED",
+        reason: "INVALID_POSITION_ID",
+        message: "positionId live tidak valid.",
+      });
+    }
+    if (!symbol) symbol = m[1];
+    if (!side) {
+      const raw = m[2].toLowerCase();
+      side = raw === "long" || raw === "buy" ? "buy" : "sell";
+    }
+  }
+
+  if (!symbol || (side !== "buy" && side !== "sell")) {
     return res.status(400).json({
       success: false,
       status: "REJECTED",
       reason: "MISSING_PARAMS",
-      message: "symbol, side (buy|sell), and amount wajib diisi untuk live close.",
+      message: "positionId (atau symbol + side buy|sell) wajib diisi untuk live close.",
     });
   }
 
@@ -71,6 +95,31 @@ export async function handleLiveClose(req: Request, res: Response): Promise<Resp
   try {
     const exchange = getExchange();
     await ensureMarketsLoaded(exchange);
+    // Resolve amount aktual dari posisi open di exchange bila tidak disebut
+    // eksplisit — FE hanya mengirim positionId.
+    if (!isFinite(amount) || amount <= 0) {
+      try {
+        const rawPositions: any[] = await exchange.fetchPositions();
+        const match = rawPositions.find(
+          (p: any) =>
+            String(p.symbol) === normalizedSymbol && Number(p.contracts || p.amount || 0) !== 0
+        );
+        const resolved = Number(match?.contracts ?? match?.amount ?? 0);
+        if (isFinite(resolved) && resolved > 0) {
+          amount = resolved;
+        }
+      } catch (lookupErr: any) {
+        console.warn(`[live] fetchPositions lookup gagal (close ${normalizedSymbol}): ${lookupErr?.message}`);
+      }
+    }
+    if (!isFinite(amount) || amount <= 0) {
+      return res.status(404).json({
+        success: false,
+        status: "REJECTED",
+        reason: "POSITION_NOT_FOUND",
+        message: `Posisi ${normalizedSymbol} tidak ditemukan / amount tidak diketahui di exchange.`,
+      });
+    }
     const order = await exchange.createOrder(
       normalizedSymbol,
       "market",

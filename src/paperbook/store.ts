@@ -98,14 +98,15 @@ export function dbSavePosition(pos: PaperPosition): void {
 }
 
 export function dbSaveOrder(order: PaperOrderReceipt): void {
-  // price = fillPrice, stop_loss/take_profit not directly in receipt — try to find linked position
-  let sl: number | null = null;
-  let tp: number | null = null;
-  if (order.positionId) {
+  // price = fillPrice, stop_loss/take_profit: prefer receipt fields (limit NEW
+  // menyimpan SL/TP langsung), fallback ke posisi tertaut (market FILLED).
+  let sl: number | null = order.stopLoss ?? null;
+  let tp: number | null = order.takeProfit ?? null;
+  if ((sl == null || tp == null) && order.positionId) {
     const linked = state.positions.find((p) => p.id === order.positionId);
     if (linked) {
-      sl = linked.stopLoss ?? null;
-      tp = linked.takeProfit ?? null;
+      if (sl == null) sl = linked.stopLoss ?? null;
+      if (tp == null) tp = linked.takeProfit ?? null;
     }
   }
   saveOrderDb({
@@ -115,7 +116,7 @@ export function dbSaveOrder(order: PaperOrderReceipt): void {
     type: order.type,
     status: order.status,
     amount: order.amount,
-    price: order.fillPrice ?? null,
+    price: order.fillPrice ?? order.limitPrice ?? null,
     stop_loss: sl,
     take_profit: tp,
     leverage: order.leverage ?? null,
@@ -203,6 +204,11 @@ export function initPaperBook(): void {
       type: (String(r.type) === "limit" ? "limit" : "market") as "market" | "limit",
       amount: Number(r.amount),
       fillPrice: r.price != null ? Number(r.price) : undefined,
+      // Limit NEW tersimpan dengan price=limitPrice (lihat dbSaveOrder).
+      // Rehydrate kembali agar bracket monitor bisa fill setelah restart.
+      limitPrice: String(r.type) === "limit" && r.price != null ? Number(r.price) : undefined,
+      stopLoss: r.stop_loss != null ? Number(r.stop_loss) : undefined,
+      takeProfit: r.take_profit != null ? Number(r.take_profit) : undefined,
       slippageBps: r.slippage_bps != null ? Number(r.slippage_bps) : undefined,
       feeUSD: 0, // fee stored in fills, fallback 0; try to fetch from fills
       qty: Number(r.amount),

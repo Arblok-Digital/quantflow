@@ -35,12 +35,13 @@ interface VerifyResult {
   issues: Array<{ seq: number; reason: string }>;
 }
 
-type KindFilter = "all" | "decision" | "order" | "exit";
+type KindFilter = "all" | "decision" | "order" | "exit" | "replay_export";
 
 const KIND_COLOR: Record<string, string> = {
   decision: "bg-sky-500/20 text-sky-300 border-sky-500/30",
   order: "bg-amber-500/20 text-amber-300 border-amber-500/30",
   exit: "bg-violet-500/20 text-violet-300 border-violet-500/30",
+  replay_export: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30",
 };
 
 function truncate(s: string, n: number): string {
@@ -227,7 +228,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
             <div className="flex items-center gap-1 ml-1">
               <Filter className="w-3.5 h-3.5 text-zinc-500" />
               <div className="flex rounded-lg overflow-hidden border border-zinc-700">
-                {(["all", "decision", "order", "exit"] as KindFilter[]).map((k) => (
+                {(["all", "decision", "order", "exit", "replay_export"] as KindFilter[]).map((k) => (
                   <button
                     key={k}
                     onClick={() => setFilterKind(k)}

@@ -226,6 +226,37 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
     [load]
   );
 
+  /** Auto-pilot limit NEW: masukkan ke pending list lalu refresh server. */
+  const addPendingOrder = useCallback(
+    (order: {
+      id: string;
+      symbol: string;
+      side: string;
+      type: string;
+      status: string;
+      amount: number;
+      limitPrice?: number;
+      leverage?: number;
+    }) => {
+      const mapped = mapPendingOrder({
+        id: order.id,
+        symbol: order.symbol,
+        side: order.side,
+        qty: order.amount,
+        limitPrice: order.limitPrice ?? 0,
+        state: order.status,
+        createdAt: Date.now(),
+      });
+      if (mapped) {
+        setPendingOrders((prev) =>
+          prev.some((o) => o.id === mapped.id) ? prev : [...prev, mapped]
+        );
+      }
+      load();
+    },
+    [load]
+  );
+
   const commitPortfolio = useCallback(
     (_next: Portfolio) => { load(); },
     [load]
@@ -454,6 +485,7 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
     pendingOrders,
     processPriceTick,
     addPosition,
+    addPendingOrder,
     commitPortfolio,
     moveToBreakEven,
     resetPaperAccount,

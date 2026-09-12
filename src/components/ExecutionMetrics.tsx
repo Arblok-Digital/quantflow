@@ -1,7 +1,7 @@
 import React from "react";
-import { Portfolio, LatencyBreakdown } from "../types";
-import { 
-  Clock, 
+import { ClosedTrade, Portfolio, LatencyBreakdown } from "../types";
+import {
+  Clock,
   Crosshair
 } from "lucide-react";
 
@@ -9,6 +9,8 @@ interface ExecutionMetricsProps {
   portfolio: Portfolio;
   latestLatency: LatencyBreakdown;
   averageSlippageBps: number;
+  /** Closed trades dari ledger (opsional) — dipakai untuk win-rate jujur. */
+  closedTrades?: ClosedTrade[];
 }
 
 const fmtMs = (v: number) => (v > 0 ? `${v}ms` : "-");
@@ -17,11 +19,19 @@ export const ExecutionMetrics: React.FC<ExecutionMetricsProps> = ({
   portfolio,
   latestLatency,
   averageSlippageBps,
+  closedTrades,
 }) => {
+  // Win-rate jujur: prioritas closedTrades ledger bila tersedia, fallback ke portfolio.
+  const ledgerWins = Array.isArray(closedTrades)
+    ? closedTrades.filter((t) => t.pnlUSD > 0).length
+    : null;
+  const ledgerTotal = Array.isArray(closedTrades) ? closedTrades.length : 0;
   const winRate =
-    portfolio.totalTrades > 0
-      ? ((portfolio.winCount / portfolio.totalTrades) * 100).toFixed(1)
-      : "-";
+    ledgerWins != null && ledgerTotal > 0
+      ? ((ledgerWins / ledgerTotal) * 100).toFixed(1)
+      : portfolio.totalTrades > 0
+        ? ((portfolio.winCount / portfolio.totalTrades) * 100).toFixed(1)
+        : "-";
 
   const totalPnl = portfolio.realizedPnl;
   const isPnlPositive = totalPnl >= 0;

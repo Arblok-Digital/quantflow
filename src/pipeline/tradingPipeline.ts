@@ -58,6 +58,17 @@ export interface PipelineCycleOutput {
   mtfLiquidity: MTFLiquidityAnalysis;
   auditEntry: AuditLogEntry;
   newPosition: Position | null;
+  /** Limit NEW dari server (belum ada posisi) — hook meneruskan ke pending list. */
+  newPendingOrder?: {
+    id: string;
+    symbol: string;
+    side: string;
+    type: string;
+    status: string;
+    amount: number;
+    limitPrice?: number;
+    leverage?: number;
+  } | null;
   updatedPortfolio: Portfolio;
   latencyBreakdown: LatencyBreakdown;
 }
@@ -116,11 +127,12 @@ export async function runTradingPipelineCycle(
   // Step 4: Broker Execution (if approved & action != HOLD)
   let brokerExecutionMs = 0;
   let newPosition: Position | null = null;
+  let newPendingOrder: PipelineCycleOutput["newPendingOrder"] = null;
   let executedPrice = input.currentPrice;
   let slippageBps = 0.4;
   let signature = "sig_simulated_hold";
   let payloadHash = "hash_simulated_hold";
-  let status: "FILLED" | "REJECTED" = "FILLED";
+  let status: "FILLED" | "REJECTED" | "NEW" = "FILLED";
   let tradeQty = 0;
 
   let updatedPortfolio = { ...input.portfolio };
@@ -163,6 +175,14 @@ export async function runTradingPipelineCycle(
         // pengurangan cash.
         status = "REJECTED";
         newPosition = null;
+      } else if (brokerRes.status === "NEW") {
+        // Limit NEW: belum ada posisi & belum ada fill — teruskan receipt agar
+        // FE bisa render pending (sebelumnya dibuang → invisible).
+        status = "NEW";
+        newPosition = null;
+        newPendingOrder = brokerRes.pendingOrder ?? null;
+        executedPrice = brokerRes.pendingOrder?.limitPrice ?? input.currentPrice;
+        slippageBps = 0;
       } else {
         status = "FILLED";
         newPosition = brokerRes.position || null;
@@ -217,7 +237,8 @@ export async function runTradingPipelineCycle(
     requestedPrice: input.currentPrice,
     executedPrice,
     slippageBps,
-    status: riskResult.approved ? (decision.action === "HOLD" ? "FILLED" : status) : "REJECTED",
+    // Limit NEW dipetakan ke PENDING (OrderStatus tidak mengenal NEW).
+    status: riskResult.approved ? (decision.action === "HOLD" ? "FILLED" : status === "NEW" ? "PENDING" : status) : "REJECTED",
     reasoning: decision.reasoning,
     confidence: decision.confidence,
     riskEvaluation: riskResult,
@@ -237,6 +258,7 @@ export async function runTradingPipelineCycle(
     mtfLiquidity,
     auditEntry,
     newPosition,
+    newPendingOrder,
     updatedPortfolio,
     latencyBreakdown,
   };

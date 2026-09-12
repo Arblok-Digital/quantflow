@@ -55,6 +55,23 @@ async function fetchWithTimeout(url: string, timeoutMs = 3000): Promise<any> {
   }
 }
 
+async function fetchTextWithTimeout(url: string, timeoutMs = 5000): Promise<string> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": "AITradingAgentEngine/1.0" },
+    });
+    clearTimeout(id);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+  } catch (err) {
+    clearTimeout(id);
+    throw err;
+  }
+}
+
 // Try Binance primary
 async function tryBinance(symbol: string): Promise<FetchResult<any>> {
   const parsed = parseMarketSymbol(symbol);
@@ -645,4 +662,127 @@ export async function fetchFuturesMetrics(symbol: string): Promise<FuturesMetric
     console.warn(`[MarketFetcher] Gate futures metrics failed for ${contract}: ${err?.message}`);
     return { success: false, source: "NONE" };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Macro real gratisan (server-side fetch + cache):
+//   1. ForexFactory mirror (faireconomy) — kalender event USD high-impact,
+//      tanpa key. 2. Stooq CSV — VIX proxy real-time risk sentiment, tanpa key.
+// Fail-closed: semua gagal -> { ok:false } (konsumen TIDAK boleh fabricate).
+// ---------------------------------------------------------------------------
+export interface MacroRealEvent {
+  title: string;
+  country: string;
+  impact: string;
+  dateUtc: string;
+  forecast: string;
+  previous: string;
+}
+
+export interface MacroRealData {
+  ok: boolean;
+  source: string;
+  fetchedAt: number;
+  events: MacroRealEvent[];
+  highImpactUpcoming: MacroRealEvent[];
+  vix: number | null;
+  vixSource: string | null;
+}
+
+let macroRealCache: { data: MacroRealData; at: number } | null = null;
+const MACRO_REAL_TTL_MS = 30 * 60 * 1000; // 30 menit (kalender mingguan + VIX intraday)
+
+function isHighImpactUsd(e: any): boolean {
+  const country = String(e?.country || "").toUpperCase();
+  const impact = String(e?.impact || "").toUpperCase();
+  return country === "USD" && impact === "HIGH";
+}
+
+export async function fetchMacroReal(force = false): Promise<MacroRealData> {
+  if (!force && macroRealCache && Date.now() - macroRealCache.at < MACRO_REAL_TTL_MS) {
+    return macroRealCache.data;
+  }
+  let events: MacroRealEvent[] = [];
+  let calSource = "NONE";
+  try {
+    const raw: any = await fetchWithTimeout("https://nfs.faireconomy.media/ff_calendar_thisweek.json", 6000);
+    if (Array.isArray(raw) && raw.length > 0) {
+      events = raw
+        .filter(isHighImpactUsd)
+        .map((e: any) => ({
+          title: String(e?.title ?? ""),
+          country: "USD",
+          impact: "High",
+          dateUtc: String(e?.date ?? ""),
+          forecast: String(e?.forecast ?? ""),
+          previous: String(e?.previous ?? ""),
+        }))
+        .filter((e) => e.title && e.dateUtc);
+      calSource = "FF_MIRROR";
+    }
+  } catch (err: any) {
+    console.warn(`[MarketFetcher] FF mirror calendar gagal: ${err?.message}`);
+  }
+  const now = Date.now();
+  const upcoming = events
+    .filter((e) => {
+      const t = Date.parse(e.dateUtc);
+      return isFinite(t) && t >= now - 24 * 3600 * 1000;
+    })
+    .sort((a, b) => Date.parse(a.dateUtc) - Date.parse(b.dateUtc))
+    .slice(0, 8);
+
+  let vix: number | null = null;
+  let vixSource: string | null = null;
+  try {
+    const csv = await fetchTextWithTimeout("https://stooq.com/q/l/?s=%5Evix&f=sd2t2ohlcv&h&e=csv", 6000);
+    const lines = csv.trim().split("\n");
+    if (lines.length >= 2) {
+      const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+      const vals = lines[1].split(",");
+      const ci = header.indexOf("close");
+      const c = ci >= 0 ? parseFloat(vals[ci]) : NaN;
+      if (isFinite(c) && c > 0) {
+        vix = c;
+        vixSource = "STOOQ_VIX";
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[MarketFetcher] Stooq VIX gagal: ${err?.message}`);
+  }
+
+  const ok = calSource !== "NONE" || vix != null;
+  const data: MacroRealData = {
+    ok,
+    source: ok ? [calSource !== "NONE" ? calSource : null, vixSource].filter(Boolean).join("+") : "NONE",
+    fetchedAt: now,
+    events,
+    highImpactUpcoming: upcoming,
+    vix,
+    vixSource,
+  };
+  macroRealCache = { data, at: now };
+  return data;
+}
+
+/** Risk index 0-100 dari data real: VIX + jarak event HIGH terdekat. Fail-closed -> 0. */
+export function deriveMacroRiskIndex(macro: MacroRealData): number {
+  if (!macro.ok) return 0;
+  let score = 0;
+  if (macro.vix != null) {
+    if (macro.vix >= 30) score += 55;
+    else if (macro.vix >= 22) score += 40;
+    else if (macro.vix >= 16) score += 25;
+    else score += 12;
+  }
+  const next = macro.highImpactUpcoming[0];
+  if (next) {
+    const hrs = (Date.parse(next.dateUtc) - Date.now()) / 3600000;
+    if (hrs < 0) score += 10; // baru lewat — volatilitas pasca-rilis
+    else if (hrs <= 24) score += 35;
+    else if (hrs <= 72) score += 20;
+    else score += 8;
+    if (macro.highImpactUpcoming.length >= 2) score += 5;
+  }
+  return Math.min(100, Math.max(0, Math.round(score)));
 }

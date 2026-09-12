@@ -74,6 +74,10 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     orderBookImbalance: 1.18,
     volatility: "2.4%",
   });
+  // Indikator per-TF: pill/header mengikuti TF yang diklik, bukan hardcode 15m.
+  const [technicalsByTimeframe, setTechnicalsByTimeframe] = useState<Partial<Record<Timeframe, TechnicalIndicators>>>({});
+  // TF aktif untuk indikator (diset via setActiveIndicatorTimeframe dari App).
+  const [activeIndicatorTf, setActiveIndicatorTfState] = useState<Timeframe>("15m");
   const [exchangeStatus, setExchangeStatus] = useState<ExchangeFeedStatus>({
     source: "BINANCE_LIVE",
     latencyMs: 14,
@@ -201,18 +205,47 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
         setCandlesByTimeframe((prev) => ({ ...prev, [tf]: loadedCandles }));
 
         const closes = loadedCandles.map((c) => c.close);
-        setTechnicals((prev) => ({
-          ...prev,
+        const perTf: TechnicalIndicators = {
           rsi: calculateRSI(closes, 14),
           ema20: calculateEMA(closes, 20),
           ema50: calculateEMA(closes, 50),
           macd: calculateMACD(closes),
-        }));
+          orderBookImbalance: technicalsRef.current.orderBookImbalance,
+          volatility: "2.4%",
+        };
+        // Simpan per-TF; pill mengikuti TF aktif (lihat setActiveIndicatorTimeframe).
+        setTechnicalsByTimeframe((prev) => ({ ...prev, [tf]: perTf }));
+        if (timeframeRef.current === tf) {
+          setTechnicals(perTf);
+        }
       }
     } catch (err) {
       console.warn("Failed to load klines for timeframe:", tf, err);
     }
   }, []);
+
+  // Dipanggil App saat user klik TF: pill indikator langsung ikut TF baru
+  // (pakai cache per-TF bila ada, sekaligus fetch ulang candle TF tersebut).
+  const setActiveIndicatorTimeframe = useCallback(
+    (tf: Timeframe) => {
+      timeframeRef.current = tf;
+      setActiveIndicatorTfState(tf);
+      const cached = candlesByTimeframeRef.current[tf];
+      if (cached && cached.length > 0) {
+        const closes = cached.map((c) => c.close);
+        setTechnicals({
+          rsi: calculateRSI(closes, 14),
+          ema20: calculateEMA(closes, 20),
+          ema50: calculateEMA(closes, 50),
+          macd: calculateMACD(closes),
+          orderBookImbalance: technicalsRef.current.orderBookImbalance,
+          volatility: technicalsRef.current.volatility,
+        });
+      }
+      loadTimeframe(tf);
+    },
+    [loadTimeframe]
+  );
 
   // Sinkronisasi feed live saat symbol berubah.
   useEffect(() => {
@@ -325,6 +358,8 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     candlesByTimeframe,
     orderBook,
     technicals,
+    technicalsByTimeframe,
+    activeIndicatorTf,
     exchangeStatus,
     feedMode,
     messageRate: stream.messageRate,
@@ -332,6 +367,7 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     mtfLiquidity,
     syncLiveExchangeData,
     loadTimeframe,
+    setActiveIndicatorTimeframe,
   };
 }
 

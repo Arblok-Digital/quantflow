@@ -46,16 +46,58 @@ export function calculateRSI(closes: number[], period: number = 14): number {
   return Number(rsi.toFixed(1));
 }
 
-export function calculateMACD(closes: number[]): { macdLine: number; signalLine: number; histogram: number } {
-  if (closes.length < 26) {
+export function calculateMACD(
+  closes: number[],
+  fastPeriod = 12,
+  slowPeriod = 26,
+  signalPeriod = 9
+): { macdLine: number; signalLine: number; histogram: number } {
+  if (closes.length < slowPeriod) {
     return { macdLine: 0, signalLine: 0, histogram: 0 };
   }
-  const ema12 = calculateEMA(closes, 12);
-  const ema26 = calculateEMA(closes, 26);
-  const macdLine = Number((ema12 - ema26).toFixed(2));
-  const signalLine = Number((macdLine * 0.85).toFixed(2));
-  const histogram = Number((macdLine - signalLine).toFixed(2));
-  return { macdLine, signalLine, histogram };
+  // Bangun series MACD line (EMAfast - EMAslow, anchored) lalu signal = EMA
+  // dari series tersebut. Standar 12/26/9 — BUKAN macd*0.85.
+  const kFast = 2 / (fastPeriod + 1);
+  const kSlow = 2 / (slowPeriod + 1);
+  let emaFast = closes.slice(0, fastPeriod).reduce((a, b) => a + b, 0) / fastPeriod;
+  let emaSlow = closes.slice(0, slowPeriod).reduce((a, b) => a + b, 0) / slowPeriod;
+  const macdSeries: number[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (i < fastPeriod - 1) continue;
+    if (i === fastPeriod - 1) {
+      emaFast = closes.slice(0, fastPeriod).reduce((a, b) => a + b, 0) / fastPeriod;
+    } else if (i >= fastPeriod) {
+      emaFast = closes[i] * kFast + emaFast * (1 - kFast);
+    }
+    if (i < slowPeriod - 1) continue;
+    if (i === slowPeriod - 1) {
+      emaSlow = closes.slice(0, slowPeriod).reduce((a, b) => a + b, 0) / slowPeriod;
+    } else if (i > slowPeriod - 1) {
+      emaSlow = closes[i] * kSlow + emaSlow * (1 - kSlow);
+    }
+    macdSeries.push(emaFast - emaSlow);
+  }
+  if (macdSeries.length === 0) {
+    return { macdLine: 0, signalLine: 0, histogram: 0 };
+  }
+  const macdLine = macdSeries[macdSeries.length - 1];
+  // Signal = EMA(signalPeriod) dari macdSeries; seed SMA bila data pendek.
+  const kSig = 2 / (signalPeriod + 1);
+  let signal: number;
+  if (macdSeries.length >= signalPeriod) {
+    signal = macdSeries.slice(0, signalPeriod).reduce((a, b) => a + b, 0) / signalPeriod;
+    for (let i = signalPeriod; i < macdSeries.length; i++) {
+      signal = macdSeries[i] * kSig + signal * (1 - kSig);
+    }
+  } else {
+    signal = macdSeries.reduce((a, b) => a + b, 0) / macdSeries.length;
+  }
+  const histogram = macdLine - signal;
+  return {
+    macdLine: Number(macdLine.toFixed(2)),
+    signalLine: Number(signal.toFixed(2)),
+    histogram: Number(histogram.toFixed(2)),
+  };
 }
 
 export function calculateATR(candles: Candle[], period: number = 14): number {

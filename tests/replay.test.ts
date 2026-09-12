@@ -171,6 +171,25 @@ describe("replayEngine", () => {
     expect(cashAfter).toBeCloseTo(10000 - 99 / 10 - 0, 2); // margin reserved
   });
 
+  it("closes replay liquidation at liquidation price and emits LIQUIDATED", () => {
+    const candles: ReplayCandle[] = [
+      { timestamp: 1, open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 },
+      { timestamp: 2, open: 100, high: 101, low: 40, close: 50, volume: 100 },
+    ];
+    startReplay("BTC/USDT", "15m", candles, 1000);
+    stepReplay();
+    placeReplayOrder({ symbol: "BTC/USDT", side: "buy", type: "market", amount: 1, leverage: 10, stopLoss: 50, takeProfit: 120 });
+    const final = stepReplay();
+    const pos = final.positions[0];
+    expect(pos.status).toBe("CLOSED");
+    expect(pos.exitReason).toBe("LIQUIDATED");
+    expect(pos.exitPrice).toBe(90.4);
+    expect(pos.realizedPnlUSD).toBe(-9.68);
+    expect(final.trades[0].pnlUSD).toBe(-9.68);
+    expect(final.trades[0].exitReason).toBe("LIQUIDATED");
+  });
+
+
   it("reaches done status at the end", () => {
     const candles = makeCandles(3, 100, 0.5);
     startReplay("BTC/USDT", "15m", candles, 10000);

@@ -35,6 +35,17 @@ export interface UseTradingPipelineOptions {
   prependAudit: (entry: AuditLogEntry) => void;
   onPositionOpened: (position: Position) => void;
   onPortfolioUpdated: (portfolio: Portfolio) => void;
+  /** Limit NEW dari auto-pilot diteruskan ke pending list (sebelumnya hilang). */
+  onPendingOrder?: (order: {
+    id: string;
+    symbol: string;
+    side: string;
+    type: string;
+    status: string;
+    amount: number;
+    limitPrice?: number;
+    leverage?: number;
+  }) => void;
   /** Real order book untuk estimasi likuiditas jujur (opsional, default kosong). */
   orderBook?: OrderBook;
   /** Real order-flow (aggTrades) untuk keel quant engine (opsional). */
@@ -107,6 +118,9 @@ export function useTradingPipeline(options: UseTradingPipelineOptions) {
       }
       if (result.newPosition) {
         s.onPositionOpened(result.newPosition);
+      }
+      if (result.newPendingOrder) {
+        s.onPendingOrder?.(result.newPendingOrder);
       }
       if (result.updatedPortfolio) {
         s.onPortfolioUpdated(result.updatedPortfolio);

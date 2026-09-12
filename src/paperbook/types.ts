@@ -1,5 +1,5 @@
 export type PaperSide = "LONG" | "SHORT";
-export type PaperPositionStatus = "OPEN" | "CLOSED";
+export type PaperPositionStatus = "OPEN" | "CLOSING" | "CLOSED";
 export type ExitReason = "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL" | "LIQUIDATED";
 export type PaperOrderStatus = "NEW" | "PARTIALLY_FILLED" | "FILLED" | "REJECTED" | "CANCELLED";
 export type PaperEventType =

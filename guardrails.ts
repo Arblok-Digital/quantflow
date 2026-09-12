@@ -26,6 +26,7 @@ interface GuardStateFile {
   lastDailyReset: number;
   lastOrderTimestamp: number;
   cooldownViolations: number;
+  dailyEquityBaselineUSD?: number;
   liveRealizedLedger: Record<string, { realizedPnlUSD: number; entries: Array<{ timestamp: number; realizedPnlUSD: number; symbol?: string }> }>;
 }
 
@@ -36,19 +37,29 @@ interface GuardConfig {
   minOrderIntervalMs: number;
 }
 
+function envNonNegativeNum(v: string | undefined, def: number): number {
+  const n = Number(String(v ?? "").trim());
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
+function envPositiveInt(v: string | undefined, def: number): number {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+}
+
 function getGuardConfig(): GuardConfig {
   return {
     killSwitchDefault: process.env.GUARD_KILL_SWITCH === "true",
-    maxOpenPositions: parseInt(process.env.GUARD_MAX_OPEN_POSITIONS || "5", 10) || 5,
-    maxDailyLossPercent: parseFloat(process.env.GUARD_MAX_DAILY_LOSS_PERCENT || "10") || 10,
-    minOrderIntervalMs: parseInt(process.env.GUARD_MIN_ORDER_INTERVAL_MS || "30000", 10) || 30000,
+    maxOpenPositions: envPositiveInt(process.env.GUARD_MAX_OPEN_POSITIONS, 5),
+    maxDailyLossPercent: envNonNegativeNum(process.env.GUARD_MAX_DAILY_LOSS_PERCENT, 10),
+    minOrderIntervalMs: envNonNegativeNum(process.env.GUARD_MIN_ORDER_INTERVAL_MS, 30000),
   };
 }
 
 function freshGuardState(): GuardStateFile {
   return {
     killSwitch: getGuardConfig().killSwitchDefault,
-    lastDailyReset: Date.now(),
+    lastDailyReset: todayStartMs(),
     lastOrderTimestamp: 0,
     cooldownViolations: 0,
     liveRealizedLedger: {},
@@ -64,9 +75,10 @@ function loadGuardState(): GuardStateFile {
       const parsed = JSON.parse(fs.readFileSync(GUARD_FILE, "utf-8")) as Partial<GuardStateFile>;
       guardState = {
         killSwitch: Boolean(parsed.killSwitch ?? getGuardConfig().killSwitchDefault),
-        lastDailyReset: Number(parsed.lastDailyReset) || Date.now(),
+        lastDailyReset: Number(parsed.lastDailyReset) || todayStartMs(),
         lastOrderTimestamp: Number(parsed.lastOrderTimestamp) || 0,
         cooldownViolations: Number(parsed.cooldownViolations) || 0,
+        dailyEquityBaselineUSD: Number(parsed.dailyEquityBaselineUSD) > 0 ? Number(parsed.dailyEquityBaselineUSD) : undefined,
         liveRealizedLedger: (parsed.liveRealizedLedger as any) || {},
       };
       // override killSwitch from env default only on first load if file explicitly had false? We keep file truth.
@@ -142,16 +154,24 @@ function todayStartMs(): number {
 function baselineEquityUSD(mode: "paper" | "live"): number {
   const envOverride = Number(process.env.GUARD_EQUITY_BASELINE || 0);
   if (isFinite(envOverride) && envOverride > 0) return envOverride;
-  if (mode === "paper") {
-    try {
-      const account = getPaperAccount();
-      if (isFinite(account.equity) && account.equity > 0) return account.equity;
-    } catch {
-      // account belum init — fallback di bawah
+  const s = loadGuardState();
+  const start = todayStartMs();
+  if (s.lastDailyReset < start || !s.dailyEquityBaselineUSD || s.dailyEquityBaselineUSD <= 0) {
+    s.lastDailyReset = start;
+    s.cooldownViolations = 0;
+    if (mode === "paper") {
+      try {
+        const account = getPaperAccount();
+        s.dailyEquityBaselineUSD = isFinite(account.equity) && account.equity > 0 ? account.equity : 10000;
+      } catch {
+        s.dailyEquityBaselineUSD = 10000;
+      }
+    } else {
+      s.dailyEquityBaselineUSD = 10000;
     }
+    persistGuardState();
   }
-  // live (dan fallback): denominator 10000 sampai equity tracking live tersedia
-  return 10000;
+  return s.dailyEquityBaselineUSD;
 }
 
 function computePaperDailyRealizedPnl(): { realizedPnlUSD: number; lossPercent: number } {
@@ -280,8 +300,10 @@ export async function evaluateGuardrails(opts?: { symbol?: string }): Promise<Ev
   // COOLDOWN
   const elapsed = Date.now() - (state.lastOrderTimestamp || 0);
   const cooldownRemainingMs = state.lastOrderTimestamp ? Math.max(0, config.minOrderIntervalMs - elapsed) : 0;
-  if (state.lastOrderTimestamp !== 0 && elapsed < config.minOrderIntervalMs) {
+  if (config.minOrderIntervalMs > 0 && state.lastOrderTimestamp !== 0 && elapsed < config.minOrderIntervalMs) {
     reasons.push("COOLDOWN_ACTIVE");
+    state.cooldownViolations += 1;
+    persistGuardState();
   }
 
   return {

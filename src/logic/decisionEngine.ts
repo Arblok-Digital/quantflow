@@ -102,6 +102,11 @@ export async function evaluateTradingDecision(
           },
           /*** Provenance tags per pilar (4.4) — server simpan di audit ledger. */
           provenance: input.provenance,
+          // Full keel context untuk fallback server-side: kalau Gemini gagal,
+          // server tetap bisa runKeelQuantEngine dengan depth/flow riil.
+          orderBook: input.orderBook,
+          recentTrades: input.recentTrades,
+          futures: input.futures,
         }),
       });
 
