@@ -1,11 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   Portfolio,
   Position,
+  Timeframe,
   MTFLiquidityAnalysis,
   LLMDecision,
 } from "../types";
-import { authFetch } from "../hooks/useAuth";
 import { OrderEntryPanel } from "./OrderEntryPanel";
 import { PositionCard } from "./PositionCard";
 import {
@@ -25,18 +25,26 @@ interface PaperTradingPanelProps {
   positions: Position[];
   currentPrice: number;
   symbol: string;
+  brokerMode?: "paper" | "live";
+  /** TF chart aktif — diteruskan ke OrderEntryPanel + estimasi durasi kartu posisi. */
+  entryTimeframe?: Timeframe;
+  /** Candle TF entry aktif — untuk estimasi candle/durasi ke TP/CL per posisi. */
+  activeCandles?: import("../types").Candle[];
   mtfLiquidity?: MTFLiquidityAnalysis;
   latestDecision?: LLMDecision | null;
-  onClosePosition: (positionId: string, reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => void;
-  onMoveToBreakEven: (positionId: string) => void;
+  onClosePosition: (positionId: string, reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => Promise<{ ok: boolean; reason?: string; message?: string; realizedPnlUSD?: number } | void>;
+  onMoveToBreakEven: (positionId: string) => Promise<{ ok: boolean; reason?: string; message?: string } | void>;
   onResetPaperAccount: (initialCapital: number) => void;
   onSimulateTradeEntry: (
     side: "LONG" | "SHORT",
     orderType?: "market" | "limit",
-    limitPrice?: number
+    limitPrice?: number,
+    opts?: { stopLoss?: number; takeProfit?: number; sizePct?: number; leverage?: number }
   ) => void | Promise<any>;
   cancelPendingOrder?: (orderId: string) => Promise<void>;
   actionableRunKeel?: () => void;
+  /** Market aktif (SubBar) — diteruskan ke OrderEntryPanel (BUY-only + lev 1x saat SPOT). */
+  marketType?: string;
 }
 
 export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
@@ -44,6 +52,9 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   positions,
   currentPrice,
   symbol,
+  brokerMode = "paper",
+  entryTimeframe = "15m",
+  activeCandles = [],
   mtfLiquidity,
   latestDecision,
   onClosePosition,
@@ -52,6 +63,7 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   onSimulateTradeEntry,
   cancelPendingOrder,
   actionableRunKeel,
+  marketType = "FUTURES",
 }) => {
   const [expandedPositionId, setExpandedPositionId] = useState<string | null>(null);
   const [simulateError, setSimulateError] = useState<{
@@ -68,32 +80,13 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
   const [lastPendingOrder, setLastPendingOrder] = useState<PendingOrderLike | null>(null);
   const [cancellingPending, setCancellingPending] = useState(false);
 
-  // Broker mode poll
-  const [brokerMode, setBrokerMode] = useState<"paper" | "live">("paper");
-
-  useEffect(() => {
-    let mounted = true;
-    const loadStatus = async () => {
-      try {
-        const res = await authFetch("/api/broker/status");
-        if (res.status === 401) return;
-        const data = await res.json();
-        if (mounted && data?.mode) setBrokerMode(data.mode);
-      } catch {
-        // ignore
-      }
-    };
-    loadStatus();
-    const iv = setInterval(loadStatus, 5000);
-    return () => {
-      mounted = false;
-      clearInterval(iv);
-    };
-  }, []);
-
+  // Broker mode dari App (sumber tunggal useLiveMode) — TIDAK fetch sendiri.
   const isLiveMode = brokerMode === "live";
 
-  const handleSimulate = async (side: "LONG" | "SHORT") => {
+  const handleSimulate = async (
+    side: "LONG" | "SHORT",
+    opts?: { stopLoss?: number; takeProfit?: number; sizePct?: number; leverage?: number }
+  ) => {
     if (isLiveMode) {
       const ok = window.confirm("Anda akan mengirim order REAL ke exchange. Lanjutkan?");
       if (!ok) return;
@@ -110,7 +103,8 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
       const result = await onSimulateTradeEntry(
         side,
         orderType,
-        orderType === "limit" ? Number(limitPrice) : undefined
+        orderType === "limit" ? Number(limitPrice) : undefined,
+        opts
       );
       const order = (result as any)?.order ?? result ?? null;
       const state = String(order?.state ?? order?.status ?? "").toUpperCase();
@@ -135,6 +129,8 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
         isLiveMode={isLiveMode}
         currentPrice={currentPrice}
         symbol={symbol}
+        entryTimeframe={entryTimeframe}
+        marketType={marketType}
         orderType={orderType}
         setOrderType={setOrderType}
         limitPrice={limitPrice}
@@ -194,11 +190,14 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
                 </button>
                 <button
                   onClick={() => handleSimulate("SHORT")}
-                  className={`px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold font-mono transition ${
+                  disabled={String(marketType).toUpperCase() === "SPOT"}
+                  className={`px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold font-mono transition disabled:opacity-40 disabled:cursor-not-allowed ${
                     isLiveMode ? "ring-1 ring-rose-400/50" : ""
                   }`}
                   title={
-                    isLiveMode
+                    String(marketType).toUpperCase() === "SPOT"
+                      ? "SPOT hanya bisa BUY/LONG — ganti ke FUTURES untuk SHORT"
+                      : isLiveMode
                       ? "Kirim order SHORT REAL ke exchange (konfirmasi dulu)"
                       : "Simulasikan entry SHORT"
                   }
@@ -222,6 +221,7 @@ export const PaperTradingPanel: React.FC<PaperTradingPanelProps> = ({
                   key={pos.id}
                   pos={pos}
                   currentPrice={currentPrice}
+                  activeCandles={activeCandles}
                   isExpanded={expandedPositionId === pos.id}
                   onToggleExpand={() => setExpandedPositionId(expandedPositionId === pos.id ? null : pos.id)}
                   onClosePosition={onClosePosition}

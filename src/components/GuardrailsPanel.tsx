@@ -30,6 +30,7 @@ interface GuardrailsSnapshot {
     lastOrderAt: number | null;
     cooldownRemainingMs: number;
     armedForLive: boolean;
+    guardsEnabled: boolean;
   };
   today: {
     realizedPnlUSD: number;
@@ -37,7 +38,7 @@ interface GuardrailsSnapshot {
   };
 }
 
-const POLL_MS = 5000;
+const POLL_MS = 15000;
 
 function fmtMoney(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -50,6 +51,7 @@ export const GuardrailsPanel: React.FC = () => {
   const [conn, setConn] = useState<"ok" | "error" | "hidden" | "loading">("loading");
   const [killBusy, setKillBusy] = useState(false);
   const [armBusy, setArmBusy] = useState(false);
+  const [guardBusy, setGuardBusy] = useState(false);
   const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [cooldownTick, setCooldownTick] = useState(0);
   const mountedRef = useRef(false);
@@ -63,6 +65,7 @@ export const GuardrailsPanel: React.FC = () => {
     }
     try {
       const res = await authFetch("/api/broker/guardrails");
+      if (res.status === 429) return; // cooldown global menangani retry; tampilkan cache
       if (res.status === 401) {
         setConn("error");
         return;
@@ -156,8 +159,52 @@ export const GuardrailsPanel: React.FC = () => {
     }
   };
 
-  const handleArm = async (arm: boolean) => {
-    const action = arm ? "ARM" : "DISARM";
+  // Master toggle guardrails (paper training ON/OFF). Di live di-lock server.
+  const handleGuardsToggle = async () => {
+    if (!data) return;
+    const nextActive = !(data.state.guardsEnabled ?? true);
+    if (!nextActive) {
+      const ok = window.confirm(
+        "MATIKAN guardrails? Order paper bebas tanpa blokir (daily-loss, max-posisi, cooldown). Untuk training. Kill-switch tetap aktif."
+      );
+      if (!ok) return;
+    }
+    setGuardBusy(true);
+    setMsg(null);
+    try {
+      const res = await authFetch("/api/broker/guards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: nextActive }),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) {
+        const errMsg =
+          payload?.reason === "LIVE_LOCKED"
+            ? "Live mode: guardrails WAJIB aktif — tidak bisa dimatikan saat uang beneran."
+            : payload?.message || `Gagal toggle guardrails (HTTP ${res.status})`;
+        setMsg({ type: "err", text: errMsg });
+        pushToast("error", "Toggle guardrails gagal", errMsg);
+      } else {
+        setMsg({
+          type: "ok",
+          text: nextActive ? "Guardrails AKTIF — order dijaga proteksi." : "Guardrails MATI — mode training bebas (kill-switch tetap jalan).",
+        });
+        pushToast(
+          nextActive ? "success" : "warning",
+          nextActive ? "Guardrails AKTIF" : "Guardrails MATI — training mode",
+          nextActive ? "Order kembali dijaga proteksi." : "Order paper bebas tanpa blokir. Kill-switch tetap aktif."
+        );
+      }
+      await load();
+    } catch (e: any) {
+      setMsg({ type: "err", text: e?.message || "Toggle guardrails gagal." });
+    } finally {
+      setGuardBusy(false);
+    }
+  };
+
+  const handleArm = async (arm: boolean) => {    const action = arm ? "ARM" : "DISARM";
     if (arm) {
       const ok = window.confirm("ARM live trading? Pastikan TRADING_MODE=live dan credential sudah terisi. Order real akan terkirim ke exchange.");
       if (!ok) return;
@@ -220,13 +267,31 @@ export const GuardrailsPanel: React.FC = () => {
   const { config, state, today } = data;
   const dailyPct = state.dailyLossPercent;
   const dailyLimit = config.maxDailyLossPercent;
-  const dailyProgress = dailyLimit > 0 ? Math.min(100, (dailyPct / dailyLimit) * 100) : 0;
+  // Order DIBLOKIR saat ini? Tampilkan penyebab eksplisit (bukan user menebak).
+  // Guard loss 0/Infinity = dimatikan via env → jangan anggap memblokir.
+  const dailyGuardOn = dailyLimit > 0 && isFinite(dailyLimit);
+  const dailyProgress = dailyGuardOn ? Math.min(100, (dailyPct / dailyLimit) * 100) : 0;
   const dailyColor =
-    dailyPct >= dailyLimit
+    !dailyGuardOn
+      ? "bg-zinc-600"
+      : dailyPct >= dailyLimit
       ? "bg-rose-500"
       : dailyPct >= dailyLimit * 0.7
       ? "bg-amber-500"
       : "bg-emerald-500";
+  const blockedByDaily = dailyGuardOn && dailyPct >= dailyLimit;
+  // Master toggle: state lama tanpa field → anggap ON (fail-closed ke proteksi).
+  // Default server: paper OFF (training), live ON (wajib + live-lock).
+  const guardsOn = state.guardsEnabled ?? true;
+  const blockReasons: string[] = guardsOn
+    ? [
+        ...(state.killSwitch ? ["KILL_SWITCH_ACTIVE"] : []),
+        ...(blockedByDaily ? ["MAX_DAILY_LOSS_EXCEEDED"] : []),
+        ...(state.openCount >= config.maxOpenPositions ? ["MAX_OPEN_POSITIONS"] : []),
+        ...(cooldownRemaining > 0 ? ["COOLDOWN_ACTIVE"] : []),
+      ]
+    // Guard mati (training): kill-switch tetap bisa memblokir darurat.
+    : [...(state.killSwitch ? ["KILL_SWITCH_ACTIVE"] : [])];
   const openAtCap = state.openCount >= config.maxOpenPositions;
   const cooldownActive = cooldownRemaining > 0;
   const isKillActive = state.killSwitch;
@@ -260,6 +325,16 @@ export const GuardrailsPanel: React.FC = () => {
           <div className="flex items-center gap-1.5">
             <span
               className={`px-2 py-0.5 rounded border text-[10px] font-mono font-bold uppercase ${
+                guardsOn
+                  ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                  : "bg-sky-500/15 text-sky-300 border-sky-500/30"
+              }`}
+              title={guardsOn ? "Guardrails aktif — order dijaga proteksi" : "Training mode — order paper bebas tanpa blokir (kill-switch tetap jalan)"}
+            >
+              guards {guardsOn ? "ON" : "OFF"}
+            </span>
+            <span
+              className={`px-2 py-0.5 rounded border text-[10px] font-mono font-bold uppercase ${
                 isKillActive ? "bg-rose-500 text-white border-rose-600 animate-pulse" : "bg-zinc-800 text-zinc-400 border-zinc-700"
               }`}
             >
@@ -281,8 +356,8 @@ export const GuardrailsPanel: React.FC = () => {
             <span className="text-zinc-400 text-[11px] flex items-center gap-1">
               <TrendingDown className="w-3 h-3" /> Daily Loss Guard
             </span>
-            <span className={`font-bold ${dailyPct >= dailyLimit ? "text-rose-400" : dailyPct >= dailyLimit * 0.5 ? "text-amber-400" : "text-zinc-100"}`}>
-              {dailyPct.toFixed(2)}% / {dailyLimit}% limit
+            <span className={`font-bold ${dailyGuardOn && dailyPct >= dailyLimit ? "text-rose-400" : dailyGuardOn && dailyPct >= dailyLimit * 0.5 ? "text-amber-400" : "text-zinc-100"}`}>
+              {dailyGuardOn ? `${dailyPct.toFixed(2)}% / ${dailyLimit}% limit` : "OFF (env = 0)"}
             </span>
           </div>
           <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
@@ -333,7 +408,7 @@ export const GuardrailsPanel: React.FC = () => {
           </div>
           <div className="p-2 rounded-lg bg-zinc-950 border border-zinc-800 text-center">
             <span className="text-zinc-500 block text-[9px] uppercase">maxDailyLoss%</span>
-            <span className="font-bold text-rose-400">{config.maxDailyLossPercent}%</span>
+            <span className="font-bold text-rose-400">{dailyGuardOn ? `${config.maxDailyLossPercent}%` : "OFF"}</span>
           </div>
           <div className="p-2 rounded-lg bg-zinc-950 border border-zinc-800 text-center">
             <span className="text-zinc-500 block text-[9px] uppercase">minOrderInterval</span>
@@ -353,6 +428,19 @@ export const GuardrailsPanel: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleGuardsToggle}
+              disabled={guardBusy}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-xs border transition ${
+                guardsOn
+                  ? "bg-zinc-800 hover:bg-sky-500/20 text-sky-300 border-sky-500/30"
+                  : "bg-sky-500 hover:bg-sky-400 text-zinc-950 border-sky-600"
+              } disabled:opacity-50`}
+              title={guardsOn ? "Matikan guardrails untuk training paper (live: dikunci server)" : "Aktifkan kembali proteksi guardrails"}
+            >
+              {guardBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+              {guardsOn ? "Matikan Guard (Training)" : "Aktifkan Guard"}
+            </button>
             <button
               onClick={handleKillToggle}
               disabled={killBusy}
@@ -398,6 +486,39 @@ export const GuardrailsPanel: React.FC = () => {
             <AlertTriangle className="w-4 h-4 shrink-0" />
             <span>
               KILL SWITCH AKTIF — semua order baru ditolak dengan reason <span className="font-bold">KILL_SWITCH_ACTIVE</span>
+            </span>
+          </div>
+        )}
+
+        {/* Status blokir order — penyebab eksplisit per guard */}
+        <div className={`flex items-start gap-2 p-2.5 rounded-xl border font-mono text-xs ${blockReasons.length > 0 ? "bg-rose-950/40 border-rose-500/30 text-rose-300" : "bg-emerald-950/30 border-emerald-500/30 text-emerald-300"}`}>
+          {blockReasons.length > 0 ? <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> : <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />}
+          <span>
+            {blockReasons.length > 0 ? (
+              <>
+                <strong>ORDER DIBLOKIR: {blockReasons.join(", ")}</strong>
+                {blockedByDaily && (
+                  <> — loss harian {dailyPct.toFixed(2)}% (realized ${fmtMoney(today.realizedPnlUSD)}) ≥ batas {dailyLimit}%. Blokir lepas otomatis saat reset harian 00:00, atau naikkan <span className="text-zinc-200">GUARD_MAX_DAILY_LOSS_PERCENT</span> di env lalu restart server.</>
+                )}
+                {state.openCount >= config.maxOpenPositions && (
+                  <> — {state.openCount}/{config.maxOpenPositions} posisi terbuka. Tutup salah satu dulu.</>
+                )}
+                {cooldownRemaining > 0 && (
+                  <> — cooldown {Math.ceil(cooldownRemaining / 1000)}s tersisa.</>
+                )}
+              </>
+            ) : (
+              <>Order diizinkan — semua guard lolos (loss {dailyPct.toFixed(2)}% / {dailyLimit}%, open {state.openCount}/{config.maxOpenPositions}).</>
+            )}
+          </span>
+        </div>
+
+        {/* Training mode: guard mati — order bebas, kill-switch tetap jalan */}
+        {!guardsOn && !isKillActive && (
+          <div className="flex items-center gap-2 p-2.5 rounded-xl bg-sky-950/40 border border-sky-500/30 font-mono text-xs text-sky-300">
+            <ShieldCheck className="w-4 h-4 shrink-0" />
+            <span>
+              <strong>TRAINING MODE</strong> — guardrails OFF: order paper bebas tanpa blokir daily-loss / max-posisi / cooldown. Kill-switch tetap aktif untuk darurat. Aktifkan lagi sebelum live.
             </span>
           </div>
         )}

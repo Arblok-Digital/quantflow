@@ -71,6 +71,8 @@ export interface AiAdvisorResponse {
   success: boolean;
   mode: "ai" | "keel";
   geminiConfigured: boolean;
+  /** Penyebab mode keel-only: KEY_MISSING | KEY_LEGACY_REVOKED | AI_CALL_FAILED. */
+  aiDisabledReason?: "KEY_MISSING" | "KEY_LEGACY_REVOKED" | "AI_CALL_FAILED";
   timestamp: number;
   model?: string;
   keelSummary: AiAdvisorKeelSummary;
@@ -85,6 +87,7 @@ export interface AiAdvisorResponse {
     sopr: number | null;
     soprStatus: string | null;
     activeAddressesGrowth24h: number | null;
+    hasRealAnchor?: boolean;
   } | null;
   macroEcho?: {
     upcomingHighImpactCount: number | null;
@@ -334,15 +337,28 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                   )}
                 </div>
                 <div className="grid gap-1">
-                  {dataHealth.map((d) => (
-                    <div key={d.source} className="flex items-start gap-2 font-mono text-[11px]">
-                      <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${d.ok ? "bg-emerald-400" : "bg-amber-400 animate-pulse"}`} />
-                      <span className={`font-bold uppercase w-24 shrink-0 ${d.ok ? "text-zinc-300" : "text-amber-300"}`}>
-                        {d.source}
-                      </span>
-                      <span className={d.ok ? "text-zinc-400" : "text-amber-200"}>{d.detail}</span>
-                    </div>
-                  ))}
+                  {dataHealth.map((d) => {
+                    // F-08: state visual ketiga — ok:true tapi detail simulasi/no-data
+                    // = PARTIAL (kuning pudar), bukan hijau solid. Hijau hanya untuk real.
+                    const detailLower = String(d.detail || "").toLowerCase();
+                    const isPartial = d.ok && (
+                      detailLower.includes("simulasi") ||
+                      detailLower.includes("no-data") ||
+                      detailLower.includes("tanpa anchor")
+                    );
+                    const dotCls = !d.ok ? "bg-amber-400 animate-pulse" : isPartial ? "bg-yellow-200" : "bg-emerald-400";
+                    const labelCls = !d.ok ? "text-amber-300" : isPartial ? "text-yellow-200" : "text-zinc-300";
+                    const textCls = !d.ok ? "text-amber-200" : isPartial ? "text-yellow-100/80" : "text-zinc-400";
+                    return (
+                      <div key={d.source} className="flex items-start gap-2 font-mono text-[11px]">
+                        <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${dotCls}`} />
+                        <span className={`font-bold uppercase w-24 shrink-0 ${labelCls}`}>
+                          {d.source}{isPartial ? " ~" : ""}
+                        </span>
+                        <span className={textCls}>{d.detail}</span>
+                      </div>
+                    );
+                  })}
                 </div>
                 {isAi && llmGaps.length > 0 && (
                   <p className="mt-2 text-[10px] font-mono text-cyan-300">
@@ -412,7 +428,11 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
               <p className="text-sm text-zinc-200 leading-relaxed font-sans">{ai?.insight}</p>
               {result.mode === "keel" && (
                 <p className="text-[10px] font-mono text-amber-400/80">
-                  Set GEMINI_API_KEY lalu refresh untuk insight AI lanjutan (on-chain + makro).
+                  {result.aiDisabledReason === "KEY_LEGACY_REVOKED"
+                    ? "Key AIza lama dicabut Google — ganti key baru (format AQ.x) di .env lalu restart server."
+                    : result.aiDisabledReason === "AI_CALL_FAILED"
+                      ? "Gemini gagal dihubungi (transien/overload) — tekan Minta Insight untuk retry."
+                      : "Set GEMINI_API_KEY lalu refresh untuk insight AI lanjutan (on-chain + makro)."}
                 </p>
               )}
             </div>

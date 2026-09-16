@@ -98,6 +98,9 @@ export function initDb(): DatabaseSync {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);`);
 
   // Positions
+  // entry_source: MANUAL (klik panel entry) | AUTOPILOT (pipeline/auto) | REPLAY.
+  // Kolom ini jawaban atas "winrate manual vs autopilot" — statistik gabungan
+  // menyembunyikan perbaikan engine, jadi journal WAJIB split per source.
   db.exec(`
     CREATE TABLE IF NOT EXISTS positions(
       id TEXT PRIMARY KEY,
@@ -114,10 +117,19 @@ export function initDb(): DatabaseSync {
       closed_at INTEGER,
       close_price REAL,
       realized_pnl_usd REAL,
-      fees_usd REAL
+      fees_usd REAL,
+      entry_source TEXT NOT NULL DEFAULT 'MANUAL'
     );
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_source ON positions(entry_source);`);
+  // Migrasi DB lama (tanpa kolom): tambah kolom + backfill MANUAL.
+  try {
+    const hasCol = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('positions') WHERE name='entry_source'`).get() as any;
+    if (!hasCol || Number(hasCol.n) === 0) {
+      db.exec(`ALTER TABLE positions ADD COLUMN entry_source TEXT NOT NULL DEFAULT 'MANUAL'`);
+    }
+  } catch {}
 
   // Portfolio snapshots
   db.exec(`
@@ -379,6 +391,14 @@ export function verifyLedger(): { total: number; valid: boolean; tampered: numbe
 // ------------------------------------------------------------------
 // Stats
 // ------------------------------------------------------------------
+export interface SourceSplit {
+  totalTrades: number;
+  winRate: number;
+  avgR: number;
+  profitFactor: number;
+  realizedPnlUSD: number;
+}
+
 export interface LedgerStats {
   totalTrades: number;
   winRate: number;
@@ -387,6 +407,8 @@ export interface LedgerStats {
   maxDrawdownPct: number;
   avgSlippageBps: number;
   realizedPnlUSD: number;
+  /** Split MANUAL vs AUTOPILOT vs REPLAY — perbaikan engine hanya terlihat di sini. */
+  bySource: Record<string, SourceSplit>;
   closedTrades: Array<{
     id: string;
     symbol: string;
@@ -457,7 +479,7 @@ export function getLedgerStats(): LedgerStats {
 
   const closedRows = _db
     .prepare(
-      "SELECT id, symbol, side, entry_price as entryPrice, close_price as closePrice, amount, realized_pnl_usd as realizedPnlUsd, stop_loss as stopLoss, opened_at as openedAt, closed_at as closedAt, status FROM positions WHERE status='CLOSED' ORDER BY closed_at DESC"
+      "SELECT id, symbol, side, entry_price as entryPrice, close_price as closePrice, amount, realized_pnl_usd as realizedPnlUsd, stop_loss as stopLoss, opened_at as openedAt, closed_at as closedAt, status, COALESCE(entry_source, 'MANUAL') as entrySource FROM positions WHERE status='CLOSED' ORDER BY closed_at DESC"
     )
     .all() as any[];
 
@@ -468,6 +490,10 @@ export function getLedgerStats(): LedgerStats {
   let grossProfit = 0;
   let grossLoss = 0;
   const rValues: number[] = [];
+  // Akumulator per source (MANUAL/AUTOPILOT/REPLAY) — hitung dalam 1 pass.
+  const src: Record<string, { n: number; wins: number; gp: number; gl: number; pnl: number; r: number[] }> = {};
+
+  const bumpSrc = (s: string) => (src[s] ??= { n: 0, wins: 0, gp: 0, gl: 0, pnl: 0, r: [] });
 
   for (const r of closedRows) {
     const pnl = Number(r.realizedPnlUsd ?? 0);
@@ -482,17 +508,37 @@ export function getLedgerStats(): LedgerStats {
     const stopLoss = Number(r.stopLoss ?? 0);
     const entryPrice = Number(r.entryPrice ?? 0);
     const amount = Number(r.amount ?? 0);
+    let rVal: number | null = null;
     if (isFinite(stopLoss) && stopLoss > 0 && isFinite(entryPrice) && entryPrice > 0 && isFinite(amount) && amount > 0) {
       const riskAmt = Math.abs(entryPrice - stopLoss) * amount;
       if (riskAmt > 1e-9) {
-        rValues.push(pnl / riskAmt);
+        rVal = pnl / riskAmt;
+        rValues.push(rVal);
       }
     }
+    const s = String(r.entrySource || "MANUAL").toUpperCase();
+    const acc = bumpSrc(s);
+    acc.n++;
+    acc.pnl += pnl;
+    if (pnl > 0) { acc.wins++; acc.gp += pnl; }
+    else if (pnl < 0) { acc.gl += Math.abs(pnl); }
+    if (rVal != null) acc.r.push(rVal);
   }
   realizedPnlUSD = Number(realizedPnlUSD.toFixed(2));
   const winRate = totalTrades > 0 ? Number(((wins / totalTrades) * 100).toFixed(2)) : 0;
   const avgR = rValues.length > 0 ? Number((rValues.reduce((a, b) => a + b, 0) / rValues.length).toFixed(2)) : 0;
   const profitFactor = grossLoss > 0 ? Number((grossProfit / grossLoss).toFixed(2)) : grossProfit > 0 ? 999 : 0;
+
+  const bySource: Record<string, SourceSplit> = {};
+  for (const [k, a] of Object.entries(src)) {
+    bySource[k] = {
+      totalTrades: a.n,
+      winRate: a.n > 0 ? Number(((a.wins / a.n) * 100).toFixed(2)) : 0,
+      avgR: a.r.length > 0 ? Number((a.r.reduce((x, y) => x + y, 0) / a.r.length).toFixed(2)) : 0,
+      profitFactor: a.gl > 0 ? Number((a.gp / a.gl).toFixed(2)) : a.gp > 0 ? 999 : 0,
+      realizedPnlUSD: Number(a.pnl.toFixed(2)),
+    };
+  }
 
   // avg slippage
   const slippageRow = _db.prepare("SELECT AVG(slippage_bps) as avgSlip FROM orders WHERE slippage_bps IS NOT NULL").get() as any;
@@ -528,6 +574,7 @@ export function getLedgerStats(): LedgerStats {
     openedAt: Number(r.openedAt),
     closedAt: r.closedAt != null ? Number(r.closedAt) : null,
     status: String(r.status),
+    entrySource: String(r.entrySource || "MANUAL"),
   }));
 
   if (totalTrades === 0) {
@@ -539,6 +586,7 @@ export function getLedgerStats(): LedgerStats {
       maxDrawdownPct: 0,
       avgSlippageBps: 0,
       realizedPnlUSD: 0,
+      bySource: {},
       closedTrades: [],
       equityCurve,
     };
@@ -552,6 +600,7 @@ export function getLedgerStats(): LedgerStats {
     maxDrawdownPct,
     avgSlippageBps,
     realizedPnlUSD,
+    bySource,
     closedTrades,
     equityCurve,
   };

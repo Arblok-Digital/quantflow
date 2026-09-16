@@ -10,6 +10,20 @@ interface ProbabilityBadgeProps {
   compact?: boolean;
   stopLoss?: number | null;
   takeProfit?: number | null;
+  /** Posisi aktual terbuka (dipakai untuk TP/SL + side real, bukan default). */
+  livePosition?: {
+    side: string;
+    entryPrice?: number | null;
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+  } | null;
+  /** Keputusan pipeline terakhir (fallback side/entry bila belum ada posisi). */
+  liveDecision?: {
+    action?: string;
+    targetPrice?: number | null;
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+  } | null;
 }
 
 /**
@@ -24,9 +38,48 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
   compact = false,
   stopLoss = null,
   takeProfit = null,
+  livePosition = null,
+  liveDecision = null,
 }) => {
+  // Resolusi side/entry/TP/SL: posisi aktual > decision pipeline > default est.
+  // Sebelumnya side selalu LONG + TP/SL default — probabilitas bukan milik setup real.
+  const posSideRaw = String(livePosition?.side || "").toUpperCase();
+  const decActionRaw = String(liveDecision?.action || "").toUpperCase();
+  const sideFallback: "LONG" | "SHORT" = side === "SHORT" ? "SHORT" : "LONG";
+  const resolvedSide: "LONG" | "SHORT" =
+    posSideRaw.includes("SHORT") || posSideRaw === "SELL"
+      ? "SHORT"
+      : posSideRaw.includes("LONG") || posSideRaw === "BUY"
+        ? "LONG"
+        : decActionRaw === "SELL" || decActionRaw === "SHORT"
+          ? "SHORT"
+          : decActionRaw === "BUY" || decActionRaw === "LONG"
+            ? "LONG"
+            : sideFallback;
+  const resolvedEntry =
+    (livePosition?.entryPrice != null && isFinite(livePosition.entryPrice) && livePosition.entryPrice > 0
+      ? livePosition.entryPrice
+      : liveDecision?.targetPrice != null && isFinite(liveDecision.targetPrice) && liveDecision.targetPrice > 0
+        ? liveDecision.targetPrice
+        : entryPrice) || currentPrice;
+  const resolvedSL =
+    livePosition?.stopLoss != null && isFinite(livePosition.stopLoss) && livePosition.stopLoss > 0
+      ? livePosition.stopLoss
+      : stopLoss != null && isFinite(stopLoss) && stopLoss > 0
+        ? stopLoss
+        : liveDecision?.stopLoss != null && isFinite(liveDecision.stopLoss) && liveDecision.stopLoss > 0
+          ? liveDecision.stopLoss
+          : null;
+  const resolvedTP =
+    livePosition?.takeProfit != null && isFinite(livePosition.takeProfit) && livePosition.takeProfit > 0
+      ? livePosition.takeProfit
+      : takeProfit != null && isFinite(takeProfit) && takeProfit > 0
+        ? takeProfit
+        : liveDecision?.takeProfit != null && isFinite(liveDecision.takeProfit) && liveDecision.takeProfit > 0
+          ? liveDecision.takeProfit
+          : null;
   const [result, setResult] = useState<ProbResult | null>(() =>
-    coldProb(entryPrice, 0.021, 0.009)
+    coldProb(resolvedEntry, 0.035, 0.015)
   );
   const [loading, setLoading] = useState(true);
 
@@ -35,20 +88,27 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
     const run = async () => {
       setLoading(true);
       try {
-        const tpPct = 0.021;
-        const slPctAbs = 0.009;
+        // TP/SL real dari posisi/decision bila ada; fallback default est 3.5/1.5%.
+        const tpPct =
+          resolvedTP != null && resolvedEntry > 0
+            ? Math.abs(resolvedTP - resolvedEntry) / resolvedEntry
+            : 0.035;
+        const slPctAbs =
+          resolvedSL != null && resolvedEntry > 0
+            ? Math.abs(resolvedEntry - resolvedSL) / resolvedEntry
+            : 0.015;
         const input: ProbInput = {
-          flow: side === "LONG" ? "BULLISH" : "BEARISH",
+          flow: resolvedSide === "LONG" ? "BULLISH" : "BEARISH",
           confluenceScore: probInput?.confluenceScore ?? 0.6,
           absorptionScore: probInput?.absorptionScore ?? 50,
           wallAction: probInput?.wallAction ?? "NONE",
           spreadPct: probInput?.spreadPct ?? 0.02,
           imbalance: probInput?.imbalance ?? 1.0,
         };
-        const res = await calibratedProb(input, entryPrice, tpPct, slPctAbs);
+        const res = await calibratedProb(input, resolvedEntry, tpPct, slPctAbs);
         if (alive) setResult(res);
       } catch {
-        if (alive) setResult(coldProb(entryPrice, 0.021, 0.009));
+        if (alive) setResult(coldProb(resolvedEntry, 0.035, 0.015));
       } finally {
         if (alive) setLoading(false);
       }
@@ -59,16 +119,22 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
       alive = false;
       clearInterval(iv);
     };
-  }, [entryPrice, side, probInput?.confluenceScore, probInput?.absorptionScore, probInput?.wallAction]);
+  }, [resolvedEntry, resolvedSide, resolvedTP, resolvedSL, probInput?.confluenceScore, probInput?.absorptionScore, probInput?.wallAction]);
 
   if (!result) return null;
 
   const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
-  const isLong = side === "LONG";
-  const hasLiveLevels = stopLoss != null && takeProfit != null && isFinite(stopLoss) && isFinite(takeProfit) && stopLoss > 0 && takeProfit > 0;
+  const isLong = resolvedSide === "LONG";
+  // Live bila TP/SL berasal dari posisi/decision real (bukan default est).
+  const hasLiveLevels = resolvedTP != null && resolvedSL != null;
+  const levelSource = livePosition
+    ? `posisi ${livePosition.side} @ ${resolvedEntry.toFixed(2)}`
+    : liveDecision?.action
+      ? `decision ${liveDecision.action}`
+      : "default est.";
   const pctLabel = (absPrice: number): string => {
-    if (!isFinite(absPrice) || entryPrice === 0) return "–";
-    return `${(((absPrice - entryPrice) / entryPrice) * 100).toFixed(2)}%`;
+    if (!isFinite(absPrice) || resolvedEntry === 0) return "–";
+    return `${(((absPrice - resolvedEntry) / resolvedEntry) * 100).toFixed(2)}%`;
   };
 
   if (compact) {
@@ -125,15 +191,15 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
       <div className="grid grid-cols-3 gap-2 mt-2.5">
         <div className="bg-zinc-950/80 rounded-lg p-2 border border-emerald-500/20">
           <div className="flex items-center gap-1 text-[9px] text-emerald-400 font-bold uppercase">
-            <TrendingUp className="w-2.5 h-2.5" /> {hasLiveLevels ? "TP (live)" : "TP1 — default est."}
+            <TrendingUp className="w-2.5 h-2.5" /> {hasLiveLevels ? `TP (${resolvedSide})` : "TP1 — default est."}
           </div>
           <div className="text-xs font-bold text-emerald-300 mt-0.5">
-            ${hasLiveLevels ? Number(takeProfit).toFixed(2) : isLong ? Math.max(result.tp1, result.tp2 * 0.98).toFixed(2) : Math.min(result.tp1 / 1.5, result.tp2).toFixed(2)}</div>
-          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(takeProfit)) : "+2.1% default est."}</div>
+            ${hasLiveLevels ? Number(resolvedTP).toFixed(2) : isLong ? Math.max(result.tp1, result.tp2 * 0.98).toFixed(2) : Math.min(result.tp1 / 1.5, result.tp2).toFixed(2)}</div>
+          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(resolvedTP)) : "+3.5% default est."}</div>
         </div>
         <div className="bg-zinc-950/80 rounded-lg p-2 border border-amber-500/20">
           <div className="flex items-center gap-1 text-[9px] text-amber-400 font-bold uppercase">
-            <Target className="w-2.5 h-2.5" /> {hasLiveLevels ? "TP2 — default est." : "TP2 — default est."}
+            <Target className="w-2.5 h-2.5" /> TP2 — default est.
           </div>
           <div className="text-xs font-bold text-amber-300 mt-0.5">
             ${isLong ? result.tp2.toFixed(2) : result.tp1.toFixed(2)}</div>
@@ -141,19 +207,19 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
         </div>
         <div className="bg-zinc-950/80 rounded-lg p-2 border border-rose-500/20">
           <div className="flex items-center gap-1 text-[9px] text-rose-400 font-bold uppercase">
-            <Shield className="w-2.5 h-2.5" /> {hasLiveLevels ? "SL (live)" : "SL — default est."}
+            <Shield className="w-2.5 h-2.5" /> {hasLiveLevels ? `SL (${resolvedSide})` : "SL — default est."}
           </div>
           <div className="text-xs font-bold text-rose-300 mt-0.5">
-            ${hasLiveLevels ? Number(stopLoss).toFixed(2) : isLong ? result.sl.toFixed(2) : (entryPrice * 1.009).toFixed(2)}</div>
-          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(stopLoss)) : "-0.9% default est."}</div>
+            ${hasLiveLevels ? Number(resolvedSL).toFixed(2) : isLong ? result.sl.toFixed(2) : (resolvedEntry * 1.015).toFixed(2)}</div>
+          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(resolvedSL)) : "-1.5% default est."}</div>
         </div>
       </div>
 
       <div className="mt-2 text-[9px] text-zinc-600 border-t border-zinc-800 pt-1.5 flex items-center gap-1">
         <Info className="w-2.5 h-2.5" />
         {result.prior
-          ? `Belum ada riwayat outcome — memakai prior Laplace (P=0.52). prior (${result.bucket}) • ${hasLiveLevels ? "TP/SL live dari posisi" : "TP/SL default est."}`
-          : `Calibrated ${result.bucket} • ${hasLiveLevels ? "TP/SL live dari posisi" : "TP1/TP2/SL default est."}`}
+          ? `Belum ada riwayat outcome — memakai prior Laplace (P=0.52). prior (${result.bucket}) • ${levelSource}`
+          : `Calibrated ${result.bucket} • ${levelSource}`}
       </div>
     </div>
   );

@@ -16,12 +16,13 @@ export function savePositionDb(row: {
   close_price: number | null;
   realized_pnl_usd: number | null;
   fees_usd: number | null;
+  entry_source?: string;
 }): void {
   const _db = getDb();
   _db.prepare(
     `INSERT OR REPLACE INTO positions
-     (id, symbol, side, entry_price, amount, leverage, stop_loss, take_profit, liq_price, status, opened_at, closed_at, close_price, realized_pnl_usd, fees_usd)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, symbol, side, entry_price, amount, leverage, stop_loss, take_profit, liq_price, status, opened_at, closed_at, close_price, realized_pnl_usd, fees_usd, entry_source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.symbol,
@@ -37,7 +38,8 @@ export function savePositionDb(row: {
     row.closed_at,
     row.close_price,
     row.realized_pnl_usd,
-    row.fees_usd
+    row.fees_usd,
+    row.entry_source || "MANUAL"
   );
 }
 

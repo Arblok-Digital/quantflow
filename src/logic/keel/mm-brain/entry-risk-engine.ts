@@ -93,12 +93,16 @@ export function deriveEntryStopTarget(ctx: MarketContext, direction?: TradeDirec
   const volStopFloor = volatility * 0.75;
   let stopAbs: number;
   let stopRationale: string;
+  // Lantai jarak minimum: wall dipakai sebagai SL HANYA bila jaraknya sudah
+  // lebih LEBAR dari lantai (aman dari noise). Untuk BUY, harga stop yang
+  // lebih KECIL = lebih jauh dari entry. Jadi wall valid bila
+  // stopFromStructure <= minAllow; bila wall lebih dekat (>) → fallback vol.
   if (action === 'BUY') {
     const support = bidWall && bidWall.price < entry ? bidWall.price : null;
     const stopFromStructure = support ? entry - (entry - support) : null;
     const stopFromVol = entry * (1 - volStopFloor);
     const minAllow = entry * (1 - volStopFloor * 0.5);
-    if (support && stopFromStructure! > minAllow) {
+    if (support && stopFromStructure! <= minAllow) {
       stopAbs = stopFromStructure!;
       stopRationale = `below structure support @${support.toFixed(depthPrecision(entry))}`;
     } else {
@@ -106,11 +110,13 @@ export function deriveEntryStopTarget(ctx: MarketContext, direction?: TradeDirec
       stopRationale = `0.75×${volLabel}(${(volatility * 100).toFixed(2)}%) below entry`;
     }
   } else {
+    // SELL simetris: stop yang lebih BESAR = lebih jauh dari entry.
+    // Wall valid bila stopFromStructure >= minAllow.
     const resist = askWall && askWall.price > entry ? askWall.price : null;
     const stopFromStructure = resist ? entry + (resist - entry) : null;
     const stopFromVol = entry * (1 + volStopFloor);
     const minAllow = entry * (1 + volStopFloor * 0.5);
-    if (resist && stopFromStructure! < minAllow) {
+    if (resist && stopFromStructure! >= minAllow) {
       stopAbs = stopFromStructure!;
       stopRationale = `above structure resistance @${resist.toFixed(depthPrecision(entry))}`;
     } else {

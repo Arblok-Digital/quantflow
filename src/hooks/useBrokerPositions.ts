@@ -70,7 +70,37 @@ export interface BrokerPositionsResult {
   refresh: () => Promise<void>;
 }
 
-const POLL_MS = 5000;
+const POLL_MS = 15000;
+
+// Deduplikasi global: satu interval untuk SEMUA konsumen hook ini (StrictMode
+// DEV me-mount hook 2x → tanpa ini request /api/broker/* ikut ganda).
+let sharedTimer: ReturnType<typeof setInterval> | null = null;
+let subscriberCount = 0;
+const subscribers = new Set<() => void>();
+let lastSharedLoad = 0;
+
+function subscribeShared(load: () => void): () => void {
+  subscribers.add(load);
+  subscriberCount += 1;
+  // Panggilan pertama tiap subscriber dibiarkan via load() di bawah;
+  // timer global hanya satu, throttle min 5s antar fire.
+  if (!sharedTimer) {
+    sharedTimer = setInterval(() => {
+      const now = Date.now();
+      if (now - lastSharedLoad < 5000) return;
+      lastSharedLoad = now;
+      subscribers.forEach((fn) => fn());
+    }, POLL_MS);
+  }
+  return () => {
+    subscribers.delete(load);
+    subscriberCount -= 1;
+    if (subscriberCount <= 0 && sharedTimer) {
+      clearInterval(sharedTimer);
+      sharedTimer = null;
+    }
+  };
+}
 
 export function useBrokerPositions(): BrokerPositionsResult {
   const { isAuthenticated } = useAuth();
@@ -87,9 +117,11 @@ export function useBrokerPositions(): BrokerPositionsResult {
     if (!isAuthenticated) return;
     try {
       const [posRes, ordersRes] = await Promise.all([
-        authFetch("/api/broker/positions").then((r) => r.json().catch(() => null)),
-        authFetch("/api/broker/orders").then((r) => r.json().catch(() => null)),
+        authFetch("/api/broker/positions").then((r) => (r.status === 429 ? null : r.json().catch(() => null))),
+        authFetch("/api/broker/orders").then((r) => (r.status === 429 ? null : r.json().catch(() => null))),
       ]);
+      // 429 → tampilkan cache terakhir (fail-closed visual), bukan error.
+      if (posRes === null && ordersRes === null) return;
 
       if (posRes && posRes.success) {
         const rawPositions: ServerPosition[] = Array.isArray(posRes.positions)
@@ -123,13 +155,13 @@ export function useBrokerPositions(): BrokerPositionsResult {
     mountedRef.current = true;
     if (!isAuthenticated) return;
     load();
-    const iv = setInterval(load, POLL_MS);
+    const unsubscribe = subscribeShared(load);
     const onVis = () => {
       if (!document.hidden) load();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      clearInterval(iv);
+      unsubscribe();
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [isAuthenticated, load]);

@@ -12,7 +12,7 @@ interface LiveModeState {
   balances?: Array<{ currency: string; free: number; used: number; total: number }>;
 }
 
-const POLL_MS = 5000;
+const POLL_MS = 15000;
 
 export function useLiveMode(isAuthenticated?: boolean) {
   const [state, setState] = useState<LiveModeState>({
@@ -35,10 +35,12 @@ export function useLiveMode(isAuthenticated?: boolean) {
     if (document.hidden) return;
     try {
       const [credRes, guardRes, balRes] = await Promise.all([
-        authFetch("/api/broker/credentials/status").then((r) => r.json().catch(() => null)),
-        authFetch("/api/broker/guardrails").then((r) => r.json().catch(() => null)),
-        authFetch("/api/broker/balance").then((r) => r.json().catch(() => null)),
+        authFetch("/api/broker/credentials/status").then((r) => (r.status === 429 ? null : r.json().catch(() => null))),
+        authFetch("/api/broker/guardrails").then((r) => (r.status === 429 ? null : r.json().catch(() => null))),
+        authFetch("/api/broker/balance").then((r) => (r.status === 429 ? null : r.json().catch(() => null))),
       ]);
+      // Semua throttled → tampilkan cache terakhir.
+      if (!credRes && !guardRes && !balRes) return;
 
       const armedFromCred = Boolean(credRes?.armedForLive ?? credRes?.liveArmed);
       const armedFromGuard = Boolean(guardRes?.state?.armedForLive);

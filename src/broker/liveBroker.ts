@@ -20,7 +20,17 @@ export async function handleLiveOrder(req: Request, res: Response): Promise<Resp
   const guardLive = await evaluateGuardrails({ symbol: String(body.symbol || "BTC/USDT") });
   if (!guardLive.allowed) {
     const primary = guardLive.reasons[0] as string;
-    return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guardLive.reasons.join(", ")})`);
+    return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guardLive.reasons.join(", ")})`, {
+      dailyLossPercent: guardLive.details.dailyLossPercent,
+      maxDailyLossPercent: guardLive.details.maxDailyLossPercent,
+      realizedPnlUSD: guardLive.details.realizedPnlUSD,
+      openCount: guardLive.details.openCount,
+      maxOpenPositions: guardLive.details.maxOpenPositions,
+      cooldownRemainingMs: guardLive.details.cooldownRemainingMs,
+      killSwitch: guardLive.details.killSwitch,
+      guardsEnabled: (guardLive.details as any).guardsEnabled ?? true,
+      reasons: guardLive.reasons,
+    });
   }
   // Double-lock: liveArmed check is inside placeBrokerOrder via assertLiveAllowed, but we surface clearly
   try {

@@ -8,6 +8,9 @@ export interface MarketFeedResult {
   candles4h: Candle[];
   orderBook: OrderBook;
   status: ExchangeFeedStatus;
+  /** F-02: true bila candles15m/4h dari exchange; false bila digenerate lokal
+      (direct-ticker branch & synthetic branch) — untuk label TF yang jujur. */
+  candlesReal: boolean;
   ticker24h: {
     high: number;
     low: number;
@@ -18,10 +21,9 @@ export interface MarketFeedResult {
 
 /**
  * Fetch real live market data with multi-exchange fallback:
- * 1. Server-proxied Binance REST API
- * 2. Bybit REST API fallback
- * 3. Kraken REST API fallback
- * 4. Ultra-smooth synthetic simulation if offline or network restricted
+ * 1. Server-proxied /api/market-feed (chain Vision → Gate → Bybit → primer → CCXT)
+ * 2. Client-direct Binance ticker (harga real, candle tetap sintetis → candlesReal:false)
+ * 3. Pure synthetic simulation if offline or network restricted
  */
 export async function fetchLiveMarketData(
   symbol: string = "BTC/USDT",
@@ -41,6 +43,8 @@ export async function fetchLiveMarketData(
           candles15m: data.candles15m,
           candles4h: data.candles4h || generateCandlesForTimeframe(data.currentPrice, "4h", 35),
           orderBook: data.orderBook || generateOrderBook(data.currentPrice),
+          // F-02: bila 4h digenerate lokal (fallback baris di atas), flag jadi false.
+          candlesReal: !data.candles4h ? false : true,
           ticker24h: data.ticker24h || {
             high: data.currentPrice * 1.025,
             low: data.currentPrice * 0.978,
@@ -51,7 +55,9 @@ export async function fetchLiveMarketData(
             source: data.source as MarketDataSource,
             latencyMs: data.latencyMs || (Date.now() - startTime),
             lastSyncTimestamp: Date.now(),
-            isLive: data.source === "BINANCE_LIVE" || data.source === "BYBIT_FALLBACK" || data.source === "KRAKEN_FALLBACK",
+            // F-12: Vision/Gate/Bybit = data REAL (isLive:true). "KRAKEN_FALLBACK"
+            // dihapus dari daftar (tidak pernah jadi source aktual di chain manapun).
+            isLive: data.success !== false && data.source !== "SIMULATED",
             activeEndpoint: data.source === "BINANCE_LIVE" ? "api.binance.com/v3" : data.source === "BYBIT_FALLBACK" ? "api.bybit.com/v5" : "internal-router",
           },
         };
@@ -78,6 +84,8 @@ export async function fetchLiveMarketData(
           candles15m,
           candles4h,
           orderBook: generateOrderBook(realPrice),
+          // F-02: harga ticker real, tapi candle digenerate lokal → label sintetis.
+          candlesReal: false,
           ticker24h: {
             high: Number((realPrice * 1.022).toFixed(2)),
             low: Number((realPrice * 0.981).toFixed(2)),
@@ -107,6 +115,7 @@ export async function fetchLiveMarketData(
     candles15m,
     candles4h,
     orderBook: generateOrderBook(fallbackBasePrice),
+    candlesReal: false,
     ticker24h: {
       high: Number((fallbackBasePrice * 1.018).toFixed(2)),
       low: Number((fallbackBasePrice * 0.984).toFixed(2)),
@@ -124,15 +133,29 @@ export async function fetchLiveMarketData(
 }
 
 /**
+ * Sumber candle per-TF (F-02): tiap fetch TF wajib berlabel agar FE bisa
+ * bedakan data real vs sintetis — badge agregat market-feed TIDAK cukup.
+ */
+export type CandleSource = "REAL" | "SYNTHETIC";
+
+export interface KlinesResult {
+  candles: Candle[];
+  source: CandleSource;
+  /** Exchange hulu bila real (BINANCE_VISION/GATE_IO/direct-Binance), "GENERATOR" bila sintetis. */
+  origin: string;
+}
+/**
  * Fetch dedicated candles for any specific timeframe (1s to 1W)
  * Calls /api/klines with graceful fallback to client Binance or high-fidelity synthetic model.
+ * F-02: return wrapper berlabel { candles, source, origin } — BUKAN array
+ * polos — agar FE tidak pernah render candle sintetis seolah data real.
  */
 export async function fetchKlinesForTimeframe(
   symbol: string,
   timeframe: Timeframe,
   basePrice: number = 64250,
   limit: number = 45
-): Promise<Candle[]> {
+): Promise<KlinesResult> {
   const rawSymbol = symbol.replace("/", "").toUpperCase();
 
   // Try server proxy /api/klines
@@ -141,7 +164,7 @@ export async function fetchKlinesForTimeframe(
     if (res.ok) {
       const data = await res.json();
       if (data.success && Array.isArray(data.candles) && data.candles.length > 0) {
-        return data.candles;
+        return { candles: data.candles, source: "REAL", origin: String(data.source || "SERVER_CHAIN") };
       }
     }
   } catch (err) {
@@ -150,7 +173,7 @@ export async function fetchKlinesForTimeframe(
 
   // If 1s requested, generate fast micro candles around basePrice
   if (timeframe === "1s") {
-    return generateCandlesForTimeframe(basePrice, "1s", limit);
+    return { candles: generateCandlesForTimeframe(basePrice, "1s", limit), source: "SYNTHETIC", origin: "GENERATOR" };
   }
 
   // Direct Binance public klines attempt
@@ -170,19 +193,23 @@ export async function fetchKlinesForTimeframe(
     if (binanceRes.ok) {
       const rawKlines = await binanceRes.json();
       if (Array.isArray(rawKlines) && rawKlines.length > 0) {
-        return rawKlines.map((k: any) => ({
-          timestamp: k[0],
-          open: parseFloat(k[1]),
-          high: parseFloat(k[2]),
-          low: parseFloat(k[3]),
-          close: parseFloat(k[4]),
-          volume: parseFloat(k[5]),
-        }));
+        return {
+          candles: rawKlines.map((k: any) => ({
+            timestamp: k[0],
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+          })),
+          source: "REAL",
+          origin: "BINANCE_DIRECT",
+        };
       }
     }
   } catch (directErr) {
     // Fallback to generator
   }
 
-  return generateCandlesForTimeframe(basePrice, timeframe, limit);
+  return { candles: generateCandlesForTimeframe(basePrice, timeframe, limit), source: "SYNTHETIC", origin: "GENERATOR" };
 }

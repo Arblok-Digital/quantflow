@@ -24,8 +24,30 @@ export function clearAuthToken(): void {
 }
 
 /** Low-level fetch that injects Authorization header if token exists.
- *  On 401, clears token and dispatches global unauthorized event. */
+ *  On 401, clears token and dispatches global unauthorized event.
+ *  On 429 (RATE_LIMITED): short-circuit untuk GET — kembalikan Response 429
+ *  sintetis TANPA menyentuh network, agar poller yang overlap tidak ikut
+ *  memperpanjang jendela rate-limit server. Cooldown global 10s; POST/aksi
+ *  user (close/order/arm) TIDAK di-short-circuit agar tidak ada klik hilang. */
+let rateLimitedUntil = 0;
+
+export function noteRateLimited(retryAfterMs = 10000): void {
+  rateLimitedUntil = Math.max(rateLimitedUntil, Date.now() + retryAfterMs);
+}
+
+function synthetic429(): Response {
+  return new Response(JSON.stringify({ success: false, code: "RATE_LIMITED", message: "Throttled client-side." }), {
+    status: 429,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 export async function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const method = String(init.method || "GET").toUpperCase();
+  const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : String(input);
+  if (method === "GET" && Date.now() < rateLimitedUntil) {
+    return synthetic429();
+  }
   const token = getAuthToken();
   const headers = new Headers(init.headers || {});
   if (token && !headers.has("Authorization")) {
@@ -33,14 +55,18 @@ export async function authFetch(input: RequestInfo | URL, init: RequestInit = {}
   }
   // Always ensure JSON content-type if body is present and not already set? Don't override.
   const res = await fetch(input, { ...init, headers });
+  if (res.status === 429 && method === "GET") {
+    // Satu 429 network → semua poller GET ikut cooldown global 10s.
+    noteRateLimited(10000);
+  }
   if (res.status === 401) {
     // Only dispatch for protected-looking routes to avoid false positives on public 401
-    const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : String(input);
+    const urlStr = typeof input === "string" ? input : input instanceof URL ? input.pathname : String(input);
     const isProtected =
-      url.includes("/api/broker/") ||
-      url.includes("/api/auth/session") ||
-      url.includes("/api/auth/logout") ||
-      url.includes("/api/broker");
+      urlStr.includes("/api/broker/") ||
+      urlStr.includes("/api/auth/session") ||
+      urlStr.includes("/api/auth/logout") ||
+      urlStr.includes("/api/broker");
     if (isProtected) {
       clearAuthToken();
       try {

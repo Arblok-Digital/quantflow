@@ -226,6 +226,8 @@ export function analyzeMTFLiquidity(
   }
 
   // Calculate MTF Confluence Score (0 - 100)
+  // F-13: skor ini KONSTANTA per state (bukan dihitung kontinu dari depth) —
+  // tampilkan apa adanya, jangan dibaca sebagai pengukuran bertingkat presisi.
   let confluenceScore = 70;
   let confluenceSummary = "15m & 4H structure building equal liquidity pools.";
 

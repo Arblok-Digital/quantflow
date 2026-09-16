@@ -315,3 +315,84 @@ describe("7.2 guardrail reject", () => {
     guardState.lossPercent = 0;
   });
 });
+
+describe("7.3 spot semantics (satu panel, mode-aware)", () => {
+  test("SPOT buy → FILLED leverage 1x, margin = notional penuh, liq 0, marketType SPOT", async () => {
+    const token = await getToken();
+
+    const open = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        symbol: "BTC/USDT",
+        side: "buy",
+        amount: 0.001,
+        leverage: 10, // sengaja 10x → SPOT harus paksa jadi 1x
+        stopLoss: 50,
+        takeProfit: 150,
+        meta: { marketType: "SPOT" },
+      });
+    expect(open.status).toBe(200);
+    expect(open.body.success).toBe(true);
+    expect(open.body.position.side).toBe("LONG");
+    expect(open.body.position.leverage).toBe(1);
+    expect(open.body.position.marketType).toBe("SPOT");
+    // margin = notional penuh (bukan notional/10)
+    expect(open.body.position.marginUSD).toBeCloseTo(open.body.position.notionalUSD, 2);
+    expect(open.body.position.liquidationPrice).toBe(0);
+
+    // cleanup: close agar tidak mengotori test lain
+    const close = await request(app)
+      .post("/api/broker/close")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ positionId: open.body.position.id });
+    expect(close.status).toBe(200);
+  });
+
+  test("SPOT sell (SHORT) → REJECTED SPOT_SHORT_NOT_ALLOWED", async () => {
+    const token = await getToken();
+
+    const res = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        symbol: "BTC/USDT",
+        side: "sell",
+        amount: 0.001,
+        stopLoss: 150,
+        takeProfit: 50,
+        meta: { marketType: "SPOT" },
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.reason).toBe("SPOT_SHORT_NOT_ALLOWED");
+  });
+
+  test("FUTURES sell regresi → tetap bisa SHORT dengan leverage", async () => {
+    const token = await getToken();
+
+    const open = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        symbol: "BTC/USDT",
+        side: "sell",
+        amount: 0.001,
+        leverage: 10,
+        stopLoss: 150,
+        takeProfit: 50,
+        meta: { marketType: "FUTURES" },
+      });
+    expect(open.status).toBe(200);
+    expect(open.body.success).toBe(true);
+    expect(open.body.position.side).toBe("SHORT");
+    expect(open.body.position.leverage).toBe(10);
+    expect(open.body.position.liquidationPrice).toBeGreaterThan(0);
+
+    const close = await request(app)
+      .post("/api/broker/close")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ positionId: open.body.position.id });
+    expect(close.status).toBe(200);
+  });
+});

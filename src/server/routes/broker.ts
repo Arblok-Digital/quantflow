@@ -33,6 +33,7 @@ import {
   getGuardrailsSnapshotAsync,
   getGuardrailsSnapshotSync,
   GuardrailRejectedError,
+  setGuardsEnabled,
   setKillSwitch,
 } from "@/guardrails";
 import { handlePaperOrder, handlePaperClose } from "@/src/broker/paperBroker";
@@ -158,6 +159,25 @@ export function registerBrokerRoutes(app: Express): void {
     const state = setKillSwitch(active);
     const snapSync = getGuardrailsSnapshotSync();
     res.json({ success: true, killSwitch: state.killSwitch, guardrails: snapSync, state });
+  });
+
+  // Master toggle guardrails (paper training ON/OFF) — PROTECTED.
+  // LIVE-LOCK: di live mode mematikan guard DITOLAK server (403 LIVE_LOCKED) —
+  // proteksi wajib aktif saat uang beneran. Paper bebas on/off untuk training.
+  app.post("/api/broker/guards", requireAuth, (req, res) => {
+    const active = Boolean((req.body || {}).active);
+    const result = setGuardsEnabled(active);
+    if (!result.ok) {
+      return res.status(403).json({
+        success: false,
+        status: "REJECTED",
+        reason: result.reason || "LIVE_LOCKED",
+        message: "Guardrails tidak bisa dimatikan di LIVE mode — proteksi wajib aktif saat uang beneran.",
+        guardsEnabled: result.guardsEnabled,
+      });
+    }
+    const snapSync = getGuardrailsSnapshotSync();
+    res.json({ success: true, guardsEnabled: result.guardsEnabled, guardrails: snapSync });
   });
 
   // Arm / Disarm — PROTECTED

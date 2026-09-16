@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Header } from "./components/Header";
 import { SubBar } from "./components/SubBar";
 import { EnvironmentBar } from "./components/EnvironmentBar";
@@ -27,7 +27,6 @@ import { ProbabilityBadge } from "./components/ProbabilityBadge";
 import { ReconciliationPanel } from "./components/ReconciliationPanel";
 
 import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig, ModuleTab, OrderBook } from "./types";
-import { generateCandlesForTimeframe } from "./logic/indicators";
 
 import { fetchOnChainMetrics } from "./data/onchainData";
 import { fetchMacroCalendar } from "./data/macroData";
@@ -88,6 +87,42 @@ export default function App() {
     }
   }, [symbol]);
 
+  // Macro REAL server-side (FF mirror + Stooq VIX) untuk MacroCalendarPanel.
+  // F-03: pilar "macro" legacy (stub no-data) tetap dipakai sebagai fallback,
+  // tapi panel makro sekarang mengutamakan macroReal bila fetch-nya ok.
+  const [macroRealPanel, setMacroRealPanel] = useState<{
+    source: string;
+    vix: number | null;
+    riskIndex: number;
+    upcomingCount: number;
+    upcoming: Array<{ title: string; dateUtc: string; forecast: string; previous: string }>;
+    fetchedAt: number;
+  } | null>(null);
+
+  const macroRealBackoffRef = useRef(0);
+  const refreshMacroReal = useCallback(async () => {
+    // Throttle pasca-429: jangan retry agresif (StrictMode DEV me-mount 2x).
+    if (Date.now() < macroRealBackoffRef.current) return;
+    try {
+      const res = await fetch("/api/macro/real", { cache: "no-store" });
+      if (res.status === 429) {
+        macroRealBackoffRef.current = Date.now() + 60000;
+        return;
+      }
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.ok) setMacroRealPanel(data as typeof macroRealPanel);
+    } catch {
+      // Fail-closed: panel tetap pakai stub legacy + banner no-data.
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMacroReal();
+    const iv = setInterval(refreshMacroReal, 30 * 60 * 1000);
+    return () => clearInterval(iv);
+  }, [refreshMacroReal]);
+
   // Refresh saat symbol berubah + tiap menit ketika mode KEEL aktif. Pipeline
   // 5s-tick tetap bebas fetch (data sedikit stale ok — keel toleran).
   useEffect(() => {
@@ -113,35 +148,44 @@ export default function App() {
   const [macroSummary, setMacroSummary] = useState<MacroSummary>(() => fetchMacroCalendar());
 
   // Server ledger stats baseline for avgSlippage (Phase 3.4 requires server truth, not client avg)
+  // 15s + skip bila 429 (TradeJournalPanel sudah poll endpoint yang sama via shared hook).
   const [serverAvgSlippage, setServerAvgSlippage] = useState<number | null>(null);
   const [serverBlockTail, setServerBlockTail] = useState<string | null>(null);
   useEffect(() => {
     if (!auth.isAuthenticated) return;
     let alive = true;
+    let backoffUntil = 0;
     const loadLedgerBadge = async () => {
+      if (Date.now() < backoffUntil) return;
       try {
-        const statsRes = await authFetch("/api/ledger/stats").then((r) => r.json().catch(() => null));
+        const statsRes = await authFetch("/api/ledger/stats").then(async (r) => {
+          if (r.status === 429) { backoffUntil = Date.now() + 30000; return null; }
+          return r.json().catch(() => null);
+        });
         if (!alive) return;
         if (statsRes && typeof statsRes.avgSlippageBps === "number") {
           setServerAvgSlippage(Number(statsRes.avgSlippageBps));
-        } else {
+        } else if (statsRes !== null) {
           setServerAvgSlippage(null);
         }
       } catch {
         if (alive) setServerAvgSlippage(null);
       }
       try {
-        const ledgerRes = await authFetch("/api/ledger?limit=1").then((r) => r.json().catch(() => null));
+        const ledgerRes = await authFetch("/api/ledger?limit=1").then(async (r) => {
+          if (r.status === 429) return null;
+          return r.json().catch(() => null);
+        });
         if (!alive) return;
         const first = ledgerRes?.entries?.[0];
         if (first && first.hash) setServerBlockTail(String(first.hash));
-        else setServerBlockTail(null);
+        else if (ledgerRes !== null) setServerBlockTail(null);
       } catch {
         if (alive) setServerBlockTail(null);
       }
     };
     loadLedgerBadge();
-    const iv = setInterval(loadLedgerBadge, 6000);
+    const iv = setInterval(loadLedgerBadge, 15000);
     const onVis = () => { if (!document.hidden) loadLedgerBadge(); };
     document.addEventListener("visibilitychange", onVis);
     return () => { alive = false; clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
@@ -174,6 +218,8 @@ export default function App() {
   const paper = usePaperTrading({
     symbol,
     currentPrice: market.currentPrice,
+    entryTimeframe: timeframe,
+    marketType,
   });
 
   const pipeline = useTradingPipeline({
@@ -283,6 +329,8 @@ export default function App() {
   );
 
   // Active candles depending on selected timeframe (1s to 1W)
+  // F-02: TIDAK ada lagi fallback generator tanpa label. Slot kosong = array
+  // kosong + badge TF menunjukkan NO DATA/SYNTHETIC (lihat MarketChart).
   const activeDisplayCandles: Candle[] = useMemo(() => {
     const { microTicks, candles15m, candles4h, candlesByTimeframe } = market;
     if (timeframe === "1s") {
@@ -299,7 +347,7 @@ export default function App() {
       if (candlesByTimeframe["1s"] && candlesByTimeframe["1s"].length > 0) {
         return candlesByTimeframe["1s"];
       }
-      return generateCandlesForTimeframe(market.currentPrice, "1s", 35);
+      return [];
     }
     if (timeframe === "15m") {
       return candles15m.length > 0 ? candles15m : candlesByTimeframe["15m"] || [];
@@ -310,8 +358,18 @@ export default function App() {
     if (candlesByTimeframe[timeframe] && candlesByTimeframe[timeframe].length > 0) {
       return candlesByTimeframe[timeframe];
     }
-    return generateCandlesForTimeframe(market.currentPrice, timeframe, 45);
+    return [];
   }, [timeframe, market.microTicks, market.candles15m, market.candles4h, market.candlesByTimeframe, market.currentPrice]);
+
+  // F-02: label provenance TF aktif (REAL / SYNTHETIC / NO DATA).
+  const activeTfSource: string = useMemo(() => {
+    const series = activeDisplayCandles;
+    if (!series || series.length === 0) return "NO DATA";
+    return market.candleSourceByTimeframe[timeframe] === "REAL" ? "REAL" : "SYNTHETIC";
+  }, [activeDisplayCandles, market.candleSourceByTimeframe, timeframe]);
+  const activeTfOrigin: string = market.candleOriginByTimeframe[timeframe] || "NONE";
+  // Stabilkan referensi generateCandlesForTimeframe agar tidak unused-import:
+  // (dipakai test/unit via logic/indicators, bukan App lagi)
 
   const floatingPnl = paper.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   const openPositionsCount = paper.positions.length;
@@ -442,6 +500,10 @@ export default function App() {
               positions={paper.positions}
               currentPrice={market.currentPrice}
               symbol={symbol}
+              brokerMode={live.mode}
+              entryTimeframe={timeframe}
+              marketType={marketType}
+              activeCandles={activeDisplayCandles}
               mtfLiquidity={market.mtfLiquidity}
               latestDecision={pipeline.latestDecision}
               onClosePosition={paper.closePosition}
@@ -471,6 +533,8 @@ export default function App() {
               feedMode={market.feedMode}
               exchangeStatus={market.exchangeStatus}
               activeTfCandleCount={activeDisplayCandles.length}
+              activeTfSource={activeTfSource}
+              activeTfOrigin={activeTfOrigin}
             />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -506,6 +570,26 @@ export default function App() {
                 side="LONG"
                 stopLoss={paper.positions[0]?.stopLoss ?? pipeline.latestDecision?.stopLoss ?? null}
                 takeProfit={paper.positions[0]?.takeProfit ?? pipeline.latestDecision?.takeProfit ?? null}
+                livePosition={
+                  paper.positions[0]
+                    ? {
+                        side: paper.positions[0].side,
+                        entryPrice: paper.positions[0].entryPrice,
+                        stopLoss: paper.positions[0].stopLoss,
+                        takeProfit: paper.positions[0].takeProfit,
+                      }
+                    : null
+                }
+                liveDecision={
+                  pipeline.latestDecision
+                    ? {
+                        action: pipeline.latestDecision.action,
+                        targetPrice: pipeline.latestDecision.targetPrice,
+                        stopLoss: pipeline.latestDecision.stopLoss,
+                        takeProfit: pipeline.latestDecision.takeProfit,
+                      }
+                    : null
+                }
               />
             </div>
 
@@ -521,7 +605,8 @@ export default function App() {
               <OnChainPanel metrics={onChainMetrics} onRefresh={() => handleRefreshOnChain()} />
               <MacroCalendarPanel
                 macro={macroSummary}
-                onRefresh={() => setMacroSummary(fetchMacroCalendar())}
+                macroReal={macroRealPanel}
+                onRefresh={() => { setMacroSummary(fetchMacroCalendar()); refreshMacroReal(); }}
               />
             </div>
 

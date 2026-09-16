@@ -5,6 +5,7 @@
  */
 
 import { getExchange, ensureMarketsLoaded } from "../../broker";
+import type { Candle } from "../types";
 
 const KNOWN_QUOTES = ["FDUSD", "BUSD", "USDC", "USDT", "BTC", "ETH", "EUR", "USD"];
 const KNOWN_QUOTES_SORTED = [...KNOWN_QUOTES].sort((a, b) => b.length - a.length);
@@ -355,11 +356,14 @@ function generateSynthetic(symbol: string): FetchResult<any> {
  * Main fetch function with full fallback chain
  */
 export async function fetchMarketData(symbol: string): Promise<any> {
+  // F-04: Vision-first — api.binance.com primer sering diblokir (cert error),
+  // jadi jangan bayar 1 percobaan gagal tiap panggilan. Konsisten dengan
+  // fetchTickerPrice / fetchOHLCVWithFallback / fetchRecentTrades.
   const attempts = [
-    () => tryBinance(symbol),
     () => tryBinanceVision(symbol),
     () => tryGateIO(symbol),
     () => tryBybit(symbol),
+    () => tryBinance(symbol),
     () => tryCCXT(symbol),
   ];
 
@@ -424,8 +428,15 @@ export async function fetchTickerPrice(symbol: string): Promise<{ price: number;
 
 /**
  * Fetch OHLCV for specific timeframe (for /api/klines)
+ * Returns { candles, source } — source = exchange yang sukses / "NONE".
+ * F-05: caller bisa deteksi cross-exchange antar-TF dari field source.
  */
-export async function fetchOHLCVWithFallback(symbol: string, timeframe: string, limit = 50): Promise<any[]> {
+export interface OHLCVResult {
+  candles: Candle[];
+  source: string; // "BINANCE_VISION" | "GATE_IO" | "BYBIT_FALLBACK" | "BINANCE_LIVE" | "NONE"
+}
+
+export async function fetchOHLCVWithFallback(symbol: string, timeframe: string, limit = 50): Promise<OHLCVResult> {
   const parsed = parseMarketSymbol(symbol);
   const rawSymbol = parsed.raw;
 
@@ -447,10 +458,11 @@ export async function fetchOHLCVWithFallback(symbol: string, timeframe: string, 
   try {
     const res = await fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${rawSymbol}&interval=${intervals.binance}&limit=${limit}`);
     if (Array.isArray(res) && res.length > 0) {
-      return res.map((k: any) => ({
+      const candles: Candle[] = res.map((k: any) => ({
         timestamp: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]),
         low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
+      return { candles, source: "BINANCE_VISION" };
     }
   } catch {}
 
@@ -459,10 +471,11 @@ export async function fetchOHLCVWithFallback(symbol: string, timeframe: string, 
     const gateSymbol = parsed.base + "_" + parsed.quote;
     const res = await fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${gateSymbol}&interval=${intervals.gate}&limit=${limit}`);
     if (Array.isArray(res) && res.length > 0) {
-      return res.reverse().map((k: any) => ({
+      const candles: Candle[] = res.reverse().map((k: any) => ({
         timestamp: parseInt(k[0]) * 1000, open: parseFloat(k[1]), high: parseFloat(k[2]),
         low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
+      return { candles, source: "GATE_IO" };
     }
   } catch {}
 
@@ -471,10 +484,11 @@ export async function fetchOHLCVWithFallback(symbol: string, timeframe: string, 
     const res = await fetchWithTimeout(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=${intervals.bybit}&limit=${limit}`);
     const kList = (res?.result?.list || []).reverse();
     if (kList.length > 0) {
-      return kList.map((k: any) => ({
+      const candles: Candle[] = kList.map((k: any) => ({
         timestamp: parseInt(k[0]), open: parseFloat(k[1]), high: parseFloat(k[2]),
         low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
+      return { candles, source: "BYBIT_FALLBACK" };
     }
   } catch {}
 
@@ -482,14 +496,15 @@ export async function fetchOHLCVWithFallback(symbol: string, timeframe: string, 
   try {
     const res = await fetchWithTimeout(`https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=${intervals.binance}&limit=${limit}`);
     if (Array.isArray(res) && res.length > 0) {
-      return res.map((k: any) => ({
+      const candles: Candle[] = res.map((k: any) => ({
         timestamp: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]),
         low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
+      return { candles, source: "BINANCE_LIVE" };
     }
   } catch {}
 
-  return []; // trigger client-side generator
+  return { candles: [], source: "NONE" }; // trigger client-side generator
 }
 
 // ---------------------------------------------------------------------------

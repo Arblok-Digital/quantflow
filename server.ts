@@ -56,21 +56,46 @@ app.use(express.json({ limit: "5mb" }));
 // Structured HTTP logging (Pino) — segera setelah body parser, sebelum routes
 app.use(httpLogger);
 
-// Rate limiters — relaxed in development
+// Rate limiters — relaxed in development.
+// Polling FE 5-detik × ~10 poller paralel (StrictMode DEV menggandakan efek
+// → ~2x request) mudah menembus limiter global tunggal. Solusi: bedakan
+// limit endpoint PUBLIK ringan vs endpoint BERAT (auth/broker/ledger).
+// Catatan: /api/market/stream (SSE, koneksi 1x tapi hidup lama) dan
+// /api/health di-exempt agar tidak ikut menghabiskan kuota; 429 tidak dihitung
+// (skipFailedRequests) supaya window tidak diperpanjang saat sudah jenuh.
 const isDev = process.env.NODE_ENV !== "production";
 
-const apiLimiter = rateLimit({
+const rateHandler = (_req: any, res: any) => {
+  res.status(429).json({ success: false, code: "RATE_LIMITED", message: "Terlalu banyak request. Coba lagi nanti." });
+};
+
+// Endpoint publik ringan (feed pasar, klines, health): frekuensi tinggi, murah.
+const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: isDev ? 1000 : 300, // 1000 req/min in dev, 300 in prod
+  max: isDev ? 6000 : 1200,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path === "/api/health",
-  handler: (_req, res) => {
-    res.status(429).json({ success: false, code: "RATE_LIMITED", message: "Terlalu banyak request. Coba lagi nanti." });
-  },
+  skipFailedRequests: true,
+  skip: (req) => req.path === "/api/health" || req.path === "/api/market/stream",
+  handler: rateHandler,
+});
+
+// Endpoint privat/berat (auth, broker, ledger, AI, replay): dibatasi wajar.
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: isDev ? 3000 : 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipFailedRequests: true,
+  skip: (req) => req.path === "/api/health" || req.path === "/api/market/stream",
+  handler: rateHandler,
 });
 
 // Apply apiLimiter to all /api routes (auth route has its own stricter loginLimiter)
+app.use("/api/market-feed", publicLimiter);
+app.use("/api/klines", publicLimiter);
+app.use("/api/market/stream", publicLimiter);
+app.use("/api/health", publicLimiter);
 app.use("/api/", apiLimiter);
 
 warnIfDefaultAuditSecret();

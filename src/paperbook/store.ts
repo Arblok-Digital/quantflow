@@ -94,6 +94,7 @@ export function dbSavePosition(pos: PaperPosition): void {
     close_price: pos.exitPrice ?? null,
     realized_pnl_usd: pos.realizedPnlUSD ?? null,
     fees_usd: pos.feesPaidUSD ?? null,
+    entry_source: pos.entrySource || "MANUAL",
   });
 }
 

@@ -15,12 +15,11 @@ import {
   calculateEMA,
   calculateMACD,
   calculateRSI,
-  generateCandlesForTimeframe,
   generateOrderBook,
 } from "../logic/indicators";
 import { analyzeMTFLiquidity } from "../logic/liquidityHunt";
 import { generateNextMicroTick } from "../logic/microTickStream";
-import { fetchKlinesForTimeframe, fetchLiveMarketData } from "../data/marketData";
+import { fetchKlinesForTimeframe, fetchLiveMarketData, type CandleSource } from "../data/marketData";
 import { useMarketStream } from "./useMarketStream";
 
 export interface UseMarketDataOptions {
@@ -45,6 +44,17 @@ function updateCandleSeries(candles: Candle[], price: number, volume: number, vo
 }
 
 /**
+ * Deadband: tahan nilai lama bila perubahan di bawah ambang — angka indikator
+ * tidak berkedip karena noise micro-tick 1s. BUKAN pembulatan data (nilai
+ * real tetap dipakai saat ambang terlampaui).
+ */
+function withDeadband(next: number, prev: number, tol: number): number {
+  if (!isFinite(next)) return prev;
+  if (!isFinite(prev)) return next;
+  return Math.abs(next - prev) < tol ? prev : next;
+}
+
+/**
  * Feeder pasar real-time: 1s micro-tick stream (buat ML feature store),
  * candle multi-timeframe 1s-1W, order book, dan indikator teknikal.
  * Sinkronisasi data live lewat data/marketData.ts.
@@ -64,6 +74,31 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     "4h": [],
     "1D": [],
     "1W": [],
+  });
+  // F-02: provenance per-TF — seed awal KOSONG = bukan sintetis-tanpa-label.
+  // 15m/4h jadi REAL setelah syncLiveExchangeData; TF lain jadi REAL/SYNTHETIC
+  // eksplisit setelah loadTimeframe selesai (fetchKlinesForTimeframe berlabel).
+  // Default "SYNTHETIC" HANYA untuk slot yang belum pernah di-load (kosong),
+  // agar badge tidak pernah klaim REAL sebelum ada fetch sukses.
+  const [candleSourceByTimeframe, setCandleSourceByTimeframe] = useState<Record<Timeframe, CandleSource>>({
+    "1s": "SYNTHETIC",
+    "1m": "SYNTHETIC",
+    "5m": "SYNTHETIC",
+    "15m": "SYNTHETIC",
+    "1h": "SYNTHETIC",
+    "4h": "SYNTHETIC",
+    "1D": "SYNTHETIC",
+    "1W": "SYNTHETIC",
+  });
+  const [candleOriginByTimeframe, setCandleOriginByTimeframe] = useState<Record<Timeframe, string>>({
+    "1s": "NONE",
+    "1m": "NONE",
+    "5m": "NONE",
+    "15m": "NONE",
+    "1h": "NONE",
+    "4h": "NONE",
+    "1D": "NONE",
+    "1W": "NONE",
   });
   const [orderBook, setOrderBook] = useState<OrderBook>({ bids: [], asks: [], spread: 1.2 });
   const [technicals, setTechnicals] = useState<TechnicalIndicators>({
@@ -89,6 +124,9 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
 
   // Anchor harga real terakhir dari exchange (dipakai untuk mean-reversion di tick loop).
   const anchorPriceRef = useRef<number>(64250.0);
+  // Throttle indikator: timestamp + harga saat technicals terakhir dihitung.
+  const lastTechAtRef = useRef<number>(0);
+  const lastTechPriceRef = useRef<number>(0);
 
   // Task 5.1/5.2/6.3: konsumsi SSE proxy Binance WS — satu sumber kebenaran
   // harga real-time (harga & depth) untuk pipeline, chart, DAN portfolio.
@@ -172,23 +210,32 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
         ...prev,
         "15m": feed.candles15m,
         "4h": feed.candles4h,
-        "1s": prev["1s"].length ? prev["1s"] : generateCandlesForTimeframe(feed.currentPrice, "1s", 45),
-        "1m": prev["1m"].length ? prev["1m"] : generateCandlesForTimeframe(feed.currentPrice, "1m", 45),
-        "5m": prev["5m"].length ? prev["5m"] : generateCandlesForTimeframe(feed.currentPrice, "5m", 45),
-        "1h": prev["1h"].length ? prev["1h"] : generateCandlesForTimeframe(feed.currentPrice, "1h", 45),
-        "1D": prev["1D"].length ? prev["1D"] : generateCandlesForTimeframe(feed.currentPrice, "1D", 45),
-        "1W": prev["1W"].length ? prev["1W"] : generateCandlesForTimeframe(feed.currentPrice, "1W", 45),
       }));
+      // F-02: 15m/4h ikut status feed (real bila exchange sukses, sintetis bila
+      // market-feed fallback). TF lain TETAP kosong sampai loadTimeframe
+      // berlabel — tidak pernah di-seed generator tanpa label.
+      // candlesReal=false juga bila marketData.ts generate 4h lokal meski 15m real.
+      const feedIsReal = feed.status.isLive && feed.candlesReal !== false;
+      const tfOrigin = String(feed.status.source || "UNKNOWN");
+      setCandleSourceByTimeframe((prev) => ({
+        ...prev,
+        "15m": feed.candles15m.length > 0 ? (feedIsReal ? "REAL" : "SYNTHETIC") : prev["15m"],
+        "4h": feed.candles4h.length > 0 ? (feedIsReal ? "REAL" : "SYNTHETIC") : prev["4h"],
+      }));
+      setCandleOriginByTimeframe((prev) => ({ ...prev, "15m": tfOrigin, "4h": tfOrigin }));
 
       const closes = feed.candles15m.map((c) => c.close);
-      setTechnicals({
+      const freshTechnicals = {
         rsi: calculateRSI(closes, 14),
         ema20: calculateEMA(closes, 20),
         ema50: calculateEMA(closes, 50),
         macd: calculateMACD(closes),
         orderBookImbalance: 1.15,
         volatility: "2.3%",
-      });
+      };
+      setTechnicals(freshTechnicals);
+      lastTechAtRef.current = Date.now();
+      lastTechPriceRef.current = feed.currentPrice;
 
       onFeedLiveRef.current?.(feed.currentPrice);
     } catch (err) {
@@ -200,9 +247,13 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
 
   const loadTimeframe = useCallback(async (tf: Timeframe) => {
     try {
-      const loadedCandles = await fetchKlinesForTimeframe(symbolRef.current, tf, priceRef.current, 50);
+      const result = await fetchKlinesForTimeframe(symbolRef.current, tf, priceRef.current, 50);
+      const loadedCandles = result.candles;
       if (loadedCandles && loadedCandles.length > 0) {
         setCandlesByTimeframe((prev) => ({ ...prev, [tf]: loadedCandles }));
+        // F-02: catat provenance berlabel dari wrapper (REAL vs SYNTHETIC).
+        setCandleSourceByTimeframe((prev) => ({ ...prev, [tf]: result.source }));
+        setCandleOriginByTimeframe((prev) => ({ ...prev, [tf]: result.origin }));
 
         const closes = loadedCandles.map((c) => c.close);
         const perTf: TechnicalIndicators = {
@@ -319,15 +370,36 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
       setCandles15m(updated15m);
       setCandles4h(updated4h);
 
-      const closes = updated15m.map((c) => c.close);
-      setTechnicals({
-        rsi: calculateRSI(closes, 14),
-        ema20: calculateEMA(closes, 20),
-        ema50: calculateEMA(closes, 50),
-        macd: calculateMACD(closes),
-        orderBookImbalance: Math.max(0.4, Math.min(2.5, Number((1.0 + nextTick.orderFlowImbalance * 0.5).toFixed(2)))),
-        volatility: "2.4%",
-      });
+      // Indikator (RSI/EMA/MACD) di-throttle: candle bergerak tiap tick OK,
+      // tapi angka indikator hanya dihitung ulang tiap 5 detik ATAU bila harga
+      // bergerak >0.05% sejak hitungan terakhir. Mencegah pill berkedip tiap
+      // detik karena noise micro-tick — angka yang "tidak bisa diam".
+      const lastTech = technicalsRef.current;
+      const techAgeMs = Date.now() - (lastTechAtRef.current || 0);
+      const lastTechPrice = lastTechPriceRef.current || 0;
+      const priceMovePct = lastTechPrice > 0 ? Math.abs(newPrice - lastTechPrice) / lastTechPrice : 1;
+      if (techAgeMs >= 5000 || priceMovePct > 0.0005) {
+        const closes = updated15m.map((c) => c.close);
+        const fresh: typeof lastTech = {
+          rsi: withDeadband(calculateRSI(closes, 14), lastTech.rsi, 0.2),
+          ema20: withDeadband(calculateEMA(closes, 20), lastTech.ema20, lastTech.ema20 * 0.0002),
+          ema50: withDeadband(calculateEMA(closes, 50), lastTech.ema50, lastTech.ema50 * 0.0002),
+          macd: {
+            macdLine: calculateMACD(closes).macdLine,
+            signalLine: calculateMACD(closes).signalLine,
+            histogram: withDeadband(calculateMACD(closes).histogram, lastTech.macd.histogram, 0.05),
+          },
+          orderBookImbalance: withDeadband(
+            Math.max(0.4, Math.min(2.5, Number((1.0 + nextTick.orderFlowImbalance * 0.5).toFixed(2)))),
+            lastTech.orderBookImbalance,
+            0.02
+          ),
+          volatility: "2.4%",
+        };
+        lastTechAtRef.current = Date.now();
+        lastTechPriceRef.current = newPrice;
+        setTechnicals(fresh);
+      }
 
       const tf = timeframeRef.current;
       const currentTf = candlesByTimeframeRef.current[tf];
@@ -356,6 +428,8 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     candles15m,
     candles4h,
     candlesByTimeframe,
+    candleSourceByTimeframe,
+    candleOriginByTimeframe,
     orderBook,
     technicals,
     technicalsByTimeframe,

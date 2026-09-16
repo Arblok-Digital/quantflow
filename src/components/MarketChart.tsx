@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Candle, TechnicalIndicators, OrderBook, MTFLiquidityAnalysis, Timeframe } from "../types";
-import { Layers, BarChart2, Flame, Crosshair, Clock, Compass, TrendingUp, Sparkles, Activity } from "lucide-react";
+import { Layers, BarChart2, Flame, Crosshair, Compass, ChevronDown } from "lucide-react";
 import { calculateEMA, calculateRSI, calculateMACD } from "../logic/indicators";
 
 interface MarketChartProps {
@@ -17,6 +17,9 @@ interface MarketChartProps {
   exchangeStatus?: import("../types").ExchangeFeedStatus;
   /** Candle count aktual TF aktif (untuk label jujur pill indikator). */
   activeTfCandleCount?: number;
+  /** F-02: provenance TF aktif — badge per-TF, bukan status agregat market-feed. */
+  activeTfSource?: string;
+  activeTfOrigin?: string;
 }
 
 const ALL_TIMEFRAMES: { id: Timeframe; label: string; tag?: string; desc: string }[] = [
@@ -43,9 +46,15 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   feedMode,
   exchangeStatus,
   activeTfCandleCount,
+  activeTfSource,
+  activeTfOrigin,
 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
+  // Panel indikator di dalam chart collapsible — default ringkas agar canvas lega.
+  const [indicatorsOpen, setIndicatorsOpen] = useState(false);
+  // Matrix TF collapsible — default ringkas (8 tile → 1 baris ringkas).
+  const [matrixOpen, setMatrixOpen] = useState(false);
 
   // Compute bounds for SVG candlestick chart
   const { minPrice, maxPrice, priceRange, svgCandles } = useMemo(() => {
@@ -127,6 +136,9 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   // 4TF upgrade: real per-timeframe indicators computed from actual candles
   // (candlesByTimeframe), not hardcoded "BULLISH" claims. TFs without real
   // data are labeled honestly as "NO DATA" instead of fabricating a bias.
+  // F-11: baris 1s/1m/5m BUKAN analisis TF independen — semuanya membaca objek
+  // `technicals` yang sama (turunan TF aktif). Label jujur agar tidak tampil
+  // seolah 3 timeframe terpisah yang dihitung mandiri.
   const mtfIndicatorMatrix = useMemo(() => {
     const perTf = (tf: Timeframe): { rsi: number; ema20: number; ema50: number; macdHist: number } | null => {
       const series = candlesByTimeframe?.[tf];
@@ -176,23 +188,23 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     return [
       {
         tf: "1s" as Timeframe,
-        name: "1s (ML Feed)",
+        name: "1s (ML Feed ≈ TF aktif)",
         bias: technicals.orderBookImbalance >= 1.15 ? "BULLISH" : technicals.orderBookImbalance <= 0.85 ? "BEARISH" : "NEUTRAL",
-        signal: `${technicals.orderBookImbalance.toFixed(2)}x L2 Imbalance`,
+        signal: `${technicals.orderBookImbalance.toFixed(2)}x L2 Imbalance (proxy TF aktif)`,
         statusBadge: "1000ms TICK",
       },
       {
         tf: "1m" as Timeframe,
-        name: "1m (Scalp)",
+        name: "1m (Scalp ≈ TF aktif)",
         bias: technicals.rsi > 52 ? "BULLISH" : technicals.rsi < 48 ? "BEARISH" : "NEUTRAL",
-        signal: `RSI ${technicals.rsi} Momentum`,
+        signal: `RSI ${technicals.rsi} Momentum (proxy TF aktif)`,
         statusBadge: "MICRO FLOW",
       },
       {
         tf: "5m" as Timeframe,
-        name: "5m (Intraday)",
+        name: "5m (Intraday ≈ TF aktif)",
         bias: technicals.macd.histogram >= 0 ? "BULLISH" : "BEARISH",
-        signal: technicals.macd.histogram >= 0 ? "FVG Expansion Bull" : "FVG Pullback",
+        signal: technicals.macd.histogram >= 0 ? "FVG Expansion Bull (proxy TF aktif)" : "FVG Pullback (proxy TF aktif)",
         statusBadge: "STRUCTURE",
       },
       {
@@ -234,25 +246,44 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     ];
   }, [technicals, mtfLiquidity, candlesByTimeframe]);
 
+  // F-02: badge provenance TF aktif — status per-TF, bukan agregat.
+  // REAL = candle dari exchange; SYNTHETIC = generator lokal; NO DATA = slot kosong.
+  const tfSourceBadge = useMemo(() => {
+    const s = String(activeTfSource || "").toUpperCase();
+    if (s === "REAL")
+      return { label: "TF REAL", cls: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30", title: `Candle ${timeframe} real dari ${activeTfOrigin || "exchange"}` };
+    if (s === "SYNTHETIC")
+      return { label: "TF SIMULATED", cls: "bg-rose-500/15 text-rose-300 border-rose-500/30", title: `Candle ${timeframe} SINTETIS lokal (${activeTfOrigin || "generator"}) — BUKAN harga pasar` };
+    return { label: "TF NO DATA", cls: "bg-zinc-700/40 text-zinc-300 border-zinc-600/50", title: `Belum ada candle ${timeframe} — fetch gagal & generator dimatikan (fail-closed)` };
+  }, [activeTfSource, activeTfOrigin, timeframe]);
+
+  // Ringkasan indikator sekali hitung untuk header + overlay (hindari duplikasi).
+  const techSummary = useMemo(() => {
+    const rsiState = technicals.rsi > 70 ? "Overbought" : technicals.rsi < 30 ? "Oversold" : "Neutral";
+    const rsiCls = technicals.rsi > 70 ? "text-rose-400" : technicals.rsi < 30 ? "text-emerald-400" : "text-zinc-200";
+    const macdBull = technicals.macd.histogram >= 0;
+    return { rsiState, rsiCls, macdBull };
+  }, [technicals]);
+
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 relative overflow-hidden shadow-sm flex flex-col">
       {/* Ambient Bento Dot Grid */}
       <div className="absolute inset-0 opacity-10 pointer-events-none bento-dot-grid" />
 
-      {/* Chart Header */}
-      <div className="relative z-10 mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-3">
+      {/* Chart Header — ringkas: judul + badge feed digabung satu baris */}
+      <div className="relative z-10 mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-zinc-950 border border-zinc-800 text-amber-400 shadow-inner">
             <BarChart2 className="h-4 w-4" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <h2 className="text-xs font-semibold text-zinc-200 uppercase tracking-wider font-mono">
                 {symbol} &bull; {timeframe} Exchange View
               </h2>
-              <span className="flex items-center gap-1.5 text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase tracking-wider">
+              <span className="flex items-center gap-1 text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 uppercase tracking-wider">
                 <Flame className="h-3 w-3 text-amber-400" />
-                {timeframe === "15m" ? "AI Anchor 15m (Active)" : `Manual View (${timeframe})`}
+                {timeframe === "15m" ? "AI Anchor 15m" : timeframe}
               </span>
               {feedMode && (
                 <span
@@ -270,6 +301,16 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                   {feedMode === "WS_LIVE" ? "WS LIVE" : feedMode === "INTERPOLATED" ? "INTERPOLATED" : feedMode === "REST_POLL" ? "REST POLL" : "SIMULATED"}
                 </span>
               )}
+              {/* F-02: badge per-TF — status candle TF yang sedang dilihat. */}
+              <span
+                className={`px-2 py-0.5 rounded border text-[10px] font-bold font-mono ${tfSourceBadge.cls}`}
+                title={tfSourceBadge.title}
+              >
+                {tfSourceBadge.label}
+              </span>
+              {activeTfCandleCount != null && (
+                <span className="text-[10px] font-mono text-zinc-500">• {activeTfCandleCount}n</span>
+              )}
             </div>
             <p className="text-[10px] font-mono text-zinc-500 uppercase tracking-wide">
               BSL (Buy-Side Liq) &bull; SSL (Sell-Side Liq) &bull; Stop-Loss Hunt Clusters
@@ -277,94 +318,60 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           </div>
         </div>
 
-        {/* Technical Indicators Pill — mengikuti TF aktif (lihat label TF) */}
-        <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-          <div className="flex items-center gap-1.5 rounded-xl bg-cyan-500/10 px-2.5 py-1.5 border border-cyan-500/30">
-            <span className="text-cyan-300 text-[10px] font-black uppercase">TF {timeframe}</span>
-            {activeTfCandleCount != null && (
-              <span className="text-[10px] text-zinc-400">• {activeTfCandleCount}n</span>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5 rounded-xl bg-zinc-950 px-2.5 py-1.5 border border-zinc-800">
-            <span className="text-zinc-500 text-[10px] font-semibold uppercase">RSI(14):</span>
-            <span
-              className={`font-bold ${
-                technicals.rsi > 70
-                  ? "text-rose-400"
-                  : technicals.rsi < 30
-                  ? "text-emerald-400"
-                  : "text-zinc-200"
-              }`}
-            >
-              {technicals.rsi}
-            </span>
-            <span className="text-[10px] text-zinc-500">
-              {technicals.rsi > 70 ? "(Overbought)" : technicals.rsi < 30 ? "(Oversold)" : "(Neutral)"}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-1.5 rounded-xl bg-zinc-950 px-2.5 py-1.5 border border-zinc-800">
-            <span className="text-blue-400 font-semibold text-[10px] uppercase">EMA20:</span>
-            <span className="text-zinc-200">${technicals.ema20}</span>
-            <span className="text-amber-400 font-semibold text-[10px] uppercase ml-1">EMA50:</span>
-            <span className="text-zinc-200">${technicals.ema50}</span>
-          </div>
-
-          <div className="flex items-center gap-1.5 rounded-xl bg-zinc-950 px-2.5 py-1.5 border border-zinc-800">
-            <span className="text-zinc-500 text-[10px] font-semibold uppercase">Order Flow:</span>
-            <span
-              className={`font-bold ${
-                isBidHeavy ? "text-emerald-400" : isAskHeavy ? "text-rose-400" : "text-zinc-300"
-              }`}
-            >
-              {technicals.orderBookImbalance.toFixed(2)}x
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Exchange Multi-Timeframe Toolbar (1s to 1W) */}
-      <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 bg-zinc-950/80 border border-zinc-800/90 rounded-xl p-1.5 mb-3">
-        <div className="flex items-center gap-1 overflow-x-auto py-0.5">
-          <span className="text-[10px] font-mono font-bold text-zinc-500 uppercase px-1.5 flex items-center gap-1">
-            <Clock className="w-3 h-3 text-zinc-400" /> TF:
+        {/* Toggle panel indikator — pill RSI/MACD/Flow pindah ke overlay dalam chart */}
+        <button
+          onClick={() => setIndicatorsOpen((v) => !v)}
+          className="flex items-center gap-1.5 rounded-xl bg-zinc-950 px-2.5 py-1.5 border border-zinc-800 text-[11px] font-mono text-zinc-300 hover:border-zinc-600 transition"
+          title="Tampilkan/sembunyikan panel indikator RSI • EMA • MACD • Order Flow"
+        >
+          <span className={`font-bold ${techSummary.rsiCls}`}>RSI {technicals.rsi}</span>
+          <span className="text-zinc-600">•</span>
+          <span className={`font-bold ${techSummary.macdBull ? "text-emerald-400" : "text-rose-400"}`}>
+            MACD {technicals.macd.histogram >= 0 ? "+" : ""}{technicals.macd.histogram}
           </span>
-          {ALL_TIMEFRAMES.map((tf) => {
-            const isActive = timeframe === tf.id;
-            return (
-              <button
-                key={tf.id}
-                onClick={() => onSelectTimeframe?.(tf.id)}
-                className={`relative px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all flex items-center gap-1.5 ${
-                  isActive
-                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm"
-                    : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-transparent"
-                }`}
-                title={tf.desc}
-              >
-                {tf.id === "1s" && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                )}
-                <span>{tf.label}</span>
-                {tf.tag && (
-                  <span
-                    className={`text-[9px] px-1 py-0.2 rounded font-semibold ${
-                      isActive ? "bg-amber-500/30 text-amber-200" : "bg-zinc-800 text-zinc-400"
-                    }`}
-                  >
-                    {tf.tag}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="text-[11px] font-mono text-zinc-400 px-2 flex items-center gap-2">
-          <span className="text-zinc-500 hidden sm:inline">Active Route:</span>
-          <span className="text-zinc-300 font-medium">{activeTfMeta.desc}</span>
-        </div>
+          <span className="text-zinc-600">•</span>
+          <span className={`font-bold ${isBidHeavy ? "text-emerald-400" : isAskHeavy ? "text-rose-400" : "text-zinc-300"}`}>
+            Flow {technicals.orderBookImbalance.toFixed(2)}x
+          </span>
+          <ChevronDown className={`w-3.5 h-3.5 text-zinc-500 transition-transform ${indicatorsOpen ? "rotate-180" : ""}`} />
+        </button>
       </div>
+
+      {/* Panel indikator expandable — Lebesgue dalam header, bukan bar terpisah */}
+      {indicatorsOpen && (
+        <div className="relative z-10 grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3 text-xs font-mono">
+          <div className="rounded-xl bg-zinc-950 px-2.5 py-2 border border-zinc-800">
+            <div className="text-zinc-500 text-[10px] font-semibold uppercase">RSI(14) • TF {timeframe}</div>
+            <div className="flex items-baseline gap-1.5">
+              <span className={`font-bold text-base ${techSummary.rsiCls}`}>{technicals.rsi}</span>
+              <span className="text-[10px] text-zinc-500">({techSummary.rsiState})</span>
+            </div>
+          </div>
+          <div className="rounded-xl bg-zinc-950 px-2.5 py-2 border border-zinc-800">
+            <div className="text-zinc-500 text-[10px] font-semibold uppercase">EMA 20 / 50</div>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-blue-400 font-bold">${technicals.ema20}</span>
+              <span className="text-zinc-600">/</span>
+              <span className="text-amber-400 font-bold">${technicals.ema50}</span>
+            </div>
+            <div className="text-[10px] text-zinc-500">{technicals.ema20 >= technicals.ema50 ? "Uptrend" : "Downtrend"}</div>
+          </div>
+          <div className="rounded-xl bg-zinc-950 px-2.5 py-2 border border-zinc-800">
+            <div className="text-zinc-500 text-[10px] font-semibold uppercase">MACD Hist</div>
+            <div className={`font-bold text-base ${techSummary.macdBull ? "text-emerald-400" : "text-rose-400"}`}>
+              {technicals.macd.histogram >= 0 ? "+" : ""}{technicals.macd.histogram}
+            </div>
+            <div className="text-[10px] text-zinc-500">L {technicals.macd.macdLine} / S {technicals.macd.signalLine}</div>
+          </div>
+          <div className="rounded-xl bg-zinc-950 px-2.5 py-2 border border-zinc-800">
+            <div className="text-zinc-500 text-[10px] font-semibold uppercase">Order Flow</div>
+            <div className={`font-bold text-base ${isBidHeavy ? "text-emerald-400" : isAskHeavy ? "text-rose-400" : "text-zinc-300"}`}>
+              {technicals.orderBookImbalance.toFixed(2)}x
+            </div>
+            <div className="text-[10px] text-zinc-500">{isBidHeavy ? "Bid heavy" : isAskHeavy ? "Ask heavy" : "Seimbang"}</div>
+          </div>
+        </div>
+      )}
 
       {/* Interactive OHLC Readout Bar (Manual Check Mode) */}
       <div className="relative z-10 flex flex-wrap items-center justify-between bg-zinc-950/90 border border-zinc-800/80 px-3 py-1.5 rounded-lg mb-3 text-xs font-mono text-zinc-300">
@@ -753,21 +760,45 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           </div>
 
           {/* MULTI-TIMEFRAME (MTF) CONFLUENCE MATRIX RIBBON ("INDIKATOR TF") */}
+          {/* Default collapsed → 1 baris ringkas; expand untuk 8 tile detail. */}
           <div className="mt-2.5 pt-2 border-t border-zinc-800/90 bg-zinc-900/60 rounded-xl p-2">
-            <div className="flex items-center justify-between mb-1.5 px-1">
-              <div className="flex items-center gap-2">
+            <button
+              onClick={() => setMatrixOpen((v) => !v)}
+              className="w-full flex items-center justify-between px-1 mb-1.5"
+              title="Tampilkan/sembunyikan matrix confluence multi-timeframe"
+            >
+              <span className="flex items-center gap-2">
                 <span className="text-[10.5px] font-mono font-bold text-amber-400 uppercase flex items-center gap-1">
-                  <Compass className="w-3.5 h-3.5 text-amber-400" /> INDIKATOR TF & CONFLUENCE MULTI-TF:
+                  <Compass className="w-3.5 h-3.5 text-amber-400" /> INDIKATOR TF & CONFLUENCE:
                 </span>
-                <span className="text-[9.5px] font-mono text-zinc-400 hidden sm:inline">
-                  (Klik pada salah satu TF di bawah untuk langsung ganti chart & cek manual)
-                </span>
-              </div>
-              <span className="text-[9.5px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                15m = BOT ANCHOR • 1s = ML FEED
+                {/* Ringkasan 1-baris saat collapsed: dot per TF */}
+                {!matrixOpen && (
+                  <span className="flex items-center gap-1">
+                    {mtfIndicatorMatrix.map((item) => (
+                      <span
+                        key={item.tf}
+                        title={`${item.tf}: ${item.bias} — ${item.signal}`}
+                        className={`w-2 h-2 rounded-full ${
+                          item.bias === "BULLISH" ? "bg-emerald-400" : item.bias === "BEARISH" ? "bg-rose-400" : "bg-zinc-500"
+                        } ${timeframe === item.tf ? "ring-1 ring-amber-400" : ""}`}
+                      />
+                    ))}
+                  </span>
+                )}
               </span>
-            </div>
+              <span className="flex items-center gap-1.5">
+                <span className="text-[9.5px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hidden sm:inline">
+                  15m = BOT ANCHOR • 1s = ML FEED
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 text-zinc-500 transition-transform ${matrixOpen ? "rotate-180" : ""}`} />
+              </span>
+            </button>
 
+            {matrixOpen && (
+            <>
+            <div className="text-[9.5px] font-mono text-zinc-500 px-1 mb-1.5">
+              Klik TF untuk ganti chart & cek manual
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-1.5">
               {mtfIndicatorMatrix.map((item) => {
                 const isCurrent = timeframe === item.tf;
@@ -814,17 +845,18 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                 );
               })}
             </div>
+            </>
+            )}
           </div>
 
-          {/* Bottom Bar: Liquidity Status bar */}
+          {/* Bottom Bar: ringkas — strategy + confluence + harga (MACD pindah ke toggle header) */}
           <div className="flex flex-wrap items-center justify-between border-t border-zinc-800/80 pt-2 px-1 text-[11px] font-mono text-zinc-400 gap-2 mt-2">
             <div className="flex items-center gap-3">
-              <span>Strategy: <strong className="text-amber-300 font-bold">MTF Liquidity Sweep</strong></span>
+              <span><strong className="text-amber-300 font-bold">MTF Sweep</strong></span>
               <span>Confluence: <strong className="text-emerald-400">{mtfLiquidity.confluenceScore}%</strong></span>
-              <span>MACD Hist: <strong className={technicals.macd.histogram >= 0 ? "text-emerald-400" : "text-rose-400"}>{technicals.macd.histogram}</strong></span>
             </div>
             <div className="text-zinc-400">
-              Price: <strong className="text-zinc-100">${currentPrice.toFixed(2)}</strong> | Route TF: <strong className="text-amber-300">{timeframe}</strong> | Anchor: <strong className="text-emerald-400">15m (AI Agent)</strong>
+              <strong className="text-zinc-100">${currentPrice.toFixed(2)}</strong> | <strong className="text-amber-300">{timeframe}</strong> | Anchor <strong className="text-emerald-400">15m</strong>
             </div>
           </div>
         </div>

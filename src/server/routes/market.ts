@@ -74,11 +74,11 @@ export function registerMarketRoutes(app: Express, heartbeatState: { lastWsTick:
     const limit = Math.min(100, Math.max(10, parseInt(String(req.query.limit || "50"))));
 
     try {
-      const candles = await fetchOHLCVWithFallback(symbol, tf, limit);
+      const { candles, source } = await fetchOHLCVWithFallback(symbol, tf, limit);
       if (candles.length > 0) {
-        return res.json({ success: true, source: "FALLBACK_CHAIN", symbol, timeframe: tf, candles });
+        return res.json({ success: true, source, symbol, timeframe: tf, candles });
       }
-      return res.json({ success: false, symbol, timeframe: tf, candles: [] });
+      return res.json({ success: false, source: "NONE", symbol, timeframe: tf, candles: [] });
     } catch (err: any) {
       console.error(`[klines] Error: ${err?.message}`);
       return res.json({ success: false, symbol, timeframe: tf, candles: [], error: err?.message });
@@ -104,6 +104,42 @@ export function registerMarketRoutes(app: Express, heartbeatState: { lastWsTick:
     const latestBlock: any = latestBlockRes.status === "fulfilled" ? latestBlockRes.value : null;
 
     if (!stats && !priceSeries) {
+      // F-06: mirror cadangan mempool.space (tanpa key) sebelum menyerah ke 503.
+      // Mengurangi probabilitas BTC jatuh ke on-chain fiksi (lihat F-01).
+      try {
+        const [heightRes, feesRes, mempoolRes, pricesRes] = await Promise.allSettled([
+          fetchWithTimeout("https://mempool.space/api/blocks/tip/height", 4000),
+          fetchWithTimeout("https://mempool.space/api/v1/fees/recommended", 4000),
+          fetchWithTimeout("https://mempool.space/api/mempool", 4000),
+          fetchWithTimeout("https://mempool.space/api/v1/prices", 4000),
+        ]);
+        const height = heightRes.status === "fulfilled" ? Number(heightRes.value) : 0;
+        const fees: any = feesRes.status === "fulfilled" ? feesRes.value : null;
+        const mempool: any = mempoolRes.status === "fulfilled" ? mempoolRes.value : null;
+        const prices: any = pricesRes.status === "fulfilled" ? pricesRes.value : null;
+        if (height > 0 || fees || mempool) {
+          const mirror: BitcoinOnChainSnapshot = {
+            source: "mempool.space/mirror",
+            fetchedAt: Date.now(),
+            blockHeight: height || 0,
+            priceUSD: Number(prices?.USD) || 0,
+            priceChange24hPct: 0,
+            priceChange7dPct: 0,
+            txCount24h: Number(mempool?.count) || 0,
+            mempoolSizeMB: Number((Number(mempool?.vSize || 0) / 1e6).toFixed(1)),
+            mempoolFeesSatVByte: {
+              economy: Number(fees?.economyFee) || 0,
+              regular: Number(fees?.hourFee) || 0,
+              priority: Number(fees?.fastestFee) || 0,
+            },
+            hashrateEH: 0,
+            supplyBTC: 0,
+            marketCapUSD: 0,
+          };
+          btcOnChainCache = { data: mirror, fetchedAt: Date.now() };
+          return res.json({ success: true, ...mirror });
+        }
+      } catch {}
       return res
         .status(503)
         .json({ success: false, message: "blockchain.com upstream unreachable. Client fallback ke simulasi." });
@@ -197,6 +233,33 @@ export function registerMarketRoutes(app: Express, heartbeatState: { lastWsTick:
       recentTrades: recentTrades.trades,
       futures,
     });
+  });
+
+  // ================= MACRO REAL (FF mirror + Stooq VIX) — untuk FE MacroCalendarPanel (F-03) =================
+  app.get("/api/macro/real", async (_req, res) => {
+    try {
+      const { fetchMacroReal, deriveMacroRiskIndex } = await import("@/src/data/marketFetcher");
+      const macro = await fetchMacroReal();
+      if (!macro.ok) {
+        return res.status(503).json({ ok: false, message: "FF mirror + Stooq VIX unreachable." });
+      }
+      return res.json({
+        ok: true,
+        source: macro.source,
+        vix: macro.vix,
+        riskIndex: deriveMacroRiskIndex(macro),
+        upcomingCount: macro.highImpactUpcoming.length,
+        upcoming: macro.highImpactUpcoming.slice(0, 8).map((e) => ({
+          title: e.title,
+          dateUtc: e.dateUtc,
+          forecast: e.forecast,
+          previous: e.previous,
+        })),
+        fetchedAt: macro.fetchedAt,
+      });
+    } catch (err: any) {
+      return res.status(503).json({ ok: false, message: err?.message || "macro real fetch failed" });
+    }
   });
 
   // ================= PUMP RADAR (Gate.io SPOT microcap scanner — ALERT ONLY) =================

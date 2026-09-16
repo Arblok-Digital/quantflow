@@ -57,6 +57,7 @@ export const AgentDecisionsPanel: React.FC = () => {
       qs.set("limit", "20");
       if (cursor) qs.set("cursor", String(cursor));
       const res = await authFetch(`/api/agent-decisions?${qs.toString()}`);
+      if (res.status === 429) return; // cooldown global menangani retry; tampilkan cache
       if (res.status === 401) {
         setConn("error");
         return;

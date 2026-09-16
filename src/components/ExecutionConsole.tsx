@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, ChevronRight, ChevronDown, Radio } from "lucide-react";
 import { authFetch, useAuth } from "../hooks/useAuth";
+import { useBrokerPositions } from "../hooks/useBrokerPositions";
 
 // ---------------------------------------------------------------------------
 // Execution Console — server-backed order lifecycle stream (roadmap 1.7 + 1.9).
@@ -53,7 +54,7 @@ interface PositionsLite {
   account?: { openCount: number } | null;
 }
 
-const POLL_MS = 5000;
+const POLL_MS = 15000;
 const MAX_CLIENT_EVENTS = 50;
 
 const fmtNum = (v: unknown): string => Number(v).toLocaleString("en-US", { maximumFractionDigits: 4 });
@@ -233,6 +234,8 @@ export const ExecutionConsole: React.FC = () => {
   const dayRef = useRef(new Date().toDateString());
   const countsRef = useRef({ fills: 0, closed: 0 });
   const mountedRef = useRef(false);
+  // Open-count ikut shared positions hook (tanpa fetch /api/broker/positions sendiri).
+  const sharedPositions = useBrokerPositions();
 
   const tick = useCallback(async () => {
     if (!mountedRef.current) return;
@@ -242,13 +245,14 @@ export const ExecutionConsole: React.FC = () => {
       return;
     }
     try {
-      const [eventsRes, statusRes, posRes] = await Promise.all([
-        authFetch(`/api/broker/events?sinceSeq=${lastSeqRef.current}`).then((r) => r.json()),
-        authFetch("/api/broker/status").then((r) => r.json()),
-        authFetch("/api/broker/positions").then((r) => r.json()),
+      const [eventsRes, statusRes] = await Promise.all([
+        authFetch(`/api/broker/events?sinceSeq=${lastSeqRef.current}`).then((r) => (r.status === 429 ? null : r.json())),
+        authFetch("/api/broker/status").then((r) => (r.status === 429 ? null : r.json())),
       ]);
+      // Throttled → tampilkan cache terakhir.
+      if (!eventsRes && !statusRes) return;
 
-      const evData = eventsRes as EventsResponse;
+      const evData = (eventsRes || { events: [], latestSeq: lastSeqRef.current }) as EventsResponse;
       const evs = Array.isArray(evData.events) ? evData.events : [];
 
       if (typeof evData.latestSeq === "number" && evData.latestSeq > lastSeqRef.current) {
@@ -275,7 +279,7 @@ export const ExecutionConsole: React.FC = () => {
         setEvents((prev) => [...sortedNewestFirst, ...prev].slice(0, MAX_CLIENT_EVENTS));
       }
 
-      const posData = posRes as PositionsLite;
+      const posData = { success: true, mode: sharedPositions.mode, positions: sharedPositions.positions, account: sharedPositions.account } as unknown as PositionsLite;
       const open =
         posData?.account?.openCount !== undefined && posData.account.openCount !== null
           ? posData.account.openCount
@@ -284,7 +288,7 @@ export const ExecutionConsole: React.FC = () => {
           : 0;
       setOpenCount(open);
 
-      const status = statusRes as BrokerStatus;
+      const status = (statusRes || {}) as BrokerStatus;
       if (status?.mode) setMode(status.mode);
 
       setConn("ok");

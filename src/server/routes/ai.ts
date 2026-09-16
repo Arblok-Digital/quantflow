@@ -10,15 +10,24 @@ import { fetchMarketData, fetchRecentTrades, fetchFuturesMetrics, fetchMacroReal
 import { calculateRSI, calculateEMA, calculateMACD } from "@/src/logic/indicators";
 import type { Candle, OrderBook, MTFLiquidityAnalysis, OnChainMetrics, MacroSummary } from "@/src/types";
 
-// Lazy Gemini client (singleton)
+// Lazy Gemini client (singleton). Key model baru format AQ.xxxxx
+// (key lama AIza... sudah dicabut Google — semua model jawab 404).
+// Return juga status key agar pesan keel-only bisa bedakan "belum di-set"
+// vs "legacy dicabut" vs "AI error saat call".
+export type GeminiKeyStatus = "ok" | "legacy-revoked" | "none";
 let genAI: GoogleGenAI | null = null;
+function probeGeminiKey(apiKey: string | undefined): GeminiKeyStatus {
+  if (!apiKey || apiKey === "MY_GEMINI_API_KEY") return "none";
+  if (apiKey.startsWith("AIza")) return "legacy-revoked";
+  return "ok";
+}
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+  if (probeGeminiKey(apiKey) !== "ok") {
     return null;
   }
   if (!genAI) {
-    genAI = new GoogleGenAI({ apiKey });
+    genAI = new GoogleGenAI({ apiKey: apiKey as string });
   }
   return genAI;
 }
@@ -494,7 +503,10 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
   // ========================================================================
   // AI ADVISOR — insight naratif (Keel + MTF + On-chain + Macro).
   // AI = PENASIHAT, BUKAN eksekutor. Tidak ada jalur order dari endpoint ini.
-  // Fail-closed jujur: tanpa GEMINI_API_KEY → mode "keel" dengan insight
+  // Fail-closed jujur: tanpa GEMINI_API_KEY (atau key legacy AIza yang sudah
+  // dicabut Google) → mode "keel" dengan insight ringkas dari keelSummary
+  // (data REAL yang sudah dihitung server, BUKAN karangan LLM). Pesan dibedakan
+  // per penyebab agar user tahu aksi yang benar (set key vs ganti key vs retry),
   // deterministik dari data keel. Tidak pernah fabricate data pasar.
   // ========================================================================
 
@@ -696,28 +708,32 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
       `gemini=${getGeminiClient() ? "on" : "off"}`
     );
 
-    // Multi-TF klines server-side (1h + 4h + 15m yang sudah ada) untuk teknikal
-    // per-TF real. Paralel; gagal per-TF -> null jujur (bukan sintetis).
+    // Multi-TF klines server-side (1h untuk teknikal intraday; 15m/4h sudah dari
+    // fetchMarketData). Paralel; gagal per-TF -> null jujur (bukan sintetis).
+    // F-05: catat source per-TF agar cross-exchange (1h vs 15m/4h) terlihat.
     let candles1h: Candle[] = [];
+    let klines1hSource = "NONE";
     try {
       const { fetchOHLCVWithFallback } = await import("@/src/data/marketFetcher");
-      const [h1, h4] = await Promise.all([
-        fetchOHLCVWithFallback(sym, "1h", 60),
-        fetchOHLCVWithFallback(sym, "4h", 60),
-      ]);
-      if (Array.isArray(h1) && h1.length > 0) candles1h = h1;
+      const h1 = await fetchOHLCVWithFallback(sym, "1h", 60);
+      if (Array.isArray(h1.candles) && h1.candles.length > 0) {
+        candles1h = h1.candles;
+        klines1hSource = h1.source;
+      }
     } catch (e: any) {
       console.warn(`[ai-advisor] 1h klines gagal: ${e?.message}`);
     }
     pushHealth(
       "klines_1h",
       candles1h.length >= 26,
-      candles1h.length >= 26 ? `${candles1h.length} candle` : "GAGAL — teknikal 1h kosong"
+      candles1h.length >= 26 ? `${klines1hSource} ${candles1h.length} candle` : "GAGAL — teknikal 1h kosong"
     );
     pushHealth(
       "klines_4h",
       candles4h.length >= 26,
-      candles4h.length >= 26 ? `${candles4h.length} candle` : "GAGAL — teknikal 4h kosong"
+      candles4h.length >= 26
+        ? `${marketSource} ${candles4h.length} candle${klines1hSource !== "NONE" && klines1hSource !== marketSource ? ` (BEDA EXCHANGE vs 1h=${klines1hSource} — hati-hati baca divergensi)` : ""}`
+        : "GAGAL — teknikal 4h kosong"
     );
 
     const multiTf = deriveMultiTfTechnicals({ "15m": candles15m, "1h": candles1h, "4h": candles4h });
@@ -745,11 +761,18 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
       !!mtfLiquidity,
       mtfLiquidity ? `state=${(mtfLiquidity as any).activeState ?? "?"}` : "GAGAL — struktur likuiditas tak tersedia"
     );
+    // F-01: gate on-chain cek PROVENANCE (realData), bukan sekadar presence.
+    // Tanpa anchor blockchain.com, metrik on-chain = simulasi murni (baseline
+    // + noise di logic/onchain.ts) → ok:false agar otomatis masuk failedSources
+    // dan wajib diakui LLM sama seperti sumber GAGAL lain.
+    const onChainHasRealAnchor = !!((body.onChainMetrics as any)?.realData);
     pushHealth(
       "onchain",
-      !!body.onChainMetrics,
+      onChainHasRealAnchor,
       body.onChainMetrics
-        ? `client-sent${(body.onChainMetrics as any)?.realData ? " + REAL anchor blockchain.com" : " (simulasi murni)"}`
+        ? onChainHasRealAnchor
+          ? "client-sent + REAL anchor blockchain.com"
+          : "SIMULASI MURNI (tanpa anchor real) — bukan data real, bobot on-chain harus NOL"
         : "GAGAL/tidak dikirim — bobot on-chain harus diturunkan"
     );
     pushHealth(
@@ -850,6 +873,9 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
           sopr: oc.sopr ?? null,
           soprStatus: oc.soprStatus ?? null,
           activeAddressesGrowth24h: oc.activeAddressesGrowth24h ?? null,
+          // F-01: flag provenance agar konsumen (keel-only insight/FE) bisa
+          // bedakan anchor real vs simulasi murni tanpa menebak dari teks.
+          hasRealAnchor: !!oc.realData,
         }
       : null;
     const macroEcho = mc
@@ -911,7 +937,7 @@ ATURAN KONFIRMASI WAJIB:
 - Bias futures: ${keelSummary.futuresBias} | Funding: ${keelSummary.fundingBps != null ? keelSummary.fundingBps.toFixed(2) + " bps" : "N/A"}
 - Confluence: ${keelSummary.confluenceScore ?? "N/A"}% | Liquidity: ${keelSummary.liquidityDepthUsd != null ? "$" + (keelSummary.liquidityDepthUsd / 1000).toFixed(0) + "k" : "N/A"}
 - Reasoning: ${keelSummary.reasoning}
-- Futures detail: mark ${futuresDetail?.markPrice != null ? "$" + Number(futuresDetail.markPrice).toLocaleString() : "N/A"} | LSR taker ${futuresDetail?.lsrTaker ?? "N/A"} / akun ${futuresDetail?.lsrAccount ?? "N/A"} | liq LONG $${futuresDetail?.longLiqUsd != null ? (Number(futuresDetail.longLiqUsd) / 1000).toFixed(0) + "k" : "N/A"} / SHORT $${futuresDetail?.shortLiqUsd != null ? (Number(futuresDetail.shortLiqUsd) / 1000).toFixed(0) + "k" : "N/A"} | vol24h $${futuresDetail?.volume24hUsd != null ? (Number(futuresDetail.volume24hUsd) / 1e6).toFixed(1) + "M" : "N/A"} | biasReason: ${futuresDetail?.biasReason || "N/A"} (sumber: ${futuresDetail?.source || "N/A"})
+- Futures detail: mark ${futuresDetail?.markPrice != null ? "$" + Number(futuresDetail.markPrice).toLocaleString() : "N/A"} | LSR taker ${futuresDetail?.lsrTaker ?? "N/A"} (definisi Gate.io: rasio LONG/SHORT taker, >1 = banyak long, <1 = banyak short) / akun ${futuresDetail?.lsrAccount ?? "N/A"} | liq LONG $${futuresDetail?.longLiqUsd != null ? (Number(futuresDetail.longLiqUsd) / 1000).toFixed(0) + "k" : "N/A"} / SHORT $${futuresDetail?.shortLiqUsd != null ? (Number(futuresDetail.shortLiqUsd) / 1000).toFixed(0) + "k" : "N/A"} | vol24h $${futuresDetail?.volume24hUsd != null ? (Number(futuresDetail.volume24hUsd) / 1e6).toFixed(1) + "M" : "N/A"} | biasReason: ${futuresDetail?.biasReason || "N/A"} (sumber: ${futuresDetail?.source || "N/A"})
 
 [TEKNIKAL MULTI-TF (RSI/EMA/MACD PER TIMEFRAME — WAJIB SEBUT TF TIAP ANALISIS)]:
 ${(["15m", "1h", "4h"] as const)
@@ -926,6 +952,7 @@ ${(["15m", "1h", "4h"] as const)
 
 [MTF & LIQUIDITY STRUCTURE]:
 - State: ${keelSummary.mtfState?.activeState || "N/A"}
+- CATATAN CONFLUENCE (F-09): skor confluence keel berbasis 2 sumber independen — (1) konteks likuiditas untuk frame rendah (m15/h1 dari activeState) dan (2) bias teknikal flat untuk frame tinggi (h4/d1 dari RSI/EMA/MACD/orderbook yang sama). BUKAN 4 timeframe independen — jangan overstate keyakinan dari "konfirmasi 4 TF".
 - BSL (Buy Side Liquidity): ${keelSummary.mtfState?.nearestBSL ? "$" + keelSummary.mtfState.nearestBSL.midPrice : "N/A"}
 - SSL (Sell Side Liquidity): ${keelSummary.mtfState?.nearestSSL ? "$" + keelSummary.mtfState.nearestSSL.midPrice : "N/A"}
 - Sweep: ${keelSummary.mtfState?.recentSweep ? keelSummary.mtfState.recentSweep.type + " (" + keelSummary.mtfState.recentSweep.wickRejectionPercent + "%)" : "None"}
@@ -957,6 +984,8 @@ TUGAS ANDA:
 3. Tentukan suggestedBias secara TEGAS: LONG atau SHORT jika ada sinyal minimal 60% confluence. Gunakan NEUTRAL hanya jika market benar-benar dead-flat atau data sangat kontradiktif (conflict of interest).
 4. Berikan level Entry, SL, dan TP yang presisi secara matematis berdasarkan likuiditas (BSL/SSL).
 5. KALIBRASI dengan BACKTEST CONTEXT di atas: citakan secara eksplisit (misal "backtest terakhir simbol ini 55% win / PF 1.3 / MaxDD 6% → keyakinan cukup, bukan tinggi"). Jika PF < 1 atau MaxDD besar → turunkan keyakinan & tandai risiko.
+6. KONSISTENSI ANGKA WAJIB: setiap angka yang Anda sebut (LSR, SOPR, MVRV, whale inflow) HARUS cocok dengan nilai di blok data di atas — DILARANG membalik arti (LSR<1 = banyak SHORT, bukan long; SOPR>1 = profit-taking, bukan akumulasi).
+7. SAMPEL KECIL: bila backtest hanya 1-2 trade (n kecil), nyatakan eksplisit "tidak signifikan statistik" — JANGAN klaim edge dari n=1.
 
 Jawab HANYA JSON valid tanpa markdown:
 {
@@ -1105,8 +1134,12 @@ Jawab HANYA JSON valid tanpa markdown:
     }
     if (futuresDetail?.biasReason) futBits.push(futuresDetail.biasReason);
     const ocBits: string[] = [];
-    if (onChainEcho?.smartMoneyBias) ocBits.push(`smart money ${onChainEcho.smartMoneyBias}`);
-    if (onChainEcho?.sopr != null) ocBits.push(`SOPR ${onChainEcho.sopr} (${onChainEcho.soprStatus || "?"})`);
+    // F-01: insight keel-only TIDAK boleh menyajikan metrik simulasi murni
+    // seolah fakta — beri label eksplisit, atau drop bila tanpa anchor real.
+    if (onChainEcho?.hasRealAnchor) {
+      if (onChainEcho?.smartMoneyBias) ocBits.push(`smart money ${onChainEcho.smartMoneyBias}`);
+      if (onChainEcho?.sopr != null) ocBits.push(`SOPR ${onChainEcho.sopr} (${onChainEcho.soprStatus || "?"})`);
+    }
     const mcNote =
       mc && mc.macroRiskIndex > 0
         ? `Makro: ${mc.fedPolicyStance || "?"} risk ${mc.macroRiskIndex}/100.`
@@ -1119,13 +1152,19 @@ Jawab HANYA JSON valid tanpa markdown:
       `${base}` +
       (techBits.length > 0 ? ` Teknikal: ${techBits.join(", ")}.` : "") +
       (futBits.length > 0 ? ` Futures: ${futBits.join("; ")}.` : "") +
-      (ocBits.length > 0 ? ` On-chain: ${ocBits.join(", ")}.` : "") +
+      (ocBits.length > 0 ? ` On-chain: ${ocBits.join(", ")}.` : " On-chain: no-data/simulasi (tanpa anchor real — diabaikan).") +
       ` ${mcNote} Eksekusi TETAP keputusan Anda — periksa level SL/TP sebelum bertindak.`;
 
     return res.json({
       success: true,
       mode: "keel",
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"),
+      aiDisabledReason:
+        probeGeminiKey(process.env.GEMINI_API_KEY) === "none"
+          ? "KEY_MISSING"
+          : probeGeminiKey(process.env.GEMINI_API_KEY) === "legacy-revoked"
+            ? "KEY_LEGACY_REVOKED"
+            : "AI_CALL_FAILED",
       timestamp: Date.now(),
       keelSummary,
       technicals: technicalsEcho,
@@ -1137,7 +1176,12 @@ Jawab HANYA JSON valid tanpa markdown:
       dataHealth,
       backtest: { symbol: sym, context: buildBacktestContextFor(sym) },
       ai: {
-        insight: `Mode AI nonaktif (GEMINI_API_KEY belum di-set). Berikut ringkasan data keel: ${insightKeel}`,
+        insight: `${(() => {
+          const ks = probeGeminiKey(process.env.GEMINI_API_KEY);
+          if (ks === "none") return "Mode AI nonaktif (GEMINI_API_KEY belum di-set). Berikut ringkasan data keel: ";
+          if (ks === "legacy-revoked") return "Mode AI nonaktif (key AIza lama dicabut Google — ganti key baru format AQ.x). Berikut ringkasan data keel: ";
+          return "Mode AI gagal dihubungi (transien/overload) — berikut ringkasan data keel sementara: ";
+        })()}${insightKeel}`,
         suggestedBias: keelSummary.action === "BUY" ? "BULLISH" : keelSummary.action === "SELL" ? "BEARISH" : "NEUTRAL",
         risks: [],
       },

@@ -28,6 +28,11 @@ interface GuardStateFile {
   cooldownViolations: number;
   dailyEquityBaselineUSD?: number;
   liveRealizedLedger: Record<string, { realizedPnlUSD: number; entries: Array<{ timestamp: number; realizedPnlUSD: number; symbol?: string }> }>;
+  // Master toggle guardrails (paper training): false = SEMUA guard order
+  // (daily-loss, max-posisi, cooldown) di-bypass — order selalu lolos kecuali
+  // kill-switch. Default: OFF di paper (training bebas), ON di live (wajib).
+  // Toggle via POST /api/broker/guards (di-LOCK di live: tidak bisa dimatikan).
+  guardsEnabled?: boolean;
 }
 
 interface GuardConfig {
@@ -51,9 +56,28 @@ function getGuardConfig(): GuardConfig {
   return {
     killSwitchDefault: process.env.GUARD_KILL_SWITCH === "true",
     maxOpenPositions: envPositiveInt(process.env.GUARD_MAX_OPEN_POSITIONS, 5),
-    maxDailyLossPercent: envNonNegativeNum(process.env.GUARD_MAX_DAILY_LOSS_PERCENT, 10),
+    // Default 10%. envNonNegativeNum menerima 0 eksplisit sebagai "matikan guard"
+    // (0 = blokir semua order karena loss% >= 0 selalu true) — itu jebakan, jadi
+    // 0 eksplisit di sini diartikan NONAKTIF via maxDailyLossPercent=Infinity
+    // yang di-skip di evaluateGuardrails. Lihat cek `dailyGuardOn` di bawah.
+    maxDailyLossPercent: (() => {
+      const raw = String(process.env.GUARD_MAX_DAILY_LOSS_PERCENT ?? "").trim();
+      if (raw === "") return 10;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) return 10;
+      return n;
+    })(),
     minOrderIntervalMs: envNonNegativeNum(process.env.GUARD_MIN_ORDER_INTERVAL_MS, 30000),
   };
+}
+
+function isLiveMode(): boolean {
+  return process.env.TRADING_MODE === "live";
+}
+
+/** Default master toggle: paper = OFF (training bebas), live = ON (wajib). */
+function defaultGuardsEnabled(): boolean {
+  return isLiveMode();
 }
 
 function freshGuardState(): GuardStateFile {
@@ -63,6 +87,7 @@ function freshGuardState(): GuardStateFile {
     lastOrderTimestamp: 0,
     cooldownViolations: 0,
     liveRealizedLedger: {},
+    guardsEnabled: defaultGuardsEnabled(),
   };
 }
 
@@ -80,6 +105,8 @@ function loadGuardState(): GuardStateFile {
         cooldownViolations: Number(parsed.cooldownViolations) || 0,
         dailyEquityBaselineUSD: Number(parsed.dailyEquityBaselineUSD) > 0 ? Number(parsed.dailyEquityBaselineUSD) : undefined,
         liveRealizedLedger: (parsed.liveRealizedLedger as any) || {},
+        // State lama (tanpa field) → default per mode saat load.
+        guardsEnabled: typeof parsed.guardsEnabled === "boolean" ? parsed.guardsEnabled : defaultGuardsEnabled(),
       };
       // override killSwitch from env default only on first load if file explicitly had false? We keep file truth.
       // But if env says GUARD_KILL_SWITCH and file hasn't been set yet, file initial would be env default.
@@ -126,6 +153,26 @@ export function setKillSwitch(active: boolean): GuardStateFile {
   persistGuardState();
   console.log(`[guardrails] killSwitch set to ${s.killSwitch}`);
   return { ...s };
+}
+
+/**
+ * Master toggle guardrails (paper training ON/OFF).
+ * LIVE-LOCK: di live mode refused (return ok:false) — guard wajib aktif saat
+ * uang beneran. Paper bebas toggle on/off untuk training tanpa blokir.
+ */
+export function setGuardsEnabled(active: boolean): { ok: boolean; guardsEnabled: boolean; reason?: string } {
+  if (isLiveMode() && !active) {
+    return { ok: false, guardsEnabled: true, reason: "LIVE_LOCKED" };
+  }
+  const s = loadGuardState();
+  s.guardsEnabled = Boolean(active);
+  persistGuardState();
+  console.log(`[guardrails] guardsEnabled set to ${s.guardsEnabled}`);
+  return { ok: true, guardsEnabled: s.guardsEnabled };
+}
+
+export function areGuardsEnabled(): boolean {
+  return loadGuardState().guardsEnabled ?? defaultGuardsEnabled();
 }
 
 export function recordOrderPlaced(): void {
@@ -262,6 +309,7 @@ export interface EvaluateResult {
     openCount: number;
     maxOpenPositions: number;
     cooldownRemainingMs: number;
+    guardsEnabled: boolean;
   };
 }
 
@@ -270,18 +318,17 @@ export async function evaluateGuardrails(opts?: { symbol?: string }): Promise<Ev
   const state = loadGuardState();
   const reasons: GuardReason[] = [];
 
-  // KILL SWITCH
+  // MASTER TOGGLE (paper training): OFF = bypass SEMUA guard order —
+  // daily-loss, max-posisi, cooldown tidak diperiksa. Kill-switch tetap jalan
+  // (darurat manual selalu tersedia). Default paper OFF, live ON + live-lock.
+  const guardsOn = state.guardsEnabled ?? defaultGuardsEnabled();
+  const today = getTodayRealized();
+
+  // KILL SWITCH (selalu aktif — tidak ikut toggle)
   if (state.killSwitch) {
     reasons.push("KILL_SWITCH_ACTIVE");
   }
 
-  // DAILY LOSS
-  const today = getTodayRealized();
-  if (today.lossPercent >= config.maxDailyLossPercent) {
-    reasons.push("MAX_DAILY_LOSS_EXCEEDED");
-  }
-
-  // MAX OPEN POSITIONS
   let openCount = 0;
   if (process.env.TRADING_MODE === "live") {
     openCount = await getLiveOpenCountSafe();
@@ -293,18 +340,30 @@ export async function evaluateGuardrails(opts?: { symbol?: string }): Promise<Ev
       openCount = 0;
     }
   }
-  if (openCount >= config.maxOpenPositions) {
-    reasons.push("MAX_OPEN_POSITIONS");
+
+  if (guardsOn) {
+    // DAILY LOSS (0 eksplisit = guard dimatikan via env; tak ada batas = tak ada blokir)
+    const dailyGuardOn = config.maxDailyLossPercent > 0 && isFinite(config.maxDailyLossPercent);
+    if (dailyGuardOn && today.lossPercent >= config.maxDailyLossPercent) {
+      reasons.push("MAX_DAILY_LOSS_EXCEEDED");
+    }
+
+    // MAX OPEN POSITIONS
+    if (openCount >= config.maxOpenPositions) {
+      reasons.push("MAX_OPEN_POSITIONS");
+    }
+
+    // COOLDOWN
+    const elapsed = Date.now() - (state.lastOrderTimestamp || 0);
+    if (config.minOrderIntervalMs > 0 && state.lastOrderTimestamp !== 0 && elapsed < config.minOrderIntervalMs) {
+      reasons.push("COOLDOWN_ACTIVE");
+      state.cooldownViolations += 1;
+      persistGuardState();
+    }
   }
 
-  // COOLDOWN
   const elapsed = Date.now() - (state.lastOrderTimestamp || 0);
   const cooldownRemainingMs = state.lastOrderTimestamp ? Math.max(0, config.minOrderIntervalMs - elapsed) : 0;
-  if (config.minOrderIntervalMs > 0 && state.lastOrderTimestamp !== 0 && elapsed < config.minOrderIntervalMs) {
-    reasons.push("COOLDOWN_ACTIVE");
-    state.cooldownViolations += 1;
-    persistGuardState();
-  }
 
   return {
     allowed: reasons.length === 0,
@@ -317,13 +376,14 @@ export async function evaluateGuardrails(opts?: { symbol?: string }): Promise<Ev
       openCount,
       maxOpenPositions: config.maxOpenPositions,
       cooldownRemainingMs,
-    },
+      guardsEnabled: guardsOn,
+    } as EvaluateResult["details"],
   };
 }
 
 export function getGuardrailsSnapshotSync(): {
   config: GuardConfig;
-  state: { killSwitch: boolean; dailyLossPercent: number; openCount: number; lastOrderAt: number | null; cooldownRemainingMs: number; armedForLive: boolean };
+  state: { killSwitch: boolean; dailyLossPercent: number; openCount: number; lastOrderAt: number | null; cooldownRemainingMs: number; armedForLive: boolean; guardsEnabled: boolean };
   today: { realizedPnlUSD: number; lossPercent: number };
 } {
   const config = getGuardConfig();
@@ -379,6 +439,7 @@ export function getGuardrailsSnapshotSync(): {
       lastOrderAt: s.lastOrderTimestamp || null,
       cooldownRemainingMs,
       armedForLive,
+      guardsEnabled: s.guardsEnabled ?? defaultGuardsEnabled(),
     },
     today,
   };
@@ -386,7 +447,7 @@ export function getGuardrailsSnapshotSync(): {
 
 export async function getGuardrailsSnapshotAsync(): Promise<{
   config: GuardConfig;
-  state: { killSwitch: boolean; dailyLossPercent: number; openCount: number; lastOrderAt: number | null; cooldownRemainingMs: number; armedForLive: boolean };
+  state: { killSwitch: boolean; dailyLossPercent: number; openCount: number; lastOrderAt: number | null; cooldownRemainingMs: number; armedForLive: boolean; guardsEnabled: boolean };
   today: { realizedPnlUSD: number; lossPercent: number };
 }> {
   const sync = getGuardrailsSnapshotSync();

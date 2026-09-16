@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { authFetch, useAuth } from "../hooks/useAuth";
+import { useAuth } from "../hooks/useAuth";
+import { useLedgerStats } from "../hooks/useLedgerStats";
 import {
   BarChart3,
   TrendingUp,
@@ -33,6 +34,14 @@ interface StatsClosedTrade {
   status: string;
 }
 
+interface SourceSplit {
+  totalTrades: number;
+  winRate: number;
+  avgR: number;
+  profitFactor: number;
+  realizedPnlUSD: number;
+}
+
 interface StatsResponse {
   success?: boolean;
   totalTrades: number;
@@ -42,11 +51,12 @@ interface StatsResponse {
   maxDrawdownPct: number;
   avgSlippageBps: number;
   realizedPnlUSD: number;
+  bySource?: Record<string, SourceSplit>;
   closedTrades: StatsClosedTrade[];
   equityCurve: Array<{ ts: number; equity: number }>;
 }
 
-const POLL_MS = 5000;
+const POLL_MS = 15000;
 
 function fmtMoney(n: number): string {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -163,10 +173,15 @@ function EquityCurveSVG({ curve }: { curve: Array<{ ts: number; equity: number }
 
 export const TradeJournalPanel: React.FC = () => {
   const { isAuthenticated } = useAuth();
+  // Closed-trades + realized PnL ikut shared useLedgerStats (dedup global 15s).
+  // Field agregat lain (winRate, avgR, PF, slippage, equityCurve) tetap fetch
+  // sendiri tapi throttle 15s + skip bila 429 (fail-closed, tampilkan cache).
+  const sharedLedger = useLedgerStats();
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [conn, setConn] = useState<"ok" | "error" | "hidden" | "loading">("loading");
   const [lastSync, setLastSync] = useState<number | null>(null);
   const mountedRef = useRef(false);
+  const backoffUntilRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!mountedRef.current) return;
@@ -175,8 +190,21 @@ export const TradeJournalPanel: React.FC = () => {
       setConn("hidden");
       return;
     }
+    if (Date.now() < backoffUntilRef.current) return; // throttle pasca-429
     try {
-      const res = await authFetch("/api/ledger/stats");
+      const res = await fetch("/api/ledger/stats", {
+        headers: (() => {
+          try {
+            const t = localStorage.getItem("ag_auth_token");
+            return t ? { Authorization: `Bearer ${t}` } : {};
+          } catch { return {}; }
+        })(),
+      });
+      if (res.status === 429) {
+        // Rate-limited: JANGAN error-kan UI — tampilkan data terakhir, retry 30s.
+        backoffUntilRef.current = Date.now() + 30000;
+        return;
+      }
       if (res.status === 401) {
         setConn("error");
         return;
@@ -289,6 +317,34 @@ export const TradeJournalPanel: React.FC = () => {
               <span className="text-[10px] text-zinc-600">realized USD</span>
             </div>
           </div>
+
+          {/* Split MANUAL vs AUTOPILOT — perbaikan engine hanya terlihat di sini.
+              Statistik gabungan menyembunyikan efek fix (mayoritas trade manual). */}
+          {stats.bySource && Object.keys(stats.bySource).length > 0 && (
+            <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950/60 p-3 font-mono">
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">
+                Winrate per sumber entry — manual (klik panel) vs autopilot (pipeline)
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {Object.entries(stats.bySource as Record<string, SourceSplit>).sort((a, b) => b[1].totalTrades - a[1].totalTrades).map(([src, s]) => (
+                  <div key={src} className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className={`text-[10px] font-black px-1.5 py-0.5 rounded border ${src === "AUTOPILOT" ? "bg-indigo-500/15 text-indigo-300 border-indigo-500/30" : src === "REPLAY" ? "bg-amber-500/15 text-amber-300 border-amber-500/30" : "bg-zinc-800 text-zinc-300 border-zinc-700"}`}>
+                        {src}
+                      </span>
+                      <span className="text-[10px] text-zinc-500">{s.totalTrades}n</span>
+                    </div>
+                    <div className={`text-lg font-black mt-1 ${s.totalTrades > 0 ? (s.winRate >= 40 ? "text-emerald-400" : "text-rose-400") : "text-zinc-600"}`}>
+                      {s.totalTrades > 0 ? `${s.winRate.toFixed(1)}%` : "–"}
+                    </div>
+                    <div className="text-[10px] text-zinc-500">
+                      PF {fmtNum(s.profitFactor)} • R {fmtNum(s.avgR)} • {s.realizedPnlUSD >= 0 ? "+" : "-"}${fmtMoney(Math.abs(s.realizedPnlUSD))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Extra small stats row */}
           <div className="flex flex-wrap gap-2 font-mono text-[11px] text-zinc-500 mb-4">

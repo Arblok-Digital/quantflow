@@ -112,6 +112,8 @@ export async function executeBrokerOrder(
       marketType: params.marketType,
       targetPool: params.targetPool,
       decisionId: params.decisionId,
+      // Pipeline/autopilot — bedakan dari klik manual di statistik journal.
+      entrySource: "AUTOPILOT",
     },
   };
 

@@ -131,10 +131,12 @@ export async function evaluateTradingDecision(
             invalidationLevel: input.mtfLiquidity.recentSweep?.invalidationPrice || input.currentPrice * 0.985,
           },
           onChainContext: data.onChainContext || {
-            smartMoneyBias: input.onChainMetrics?.smartMoneyBias || "BULLISH_ACCUMULATION",
-            netflowStatus: input.onChainMetrics?.netflowStatus || "STRONG_OUTFLOW",
-            mvrvZScore: input.onChainMetrics?.mvrvZScore || 1.84,
-            whaleSignal: "Akumulasi Cold Storage",
+            // F-07: default jujur no-data — JANGAN klaim akumulasi bullish
+            // spesifik bila server & client sama-sama tidak punya data on-chain.
+            smartMoneyBias: input.onChainMetrics?.smartMoneyBias || "NO_DATA",
+            netflowStatus: input.onChainMetrics?.netflowStatus || "NO_DATA",
+            mvrvZScore: input.onChainMetrics?.mvrvZScore ?? NaN,
+            whaleSignal: input.onChainMetrics?.whaleAlerts?.[0]?.type || "No whale data (fail-closed)",
           },
           macroContext: data.macroContext || {
             // Jujur: kalau tidak ada data makro real, jangan klaim FOMC/HIGH_ALERT

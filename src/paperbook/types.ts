@@ -33,6 +33,8 @@ export interface PaperPosition {
   timeframe?: string;
   marketType?: string;
   targetPool?: string;
+  /** MANUAL (klik panel) | AUTOPILOT (pipeline) | REPLAY — untuk split statistik journal. */
+  entrySource?: string;
   sourceOrderId: string;
   lastMark?: number;
   lastMarkUpdatedAt?: number;
@@ -108,6 +110,8 @@ export interface PaperOrderMeta {
   targetPool?: string;
   /** AI decision id yang memicu order (untuk training join decision → fill). */
   decisionId?: string;
+  /** MANUAL | AUTOPILOT | REPLAY — asal entry, diteruskan ke posisi + DB. */
+  entrySource?: string;
 }
 
 export interface OpenPaperPositionInput {

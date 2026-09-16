@@ -188,10 +188,10 @@ export const DecisionStream: React.FC<DecisionStreamProps> = ({
                 <div className="px-2.5 py-1.5 rounded-lg bg-emerald-950/30 border border-emerald-500/20 flex items-center justify-between">
                   <span className="text-emerald-400 font-semibold flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    On-Chain: {decision.onChainContext.smartMoneyBias.replace("_", " ")}
+                    On-Chain: {String(decision.onChainContext.smartMoneyBias || "NO_DATA").replace("_", " ")}
                   </span>
                   <span className="text-zinc-400 font-mono text-[10px]">
-                    MVRV: {decision.onChainContext.mvrvZScore}
+                    MVRV: {Number.isFinite(Number(decision.onChainContext.mvrvZScore)) ? decision.onChainContext.mvrvZScore : "—"}
                   </span>
                 </div>
               )}

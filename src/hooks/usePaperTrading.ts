@@ -17,6 +17,10 @@ import { derivePortfolio, INITIAL_PAPER_CASH } from "./usePaperPortfolio";
 export interface UsePaperTradingOptions {
   symbol?: string;
   currentPrice?: number;
+  /** TF aktif saat user klik LONG/SHORT — dicatat permanen di meta.timeframe server. */
+  entryTimeframe?: Timeframe;
+  /** Market aktif (SubBar FUTURES/SPOT) — diteruskan ke meta.marketType server. */
+  marketType?: MarketType;
   prependAudit?: (entry: any) => void;
 }
 
@@ -144,7 +148,7 @@ function mapPendingOrder(o: any): PendingOrder | null {
 }
 
 export function usePaperTrading(options: UsePaperTradingOptions) {
-  const { symbol, currentPrice } = options;
+  const { symbol, currentPrice, entryTimeframe, marketType } = options;
 
   // Compose shared domain hooks
   const brokerPositions = useBrokerPositions();
@@ -163,6 +167,10 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
   symbolRef.current = symbol;
   const priceRef = useRef(currentPrice);
   priceRef.current = currentPrice;
+  const entryTfRef = useRef(entryTimeframe);
+  entryTfRef.current = entryTimeframe;
+  const marketTypeRef = useRef(marketType);
+  marketTypeRef.current = marketType;
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
 
@@ -275,7 +283,9 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
     load();
   }, [load]);
 
-  // Close position — now uses positionId directly (TASK 2)
+  // Close position — now uses positionId directly (TASK 2).
+  // Return {ok, reason?, message?} agar panel bisa tampilkan toast error yang
+  // JELAS (sebelumnya gagal close = silent console.error, user kira tombol rusak).
   const closePosition = useCallback(
     async (positionId: string, _reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => {
       // If it looks like a symbol (no "pos-" prefix), find the position by symbol
@@ -283,10 +293,10 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
       let targetId = positionId;
       if (!positionId.startsWith("pos-")) {
         const targetPos = positionsRef.current.find((p) => p.symbol === positionId);
-        if (!targetPos) return;
+        if (!targetPos) return { ok: false as const, reason: "NOT_IN_LOCAL_BOOK", message: `Posisi ${positionId} tidak ada di book lokal.` };
         if (isSimPositionId(targetPos.id)) {
           setPositions((prev) => prev.filter((p) => p.symbol !== positionId));
-          return;
+          return { ok: true as const };
         }
         targetId = targetPos.id as string;
       }
@@ -298,16 +308,17 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         });
         const payload = await res.json().catch(() => null);
         if (!res.ok || !payload?.success) {
+          const reason = String(payload?.reason || `HTTP_${res.status}`);
+          // Stale id (posisi sudah ke-close TP/CL di server): sinkronkan book.
           if (payload?.reason === "POSITION_NOT_FOUND" || payload?.reason === "POSITION_ALREADY_CLOSED") {
             await load();
-            return;
           }
-          console.error(`Broker close gagal (${payload?.reason || res.status}): ${payload?.message || "unknown"}`);
-          return;
+          return { ok: false as const, reason, message: String(payload?.message || "Close ditolak server.") };
         }
         await load();
+        return { ok: true as const, realizedPnlUSD: Number((payload as any)?.realizedPnlUSD ?? 0) };
       } catch (err) {
-        console.error("Broker close unreachable:", (err as Error).message);
+        return { ok: false as const, reason: "NETWORK", message: (err as Error).message };
       }
     },
     [load]
@@ -316,10 +327,10 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
   const moveToBreakEven = useCallback(
     async (positionId: string) => {
       const targetPos = positionsRef.current.find((p) => p.id === positionId);
-      if (!targetPos) return;
+      if (!targetPos) return { ok: false as const, reason: "NOT_IN_LOCAL_BOOK", message: "Posisi tidak ada di book lokal." };
       if (isSimPositionId(targetPos.id)) {
         setPositions((prev) => prev.map((p) => (p.id === positionId ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
-        return;
+        return { ok: true as const };
       }
       try {
         const res = await authFetch("/api/broker/position/update", {
@@ -331,14 +342,13 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         if (!res.ok || !payload?.success) {
           if (payload?.reason === "POSITION_NOT_FOUND") {
             setPositions((prev) => prev.map((p) => (p.id === positionId ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
-          } else {
-            console.error(`Broker move-to-BE gagal (${payload?.reason || res.status}): ${payload?.message || "unknown"}`);
           }
-          return;
+          return { ok: false as const, reason: String(payload?.reason || `HTTP_${res.status}`), message: String(payload?.message || "Update posisi gagal.") };
         }
         await load();
+        return { ok: true as const };
       } catch (err) {
-        console.error("Broker move-to-BE unreachable:", (err as Error).message);
+        return { ok: false as const, reason: "NETWORK", message: (err as Error).message };
       }
     },
     [load]
@@ -375,7 +385,12 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
   );
 
   const simulateTradeEntry = useCallback(
-    async (side: "LONG" | "SHORT", orderType: OrderTypeInput = "market", limitPrice?: number) => {
+    async (
+      side: "LONG" | "SHORT",
+      orderType: OrderTypeInput = "market",
+      limitPrice?: number,
+      opts?: { stopLoss?: number; takeProfit?: number; sizePct?: number; leverage?: number }
+    ) => {
       const sym = symbolRef.current || "BTC/USDT";
       const entryPrice = priceRef.current ?? 0;
       if (!entryPrice || entryPrice <= 0) {
@@ -394,7 +409,10 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         } catch {}
       }
       const basis = equity > 0 ? equity : cash > 0 ? cash : INITIAL_PAPER_CASH;
-      const allocatedUSD = Math.min(cash > 0 ? cash : basis, basis * 0.12);
+      // Size% & leverage dari panel entry (default = perilaku lama).
+      const sizePct = opts?.sizePct != null && isFinite(opts.sizePct) && opts.sizePct > 0 && opts.sizePct <= 100 ? opts.sizePct : 12;
+      const lev = opts?.leverage != null && isFinite(opts.leverage) && opts.leverage >= 1 && opts.leverage <= 125 ? Math.floor(opts.leverage) : 10;
+      const allocatedUSD = Math.min(cash > 0 ? cash : basis, basis * (sizePct / 100));
       if (allocatedUSD <= 0) {
         console.warn("[usePaperTrading] simulateTradeEntry: insufficient cash (server).");
         return;
@@ -412,8 +430,24 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         );
         return null;
       }
-      const stopLoss = isLong ? Number((entryPrice * 0.991).toFixed(2)) : Number((entryPrice * 1.009).toFixed(2));
-      const takeProfit = isLong ? Number((entryPrice * 1.021).toFixed(2)) : Number((entryPrice * 0.979).toFixed(2));
+      // SL/TP dari panel entry bila valid & urutan harga benar; fallback default
+      // 1.5%/3.5% (selaras default OrderEntryPanel — SL 0.9% lama terlalu sempit
+      // untuk BTC, ATR H4 ~1.5-2%+).
+      const fbSL = isLong ? Number((entryPrice * 0.985).toFixed(2)) : Number((entryPrice * 1.015).toFixed(2));
+      const fbTP = isLong ? Number((entryPrice * 1.035).toFixed(2)) : Number((entryPrice * 0.965).toFixed(2));
+      let stopLoss = fbSL;
+      let takeProfit = fbTP;
+      if (opts?.stopLoss != null && opts?.takeProfit != null && isFinite(opts.stopLoss) && isFinite(opts.takeProfit)) {
+        const oSL = Number(opts.stopLoss);
+        const oTP = Number(opts.takeProfit);
+        const okOrder = isLong
+          ? oSL < entryPrice && entryPrice < oTP
+          : oTP < entryPrice && entryPrice < oSL;
+        if (okOrder) {
+          stopLoss = Number(oSL.toFixed(2));
+          takeProfit = Number(oTP.toFixed(2));
+        }
+      }
       const effectiveType: OrderTypeInput = orderType === "limit" ? "limit" : "market";
       if (effectiveType === "limit" && (!limitPrice || !isFinite(limitPrice) || limitPrice <= 0)) {
         console.warn("[usePaperTrading] simulateTradeEntry: limitPrice wajib diisi untuk limit order.");
@@ -428,7 +462,7 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
             side: isLong ? "buy" : "sell",
             type: effectiveType,
             amount: qty,
-            leverage: 10,
+            leverage: lev,
             stopLoss,
             takeProfit,
             ...(effectiveType === "limit" ? { limitPrice: Number(limitPrice) } : {}),
@@ -437,18 +471,34 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
                 ? `Simulated LONG via paper book: 15m SSL sweep @ ${(entryPrice * 0.994).toFixed(0)}`
                 : `Simulated SHORT via paper book: 15m BSL sweep @ ${(entryPrice * 1.006).toFixed(0)}`,
               confidence: 89,
-              timeframe: "15m",
-              marketType: "FUTURES",
+              // TF entry = TF chart yang sedang aktif saat user klik (bukan hardcode 15m).
+              timeframe: entryTfRef.current || "15m",
+              // Market aktif dari SubBar — BE enforce semantics (SPOT: LONG-only, lev 1).
+              marketType: marketTypeRef.current || "FUTURES",
               targetPool: isLong ? "15m BSL ($21.5M Pool)" : "15m SSL ($19.8M Pool)",
             },
           }),
         });
         const payload = await res.json().catch(() => null);
         if (!res.ok || !payload?.success) {
-          console.warn(
-            `Simulate order ditolak (${payload?.reason || res.status}): ${payload?.message || "unknown"}`
-          );
-          return null;
+          // Kembalikan reason + snapshot guard ke panel agar user tahu PENYEBAB
+          // (sebelumnya cuma console.warn → user kira tombol rusak).
+          const p: any = payload || {};
+          const g: any = p.guard || {};
+          return {
+            rejected: true as const,
+            reason: String(p.reason || `HTTP_${res.status}`),
+            message: String(p.message || "Order ditolak."),
+            guard: {
+              dailyLossPercent: g.dailyLossPercent ?? null,
+              maxDailyLossPercent: g.maxDailyLossPercent ?? null,
+              realizedPnlUSD: g.realizedPnlUSD ?? null,
+              cooldownRemainingMs: g.cooldownRemainingMs ?? null,
+              openCount: g.openCount ?? null,
+              maxOpenPositions: g.maxOpenPositions ?? null,
+              reasons: Array.isArray(g.reasons) ? g.reasons : [],
+            },
+          };
         }
         const order = payload?.order as any | undefined;
         const orderState = String(order?.state ?? order?.status ?? "").toUpperCase();

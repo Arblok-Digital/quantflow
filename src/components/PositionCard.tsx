@@ -1,24 +1,29 @@
-import React from "react";
+import React, { useMemo, useState } from "react";
 import {
   ShieldAlert,
   Target,
   Info,
 } from "lucide-react";
-import { Position } from "../types";
+import { Candle, Position } from "../types";
+import { estimatePositionEta } from "../logic/positionEta";
+import { authFetch } from "../hooks/useAuth";
 
 interface PositionCardProps {
   pos: Position;
   currentPrice: number;
+  /** Candle TF entry posisi — untuk estimasi candle/durasi ke TP/CL. */
+  activeCandles?: Candle[];
   isExpanded: boolean;
   onToggleExpand: () => void;
-  onClosePosition: (positionId: string, reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => void;
-  onMoveToBreakEven: (positionId: string) => void;
+  onClosePosition: (positionId: string, reason?: "TAKE_PROFIT" | "CUT_LOSS" | "MANUAL_CLOSE") => Promise<{ ok: boolean; reason?: string; message?: string; realizedPnlUSD?: number } | void>;
+  onMoveToBreakEven: (positionId: string) => Promise<{ ok: boolean; reason?: string; message?: string } | void>;
   actionableRunKeel?: () => void;
 }
 
 export const PositionCard: React.FC<PositionCardProps> = ({
   pos,
   currentPrice,
+  activeCandles = [],
   isExpanded,
   onToggleExpand,
   onClosePosition,
@@ -60,6 +65,90 @@ export const PositionCard: React.FC<PositionCardProps> = ({
     }
   }
 
+  // ESTIMASI candle + durasi ke TP/CL dari ATR TF entry (client-side).
+  // Dilabel EST — bukan prediksi; jawaban atas "butuh berapa lama ke TP/CL".
+  const eta = useMemo(
+    () => estimatePositionEta(pos, currentPrice, activeCandles),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pos.id, pos.takeProfit, pos.stopLoss, pos.timeframe, currentPrice, activeCandles.length]
+  );
+  // Feedback close + edit SL/TP inline (sebelumnya gagal = silent).
+  const [busy, setBusy] = useState(false);
+  const [closeErr, setCloseErr] = useState<string | null>(null);
+  const [editingBracket, setEditingBracket] = useState(false);
+  const [editSL, setEditSL] = useState("");
+  const [editTP, setEditTP] = useState("");
+  const [editErr, setEditErr] = useState<string | null>(null);
+
+  const handleClose = async () => {
+    if (!window.confirm(`Tutup posisi ${pos.symbol} ${pos.side}? PnL floating $${pos.unrealizedPnl.toFixed(2)} akan direalisasi.`)) return;
+    setBusy(true);
+    setCloseErr(null);
+    try {
+      const res = await onClosePosition(pos.id, "MANUAL_CLOSE");
+      if (res && !res.ok) {
+        setCloseErr(`${res.reason || "GAGAL"}: ${res.message || "Close ditolak."}`);
+      }
+    } catch (err) {
+      setCloseErr(`NETWORK: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBreakEven = async () => {
+    setBusy(true);
+    setCloseErr(null);
+    try {
+      const res = await onMoveToBreakEven(pos.id);
+      if (res && !res.ok) {
+        setCloseErr(`${res.reason || "GAGAL"}: ${res.message || "Break-even ditolak."}`);
+      }
+    } catch (err) {
+      setCloseErr(`NETWORK: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveBracket = async () => {
+    const sl = Number(editSL);
+    const tp = Number(editTP);
+    if (!isFinite(sl) || sl <= 0 || !isFinite(tp) || tp <= 0) {
+      setEditErr("SL & TP harus angka > 0.");
+      return;
+    }
+    if (pos.side === "LONG" && !(sl < currentPrice && currentPrice < tp)) {
+      setEditErr("LONG: harus SL < harga sekarang < TP.");
+      return;
+    }
+    if (pos.side === "SHORT" && !(tp < currentPrice && currentPrice < sl)) {
+      setEditErr("SHORT: harus TP < harga sekarang < SL.");
+      return;
+    }
+    setBusy(true);
+    setEditErr(null);
+    try {
+      const res = await authFetch("/api/broker/position/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ positionId: pos.id, stopLoss: sl, takeProfit: tp }),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) {
+        setEditErr(`${payload?.reason || `HTTP ${res.status}`}: ${payload?.message || "Update ditolak."}`);
+        return;
+      }
+      setEditingBracket(false);
+    } catch (err) {
+      setEditErr(`NETWORK: ${(err as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // SPOT: badge tanpa leverage (selalu 1x, aset beneran) + tanpa liq.
+  const isSpotPos = String(pos.marketType || "").toUpperCase() === "SPOT";
   return (
     <div
       key={pos.id}
@@ -75,14 +164,28 @@ export const PositionCard: React.FC<PositionCardProps> = ({
                 : "bg-rose-500/20 text-rose-400 border border-rose-500/40"
             }`}
           >
-            {pos.side} {pos.leverage || 10}x
+            {pos.side}{isSpotPos ? "" : ` ${pos.leverage || 10}x`}
           </span>
           <div>
             <span className="text-sm font-bold text-zinc-100 font-mono">
               {pos.symbol}
             </span>
-            <span className="text-[10px] font-mono text-zinc-500 ml-2">
-              {pos.timeframe || "15m"} {pos.marketType || "FUTURES"}
+            {/* Badge TF ENTRY permanen (dari server) — bukan TF chart yang sedang dilihat. */}
+            <span
+              className="text-[10px] font-mono font-black ml-2 px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
+              title={`Entry dicatat di TF ${pos.timeframe || "15m"} — estimasi durasi memakai interval TF ini`}
+            >
+              TF {pos.timeframe || "15m"}
+            </span>
+            <span
+              className={`text-[10px] font-mono font-black ml-1.5 px-1.5 py-0.5 rounded border ${
+                isSpotPos
+                  ? "bg-sky-500/15 text-sky-300 border-sky-500/30"
+                  : "bg-amber-500/10 text-amber-300/80 border-amber-500/20"
+              }`}
+              title={isSpotPos ? "SPOT: aset beneran — tanpa liquidation, leverage 1x" : "FUTURES: margin + liquidation berlaku"}
+            >
+              {pos.marketType || "FUTURES"}
             </span>
           </div>
         </div>
@@ -104,16 +207,20 @@ export const PositionCard: React.FC<PositionCardProps> = ({
           </div>
 
           <button
-            onClick={() =>
-              onClosePosition(pos.id, "MANUAL_CLOSE")
-            }
-            className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-300 hover:text-white font-mono text-xs font-bold border border-zinc-700 hover:border-rose-500 transition"
+            onClick={handleClose}
+            disabled={busy}
+            className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-300 hover:text-white font-mono text-xs font-bold border border-zinc-700 hover:border-rose-500 transition disabled:opacity-50 disabled:cursor-wait"
             title="Tutup posisi ini sekarang dengan market order"
           >
-            Market Close
+            {busy ? "Closing…" : "Market Close"}
           </button>
         </div>
       </div>
+      {closeErr && (
+        <p className="text-[11px] font-mono text-rose-400 bg-rose-950/30 border border-rose-500/30 rounded-lg px-2.5 py-1.5">
+          Close gagal — {closeErr}
+        </p>
+      )}
 
       {/* Middle Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs">
@@ -172,6 +279,14 @@ export const PositionCard: React.FC<PositionCardProps> = ({
               </strong>{" "}
               ({distToCLPercent}%)
             </span>
+            {/* EST CL: berapa candle + berapa lama (ATR TF entry). */}
+            <span className="text-[10px] font-mono block mt-0.5" title={eta.atr != null ? `ATR ${pos.timeframe || "15m"} $${eta.atr}/candle × drift 0.5 — ESTIMASI, bukan prediksi` : "Candle TF entry belum tersedia — estimasi tidak bisa dihitung"}>
+              {eta.clCandles != null ? (
+                <>EST CL: <strong className="text-rose-300">~{eta.clCandles} 🕯 {eta.clDurasi}</strong></>
+              ) : (
+                <span className="text-zinc-600">EST CL: — (no candle)</span>
+              )}
+            </span>
           </div>
 
           <div className="text-center px-2 py-0.5 rounded bg-zinc-950 border border-zinc-800 text-[10px] font-mono text-amber-400 font-bold">
@@ -189,6 +304,14 @@ export const PositionCard: React.FC<PositionCardProps> = ({
                 +${potentialProfitCashflow.toFixed(2)}
               </strong>{" "}
               ({distToTPPercent}%)
+            </span>
+            {/* EST TP: berapa candle + berapa lama (ATR TF entry). */}
+            <span className="text-[10px] font-mono block mt-0.5" title={eta.atr != null ? `ATR ${pos.timeframe || "15m"} $${eta.atr}/candle × drift 0.5 — ESTIMASI, bukan prediksi` : "Candle TF entry belum tersedia — estimasi tidak bisa dihitung"}>
+              {eta.tpCandles != null ? (
+                <>EST TP: <strong className="text-emerald-300">~{eta.tpCandles} 🕯 {eta.tpDurasi}</strong>{eta.nearer ? <span className="text-zinc-500"> • {eta.nearer} dulu</span> : null}</>
+              ) : (
+                <span className="text-zinc-600">EST TP: — (no candle)</span>
+              )}
             </span>
           </div>
         </div>
@@ -241,15 +364,45 @@ export const PositionCard: React.FC<PositionCardProps> = ({
       </div>
 
       {/* Quick Defensive Controls */}
-      <div className="flex items-center justify-end gap-2 pt-1 font-mono text-xs">
+      <div className="flex items-center justify-end gap-2 pt-1 font-mono text-xs flex-wrap">
+        {!editingBracket ? (
+          <button
+            onClick={() => { setEditingBracket(true); setEditSL(String(pos.stopLoss)); setEditTP(String(pos.takeProfit)); setEditErr(null); }}
+            className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-[11px] transition"
+            title="Ubah SL & TP manual (validasi LONG: SL < harga < TP)"
+          >
+            Edit SL/TP
+          </button>
+        ) : (
+          <span className="flex items-center gap-1.5 flex-wrap">
+            <label className="flex items-center gap-1 text-[11px] text-zinc-400">
+              SL <input type="number" step="any" value={editSL} onChange={(e) => setEditSL(e.target.value)} className="w-24 px-1.5 py-1 rounded bg-zinc-950 border border-zinc-700 text-zinc-100 font-mono text-[11px] focus:outline-none focus:border-amber-500/60" />
+            </label>
+            <label className="flex items-center gap-1 text-[11px] text-zinc-400">
+              TP <input type="number" step="any" value={editTP} onChange={(e) => setEditTP(e.target.value)} className="w-24 px-1.5 py-1 rounded bg-zinc-950 border border-zinc-700 text-zinc-100 font-mono text-[11px] focus:outline-none focus:border-amber-500/60" />
+            </label>
+            <button onClick={handleSaveBracket} disabled={busy} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition disabled:opacity-50">
+              {busy ? "…" : "Simpan"}
+            </button>
+            <button onClick={() => setEditingBracket(false)} className="px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 text-[11px] transition">
+              Batal
+            </button>
+          </span>
+        )}
         <button
-          onClick={() => onMoveToBreakEven(pos.id)}
-          className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-[11px] transition"
+          onClick={handleBreakEven}
+          disabled={busy}
+          className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-[11px] transition disabled:opacity-50"
           title="Geser Cut Loss ke harga Entry sehingga posisi bebas risiko (Risk-Free Trade)"
         >
           Set Break-Even (Risk-Free)
         </button>
       </div>
+      {editErr && (
+        <p className="text-[11px] font-mono text-amber-400 bg-amber-950/30 border border-amber-500/30 rounded-lg px-2.5 py-1.5">
+          SL/TP gagal — {editErr}
+        </p>
+      )}
     </div>
   );
 };

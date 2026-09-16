@@ -3,17 +3,19 @@ import { ShieldCheck, Zap, XCircle } from "lucide-react";
 import { authFetch, useAuth } from "../hooks/useAuth";
 import { normalizeSide } from "../lib/sideNormalize";
 import { useToast } from "./ExecutionToasts";
+import { useBrokerPositions } from "../hooks/useBrokerPositions";
 
 
 // ---------------------------------------------------------------------------
 // Positions Panel — server-backed open positions table (roadmap 1.8).
-// Polls GET /api/broker/positions every 3.5s (paused while hidden). The
-// server paper book is the single source of truth: no client-side book is
-// duplicated here. Renders the account summary strip + open positions table
-// with Close / Move-to-BE actions calling the broker endpoints directly.
+// Polls GET /api/broker/positions every 15s via shared useBrokerPositions hook
+// (paused while hidden). The server paper book is the single source of truth:
+// no client-side book is duplicated here. Renders the account summary strip +
+// open positions table with Close / Move-to-BE actions calling the broker
+// endpoints directly.
 // ---------------------------------------------------------------------------
 
-interface ServerPosition {
+interface PositionsPanelPosition {
   id: string;
   symbol: string;
   side: "LONG" | "SHORT";
@@ -30,7 +32,7 @@ interface ServerPosition {
   lastMark?: number;
 }
 
-interface ServerAccount {
+interface PositionsPanelAccount {
   cash: number;
   equity: number;
   unrealizedPnl: number;
@@ -42,8 +44,8 @@ interface ServerAccount {
 interface PositionsResponse {
   success: boolean;
   mode: "paper" | "live";
-  positions: ServerPosition[] | null;
-  account: ServerAccount | null;
+  positions: PositionsPanelPosition[] | null;
+  account: PositionsPanelAccount | null;
   note?: string;
 }
 
@@ -59,12 +61,11 @@ interface PositionsPanelProps {
   onServerPositions?: (openServerIds: string[]) => void;
 }
 
-const POLL_MS = 5000;
 const fmtMoney = (n: number): string =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtNum = (n: number): string => n.toLocaleString("en-US", { maximumFractionDigits: 4 });
 
-function unrealizedFor(pos: ServerPosition): { pnlUSD: number; pnlPct: number } {
+function unrealizedFor(pos: PositionsPanelPosition): { pnlUSD: number; pnlPct: number } {
   const mark = pos.lastMark ?? pos.entryPrice;
   const pnlUSD = pos.side === "LONG" ? (mark - pos.entryPrice) * pos.qty : (pos.entryPrice - mark) * pos.qty;
   const pnlPct = pos.notionalUSD > 0 ? (pnlUSD / pos.notionalUSD) * 100 : 0;
@@ -74,6 +75,9 @@ function unrealizedFor(pos: ServerPosition): { pnlUSD: number; pnlPct: number } 
 export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPositions }) => {
   const { isAuthenticated } = useAuth();
   const { pushToast } = useToast();
+  // Shared poller (dedup global di useBrokerPositions, 15s) — panel ini hanya
+  // me-render ulang dari data hook, TIDAK fetch /api/broker/positions sendiri.
+  const shared = useBrokerPositions();
 
   const [data, setData] = useState<PositionsResponse | null>(null);
   const [conn, setConn] = useState<"ok" | "error" | "hidden">("hidden");
@@ -83,59 +87,67 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
 
   const onServerPositionsRef = useRef(onServerPositions);
   onServerPositionsRef.current = onServerPositions;
-  const mountedRef = useRef(false);
 
-  const load = useCallback(async () => {
-    if (!mountedRef.current) return;
+  // Proyeksikan data shared hook ke shape lokal (tanpa fetch tambahan).
+  // Interval cadangan DIHAPUS — refresh hanya via visibility + aksi user
+  // (handleClose/handleBreakEven) + timer global di useBrokerPositions.
+  // Ini menghilangkan 1 request /api/broker/positions per 5s per mount.
+
+  useEffect(() => {
     if (!isAuthenticated) return;
     if (document.hidden) {
       setConn("hidden");
       return;
     }
-    try {
-      const res = await authFetch("/api/broker/positions");
-      if (res.status === 401) {
-        setConn("error");
-        return;
-      }
-      const payload = (await res.json()) as PositionsResponse;
-      setData(payload);
-      setConn("ok");
-      setLastSync(Date.now());
-      // Sync server open ids ke client book untuk mode paper maupun live —
-      // shape response identik, tinggal server yang menentukan isinya.
-      if (Array.isArray(payload.positions)) {
-        onServerPositionsRef.current?.(
-          payload.positions.filter((p) => p.status === "OPEN").map((p) => p.id)
-        );
-      }
-    } catch {
-      setConn("error");
+    if (shared.loading && !data) return;
+    const payload: PositionsResponse = {
+      success: !shared.error,
+      mode: shared.mode,
+      positions: shared.positions.map((p: any) => ({
+        id: String(p.id),
+        symbol: String(p.symbol),
+        side: String(p.side) as "LONG" | "SHORT",
+        qty: Number(p.qty ?? 0),
+        entryPrice: Number(p.entryPrice ?? 0),
+        notionalUSD: Number(p.notionalUSD ?? p.notional_usd ?? 0),
+        leverage: Number(p.leverage ?? 10),
+        marginUSD: Number(p.marginUSD ?? 0),
+        stopLoss: Number(p.stopLoss ?? 0),
+        takeProfit: Number(p.takeProfit ?? 0),
+        liquidationPrice: Number(p.liquidationPrice ?? 0),
+        openedAt: Number(p.openedAt ?? Date.now()),
+        status: (p.status || "OPEN") as "OPEN" | "CLOSED",
+        lastMark: p.lastMark != null ? Number(p.lastMark) : undefined,
+      })),
+      account: shared.account as unknown as PositionsResponse["account"],
+    };
+    setData(payload);
+    setConn(shared.error ? "error" : "ok");
+    setLastSync(Date.now());
+    if (!shared.error) {
+      onServerPositionsRef.current?.(
+        shared.positions.filter((p: any) => (p.status || "OPEN") === "OPEN").map((p: any) => String(p.id))
+      );
     }
-  }, [isAuthenticated]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, shared.positions, shared.account, shared.mode, shared.error, shared.loading]);
+
+  // Refresh manual = delegasi ke shared hook (aksi user & visibility only).
+  const load = useCallback(async () => {
+    await shared.refresh();
+  }, [shared.refresh]);
 
   useEffect(() => {
-    mountedRef.current = true;
-    if (!isAuthenticated) return;
-    const interval = setInterval(() => {
-      load();
-    }, POLL_MS);
     const onVisibility = () => {
       if (!document.hidden) load();
     };
     document.addEventListener("visibilitychange", onVisibility);
-    load();
     return () => {
-      clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [isAuthenticated, load]);
+  }, [load]);
 
-  useEffect(() => {
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  const handleClose = async (pos: ServerPosition) => {
+  const handleClose = async (pos: PositionsPanelPosition) => {
     if (!window.confirm(`Tutup posisi ${pos.symbol}? Ini mengirim order lawan ke server.`)) return;
     setBusyId(pos.id);
     setActionError(null);
@@ -171,7 +183,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
     }
   };
 
-  const handleBreakEven = async (pos: ServerPosition) => {
+  const handleBreakEven = async (pos: PositionsPanelPosition) => {
     setBusyId(pos.id);
     setActionError(null);
     try {

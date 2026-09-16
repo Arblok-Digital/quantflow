@@ -19,16 +19,31 @@ import {
 
 interface MacroCalendarPanelProps {
   macro: MacroSummary;
+  /** F-03: macro REAL server-side (FF mirror + Stooq VIX). Bila ada → panel pakai ini, bukan stub legacy. */
+  macroReal?: {
+    source: string;
+    vix: number | null;
+    riskIndex: number;
+    upcomingCount: number;
+    upcoming: Array<{ title: string; dateUtc: string; forecast: string; previous: string }>;
+    fetchedAt: number;
+  } | null;
   onRefresh?: () => void;
 }
 
-export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, onRefresh }) => {
-  const isHighRisk = macro.macroRiskIndex > 70;
-  // 4.9: Mode feed makro dari provider registry — REAL bila "live", SIMULATED bila "simulated".
+export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, macroReal, onRefresh }) => {
+  // F-03: macroReal (server) adalah sumber utama bila ok; stub legacy (macro)
+  // hanya fallback no-data. Panel tidak pernah lagi "terjebak" di data mati.
+  const realActive = !!macroReal;
+  const riskIndex = realActive ? macroReal!.riskIndex : macro.macroRiskIndex;
+  const isHighRisk = riskIndex > 70;
+  // 4.9 + F-03: badge ikut SUMBER AKTIF — REAL bila macroReal server ok
+  // (FF mirror/Stooq), SIMULATED bila hanya stub legacy no-data.
   const macroMode = getDataSourceMode("macro");
-  const isSimulated = macroMode !== "live";
-  const lastFetchAt =
-    typeof macro.lastUpdated === "number" && macro.lastUpdated > 0
+  const isSimulated = !realActive;
+  const lastFetchAt = realActive
+    ? new Date(macroReal!.fetchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : typeof macro.lastUpdated === "number" && macro.lastUpdated > 0
       ? new Date(macro.lastUpdated).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
       : "--:--:--";
 
@@ -141,6 +156,48 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, o
       </div>
 
       {/* Top Banner: Nearest Catalyst & Risk Gauge */}
+      {/* F-03: bila macroReal aktif → tampilkan VIX real + event FF mirror di
+          panel ini (sebelumnya VIX real HANYA ada di AiAdvisorPanel). */}
+      {realActive && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-slate-950/60 border border-emerald-500/30 rounded-xl p-4 flex flex-col justify-between space-y-2">
+            <div className="flex items-center justify-between text-xs text-slate-400">
+              <span>VIX (Stooq real)</span>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400">
+                {macroReal!.source}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-3xl font-bold font-mono text-emerald-400">
+                {macroReal!.vix != null ? macroReal!.vix.toFixed(2) : "—"}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400 leading-tight">
+              Sentimen risiko real-time — fear tinggi (&gt;30) = kurangi ukuran posisi.
+            </p>
+          </div>
+          <div className="md:col-span-2 bg-slate-950/60 border border-slate-800/80 rounded-xl p-4 flex flex-col justify-between space-y-2">
+            <span className="text-xs font-semibold text-amber-400 flex items-center gap-1.5">
+              <Flame className="w-4 h-4 text-amber-500 animate-pulse" />
+              High-impact USD terdekat ({macroReal!.upcomingCount}):
+            </span>
+            {macroReal!.upcoming.length > 0 ? (
+              <ul className="space-y-1 text-xs font-mono text-slate-300">
+                {macroReal!.upcoming.slice(0, 4).map((e) => (
+                  <li key={`${e.title}-${e.dateUtc}`} className="flex flex-wrap gap-x-3">
+                    <strong className="text-slate-100">{e.title}</strong>
+                    <span className="text-slate-400">{new Date(e.dateUtc).toLocaleString()}</span>
+                    <span className="text-slate-500">fc {e.forecast || "?"} / prev {e.previous || "?"}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-xs text-slate-500 font-mono">Tidak ada event high-impact terjadwal minggu ini.</p>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Nearest High Impact Event */}
         <div className="md:col-span-2 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col justify-between space-y-2">
@@ -183,16 +240,16 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, o
 
           <div className="flex items-baseline gap-2">
             <span className={`text-3xl font-bold font-mono ${isHighRisk ? "text-rose-400" : "text-amber-400"}`}>
-              {macro.macroRiskIndex}
+              {riskIndex}
             </span>
-            <span className="text-xs text-slate-500 font-mono">/ 100</span>
+            <span className="text-xs text-slate-500 font-mono">/ 100{realActive ? ` (${macroReal!.source})` : " (no-data)"}</span>
           </div>
 
           {/* Progress bar */}
           <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
             <div 
               className={`h-full rounded-full ${isHighRisk ? "bg-rose-500" : "bg-amber-500"}`}
-              style={{ width: `${macro.macroRiskIndex}%` }}
+              style={{ width: `${riskIndex}%` }}
             />
           </div>
 

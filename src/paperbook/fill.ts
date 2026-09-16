@@ -211,9 +211,17 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
   if (!isFinite(qty) || qty <= 0) {
     throw new PaperOrderError("INVALID_QTY", "qty harus angka positif.");
   }
+  // SPOT semantics (satu panel, mode-aware): marketType dari meta order.
+  // SPOT = beli aset beneran: LONG-only (sell ditolak fail-closed),
+  // leverage dipaksa 1x, margin = notional penuh, tanpa liquidation price.
+  const marketType = String(input.meta?.marketType || "FUTURES").toUpperCase() === "SPOT" ? "SPOT" : "FUTURES";
+  const isSpot = marketType === "SPOT";
+  if (isSpot && String(input.side).toLowerCase() === "sell") {
+    throw new PaperOrderError("SPOT_SHORT_NOT_ALLOWED", "SPOT hanya bisa BUY/LONG — SHORT butuh margin futures. Ganti ke FUTURES untuk SHORT.");
+  }
   const side: PaperSide = input.side === "sell" ? "SHORT" : "LONG";
   const direction = input.side === "sell" ? "sell" : "buy";
-  const leverage = input.leverage && input.leverage > 0 ? Math.min(MAX_LEVERAGE, Number(input.leverage)) : 1;
+  const leverage = isSpot ? 1 : (input.leverage && input.leverage > 0 ? Math.min(MAX_LEVERAGE, Number(input.leverage)) : 1);
   const symbol = normalizeSymbol(input.symbol);
   const stopLoss = Number(input.stopLoss);
   const takeProfit = Number(input.takeProfit);
@@ -252,6 +260,7 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     type: orderType,
     amount: qty,
     leverage,
+    marketType,
     stopLoss,
     takeProfit,
     ...(orderType === "limit" && limitPrice ? { limitPrice } : {}),
@@ -306,6 +315,7 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     // Persist NEW ke SQLite + snapshot + audit agar survive restart dan
     // terlihat di FE (orders NEW, ledger kind=order). Margin sudah dipotong
     // di memori SEBELUM persist agar cash konsisten dengan snapshot.
+    // SPOT: margin = notional penuh (leverage sudah dipaksa 1x di atas).
     const estimatedNotional = limitPrice! * qty;
     const estimatedMargin = estimatedNotional / leverage;
     if (estimatedMargin > state.cash) {
@@ -337,7 +347,7 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
   }
   return handleMarketOpenFill(
     input, symbol, side, direction, qty, leverage, stopLoss, takeProfit,
-    orderType, initialOrder, positionId, now, submittedAt, signed
+    orderType, initialOrder, positionId, now, submittedAt, signed, isSpot
   );
 }
 
@@ -346,7 +356,8 @@ async function handleMarketOpenFill(
   qty: number, leverage: number, stopLoss: number, takeProfit: number,
   orderType: "market" | "limit", initialOrder: PaperOrderReceipt,
   positionId: string, now: number, submittedAt: number,
-  signed: { signature: string; payloadHash: string }
+  signed: { signature: string; payloadHash: string },
+  isSpot = false
 ): Promise<OpenPaperPositionResult> {
   const fill = await marketFill(symbol, direction, qty, undefined, "none");
   const entryPrice = fill.fillPrice;
@@ -402,15 +413,18 @@ async function handleMarketOpenFill(
     marginUSD: roundTo(marginUSD, 2),
     stopLoss,
     takeProfit,
-    liquidationPrice: liquidationPrice(entryPrice, leverage, side),
-    maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
+    // SPOT: tanpa liquidation (aset beneran, bukan margin) — liq 0 agar
+    // bracket monitor skip cek liq untuk posisi ini.
+    liquidationPrice: isSpot ? 0 : liquidationPrice(entryPrice, leverage, side),
+    maintenanceMarginRate: isSpot ? 0 : MAINTENANCE_MARGIN_RATE,
     openedAt: now,
     status: "OPEN",
     entryReasoning: input.meta?.reasoning,
     confidence: input.meta?.confidence,
     timeframe: input.meta?.timeframe,
-    marketType: input.meta?.marketType,
+    marketType: isSpot ? "SPOT" : (input.meta?.marketType || "FUTURES"),
     targetPool: input.meta?.targetPool,
+    entrySource: input.meta?.entrySource || "MANUAL",
     sourceOrderId: initialOrder.id,
     lastMark: entryPrice,
     lastMarkUpdatedAt: now,
@@ -458,6 +472,7 @@ async function handleMarketOpenFill(
       fillPrice: order.fillPrice,
       status: order.status,
       reason: "PAPER_OPEN",
+      entrySource: position.entrySource,
       timestamp: Date.now(),
     });
     commitTx();

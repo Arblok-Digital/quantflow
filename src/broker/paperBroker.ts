@@ -57,7 +57,18 @@ export async function handlePaperOrder(req: Request, res: Response): Promise<Res
     const guard = await evaluateGuardrails({ symbol: String(body.symbol || "BTC/USDT") });
     if (!guard.allowed) {
       const primary = guard.reasons[0] as string;
-      return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guard.reasons.join(", ")})`);
+      // Sertakan snapshot guard agar FE bisa tampilkan PENYEBAB (bukan kode saja).
+      return guardReject(res, primary, `Order ditolak guardrail: ${primary} (${guard.reasons.join(", ")})`, {
+        dailyLossPercent: guard.details.dailyLossPercent,
+        maxDailyLossPercent: guard.details.maxDailyLossPercent,
+        realizedPnlUSD: guard.details.realizedPnlUSD,
+        openCount: guard.details.openCount,
+        maxOpenPositions: guard.details.maxOpenPositions,
+        cooldownRemainingMs: guard.details.cooldownRemainingMs,
+        killSwitch: guard.details.killSwitch,
+        guardsEnabled: (guard.details as any).guardsEnabled ?? true,
+        reasons: guard.reasons,
+      });
     }
 
     // Opening order

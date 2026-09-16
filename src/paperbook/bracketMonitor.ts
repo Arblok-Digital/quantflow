@@ -140,8 +140,12 @@ export async function runBracketMonitorPass(): Promise<void> {
 
       const rangeHigh = Number.isFinite(entry.high1m) && entry.high1m > 0 ? entry.high1m : entry.mark;
       const rangeLow = Number.isFinite(entry.low1m) && entry.low1m > 0 ? entry.low1m : entry.mark;
+      // SPOT: tanpa liquidation (aset beneran). liq_price 0 dari fill.ts juga
+      // sudah membuat hitLiq false, tapi cek marketType eksplisit agar tahan
+      // terhadap posisi lama/korup yang liq_price-nya tidak nol.
+      const isSpotPos = String((pos as any).marketType || "").toUpperCase() === "SPOT";
       const hitLiq =
-        pos.liquidationPrice > 0
+        !isSpotPos && pos.liquidationPrice > 0
           ? pos.side === "LONG"
             ? rangeLow <= pos.liquidationPrice
             : rangeHigh >= pos.liquidationPrice
@@ -222,6 +226,23 @@ export async function fillPendingLimitOrders(
     const crossed = order.side === "buy" ? rangeLow <= limit : rangeHigh >= limit;
     if (!crossed) continue;
 
+    // Limit order SPOT sell (SHORT) tidak boleh lolos walau meta diisi manual —
+    // fail-closed di titik fill, bukan cuma di openPaperPosition.
+    const limitMarketType = String(order.meta?.marketType || "FUTURES").toUpperCase();
+    if (limitMarketType === "SPOT" && order.side === "sell") {
+      cancelPaperOrder(order.id);
+      appendEvent("ORDER_REJECTED", {
+        orderId: order.id,
+        symbol: order.symbol,
+        side: order.side,
+        type: "limit",
+        reason: "SPOT_SHORT_NOT_ALLOWED",
+        message: "SPOT hanya bisa BUY/LONG.",
+      });
+      changed = true;
+      continue;
+    }
+
     const side: PaperSide = order.side === "sell" ? "SHORT" : "LONG";
     const dup = state.positions.find((p) => p.symbol === order.symbol && p.side === side && p.status === "OPEN");
     const now = Date.now();
@@ -249,8 +270,13 @@ export async function fillPendingLimitOrders(
       marginUSD: roundTo(marginUSD, 2),
       stopLoss: order.stopLoss || 0,
       takeProfit: order.takeProfit || 0,
-      liquidationPrice: liquidationPrice(limit, leverage, side),
-      maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
+      // SPOT limit fill: sama seperti market — tanpa liquidation.
+      liquidationPrice: (() => {
+        const mt = String(order.meta?.marketType || "").toUpperCase();
+        if (mt === "SPOT") return 0;
+        return liquidationPrice(limit, leverage, side);
+      })(),
+      maintenanceMarginRate: String(order.meta?.marketType || "").toUpperCase() === "SPOT" ? 0 : MAINTENANCE_MARGIN_RATE,
       openedAt: now,
       status: "OPEN",
       entryReasoning: order.meta?.reasoning,
@@ -258,6 +284,7 @@ export async function fillPendingLimitOrders(
       timeframe: order.meta?.timeframe,
       marketType: order.meta?.marketType,
       targetPool: order.meta?.targetPool,
+      entrySource: order.meta?.entrySource || "MANUAL",
       sourceOrderId: order.id,
       lastMark: entry.mark,
       lastMarkUpdatedAt: now,

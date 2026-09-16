@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { authFetch, useAuth } from "../hooks/useAuth";
+import { useAuth } from "../hooks/useAuth";
+import { useBrokerPositions } from "../hooks/useBrokerPositions";
+import { useLedgerStats } from "../hooks/useLedgerStats";
 import { Scale, CheckCircle2, AlertTriangle, RefreshCw, ShieldCheck, Activity, XCircle } from "lucide-react";
 import { normalizeSide } from "../lib/sideNormalize";
-
-const POLL_MS = 6000;
 
 interface LocalRecon {
   timestamp: number;
@@ -22,6 +22,10 @@ interface LocalRecon {
 
 export const ReconciliationPanel: React.FC = () => {
   const { isAuthenticated } = useAuth();
+  // Shared hooks (dedup global 15s) — TIDAK fetch /api/* sendiri. Balance mode
+  // diambil dari useLiveMode yang juga dipakai App (satu poller).
+  const sharedPositions = useBrokerPositions();
+  const ledgerStats = useLedgerStats();
   const [report, setReport] = useState<LocalRecon | null>(null);
   const [conn, setConn] = useState<"ok" | "loading" | "error" | "none">("loading");
   const [lastSync, setLastSync] = useState<number | null>(null);
@@ -33,17 +37,12 @@ export const ReconciliationPanel: React.FC = () => {
     if (!isAuthenticated) return;
     if (document.hidden) return;
     try {
-      const [posRes, balRes, statsRes] = await Promise.all([
-        authFetch("/api/broker/positions").then((r) => r.json().catch(() => null)),
-        authFetch("/api/broker/balance").then((r) => r.json().catch(() => null)),
-        authFetch("/api/ledger/stats").then((r) => r.json().catch(() => null)),
-      ]);
-
-      const isLive = balRes?.mode === "live" || posRes?.mode === "live";
+      const mode = sharedPositions.mode;
+      const isLive = mode === "live";
       setIsLiveMode(isLive);
 
       if (isLive) {
-        const rawPositions = Array.isArray(posRes?.positions) ? posRes.positions : [];
+        const rawPositions = sharedPositions.positions;
         const positions = rawPositions.map((p: any) => ({
           symbol: String(p.symbol || "?"),
           side: normalizeSide(p.side),
@@ -59,15 +58,15 @@ export const ReconciliationPanel: React.FC = () => {
           qty: p.qty,
           status: ("MATCH" as const), // live = server-truth; exchange is the source — pass-through
         }));
-        const cash = Number(posRes?.account?.cash ?? balRes?.balances?.[0]?.free ?? 0);
-        const equity = Number(posRes?.account?.equity ?? cash);
+        const cash = Number(sharedPositions.account?.cash ?? 0);
+        const equity = Number(sharedPositions.account?.equity ?? cash);
         const localRecon: LocalRecon = {
           timestamp: Date.now(),
           isSynced: true,
           localEquity: equity,
           localCash: cash,
-          unrealizedPnl: Number(posRes?.account?.unrealizedPnl ?? 0),
-          marginLocked: Number(posRes?.account?.marginLocked ?? 0),
+          unrealizedPnl: Number(sharedPositions.account?.unrealizedPnl ?? 0),
+          marginLocked: Number(sharedPositions.account?.marginLocked ?? 0),
           exchangeEquity: null,
           discrepancyUsd: 0,
           breakdown: { mode: "LIVE", note: "Reconciliation aktif di LIVE mode (exchange vs local)." },
@@ -81,9 +80,9 @@ export const ReconciliationPanel: React.FC = () => {
         return;
       }
 
-      const acc = posRes?.account as { cash: number; equity: number; unrealizedPnl: number; marginLocked: number } | null;
-      if (!acc || posRes?.success !== true) {
-        if (posRes === null || posRes?.success === false) setConn("error");
+      const acc = sharedPositions.account as { cash: number; equity: number; unrealizedPnl: number; marginLocked: number } | null;
+      if (!acc || sharedPositions.error) {
+        if (sharedPositions.error) setConn("error");
         else setConn("none");
         return;
       }
@@ -96,7 +95,7 @@ export const ReconciliationPanel: React.FC = () => {
       const discrepancyUsd = Number((equity - derivedEquity).toFixed(2));
       const tolerance = 0.02;
       const isSynced = Math.abs(discrepancyUsd) <= tolerance;
-      const maxDD = statsRes?.success ? Number(statsRes.maxDrawdownPct ?? 0) : 0;
+      const maxDD = Number(ledgerStats.maxDrawdownPct ?? 0);
 
       const recon: LocalRecon = {
         timestamp: Date.now(),
@@ -128,20 +127,22 @@ export const ReconciliationPanel: React.FC = () => {
     } catch {
       setConn("error");
     }
-  }, [isAuthenticated]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, sharedPositions.account, sharedPositions.positions, sharedPositions.mode, sharedPositions.error, ledgerStats.maxDrawdownPct]);
 
   useEffect(() => {
     mountedRef.current = true;
     if (!isAuthenticated) return;
+    // TIDAK ada interval sendiri — recompute ikut perubahan shared hooks
+    // (15s global) + tombol Refresh manual. Menghilangkan 3 req/6s.
     load();
-    const iv = setInterval(load, POLL_MS);
     const onVis = () => { if (!document.hidden) load(); };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [isAuthenticated, load]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]);
 
   useEffect(() => {
     return () => { mountedRef.current = false; };
