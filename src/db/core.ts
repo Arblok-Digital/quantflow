@@ -122,14 +122,15 @@ export function initDb(): DatabaseSync {
     );
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_source ON positions(entry_source);`);
   // Migrasi DB lama (tanpa kolom): tambah kolom + backfill MANUAL.
+  // HARUS sebelum CREATE INDEX di bawah (index referensi kolom ini).
   try {
     const hasCol = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('positions') WHERE name='entry_source'`).get() as any;
     if (!hasCol || Number(hasCol.n) === 0) {
       db.exec(`ALTER TABLE positions ADD COLUMN entry_source TEXT NOT NULL DEFAULT 'MANUAL'`);
     }
   } catch {}
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_source ON positions(entry_source);`);
 
   // Portfolio snapshots
   db.exec(`
