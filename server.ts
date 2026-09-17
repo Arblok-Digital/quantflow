@@ -10,11 +10,14 @@ import { getBrokerStatus } from "./broker";
 import { getBookFilePath, initPaperBook, startBracketMonitor } from "./paperBook";
 import { initGuardrails } from "./guardrails";
 import { warnIfDefaultAuditSecret } from "./src/db/core";
+import { acquireWriterLease, heartbeatWriterLease } from "./db";
+import { getBootId } from "./src/paperbook/bootId";
 import { registerAuthRoutes } from "./src/server/routes/auth";
 import { registerBrokerRoutes } from "./src/server/routes/broker";
 import { registerMarketRoutes } from "./src/server/routes/market";
 import { registerLedgerRoutes } from "./src/server/routes/ledger";
 import { registerAiRoutes } from "./src/server/routes/ai";
+import { registerPipelineRoutes } from "./src/server/routes/pipeline";
 import { registerReplayRoutes } from "./src/server/routes/replay";
 import { registerWsProxy } from "./src/server/routes/wsProxy";
 
@@ -114,6 +117,7 @@ registerBrokerRoutes(app);
 registerMarketRoutes(app, heartbeatState);
 registerLedgerRoutes(app);
 registerAiRoutes(app);
+registerPipelineRoutes(app);
 registerReplayRoutes(app);
 registerWsProxy(app, heartbeatState);
 
@@ -157,6 +161,15 @@ const isMainESM =
 
 if (isMain || isMainESM) {
   initPaperBook();
+  // F5: single-writer guard
+  try {
+    acquireWriterLease(getBootId());
+    const hb = setInterval(() => heartbeatWriterLease(getBootId()), 10_000);
+    if (typeof hb.unref === "function") hb.unref();
+  } catch (err: any) {
+    console.error("[paperBook] " + ((err as Error)?.message || err));
+    process.exit(1);
+  }
   initGuardrails();
   startServer();
 }

@@ -3,6 +3,8 @@ import { evaluateRisk, RiskCandidate, RiskSnapshot } from "./keel/risk/gatekeepe
 import { IntradayHighWaterMark } from "./keel/risk/drawdown-monitor";
 import { store, openPositions, ordersLastHour, lastKillSwitchEvent } from "./keel/store";
 import { NormalizedDepth, NormalizedTrade, MtfVector, DepthLevel } from "./keel/types";
+import { MTFEngine, type MTFTrendResult } from "./keel/mm-brain/mtf-engine";
+import type { Kline } from "./keel/ingestion/kline-aggregator";
 import type { RecentTrade, FuturesMetrics } from "../data/marketFetcher";
 import { LLMDecision, Candle, TechnicalIndicators, MTFLiquidityAnalysis, OrderBook } from "../types";
 
@@ -90,6 +92,78 @@ function buildFuturesAnalysis(fm: FuturesMetrics): FuturesAnalysis | undefined {
  * (Smart Money Tracker, Absorption Engine, Wall Dynamics, Confluence Matrix)
  * into the main trading pipeline decision & risk gates.
  */
+// ---------------------------------------------------------------------------
+// F4 — Real 4-TF trend (MTFEngine.computeAll) dari candle OHLCV riil.
+// Sebelumnya mtfBias dibangun dari 2 sumber diduplikasi (likuiditas → m15/h1,
+// teknikal flat → h4/d1) lalu kena penalti 25% karena "duplikasi". Dengan
+// candle nyata per TF (m15 asli, h1 = agregat 4×15m, 4h asli, d1 = agregat
+// 6×4h), bias 4 TF jadi independen — penalti duplikasi tidak diterapkan.
+// TF tanpa data cukup = NEUTRAL (tidak beropini) — jujur, bukan fabrikasi.
+// ---------------------------------------------------------------------------
+
+function candlesToKlines(candles: Candle[], tfMs: number): Kline[] {
+  const out: Kline[] = [];
+  for (const k of candles) {
+    if (!k || !Number.isFinite(k.open) || !Number.isFinite(k.high) || !Number.isFinite(k.low) || !Number.isFinite(k.close)) continue;
+    if (k.high <= 0 || k.low <= 0 || k.close <= 0) continue;
+    const ts = Number(k.timestamp) || 0;
+    out.push({
+      openTime: ts,
+      closeTime: ts + tfMs - 1,
+      open: k.open,
+      high: k.high,
+      low: k.low,
+      close: k.close,
+      volume: Number(k.volume) || 0,
+      trades: 0,
+    });
+  }
+  return out;
+}
+
+/** Gabungkan `factor` bar berurutan jadi 1 bar TF lebih tinggi (sisa bar tak penuh dibuang). */
+function aggregateKlines(kl: Kline[], factor: number): Kline[] {
+  const out: Kline[] = [];
+  for (let i = 0; i + factor <= kl.length; i += factor) {
+    const g = kl.slice(i, i + factor);
+    out.push({
+      openTime: g[0]!.openTime,
+      closeTime: g[g.length - 1]!.closeTime,
+      open: g[0]!.open,
+      high: Math.max(...g.map((k) => k.high)),
+      low: Math.min(...g.map((k) => k.low)),
+      close: g[g.length - 1]!.close,
+      volume: g.reduce((s, k) => s + k.volume, 0),
+      trades: g.reduce((s, k) => s + k.trades, 0),
+    });
+  }
+  return out;
+}
+
+/** TF dianggap "ter-cover" bila punya cukup bar untuk struktur/EMA (≥21). */
+const MTF_MIN_BARS = 21;
+
+export interface RealMtfResult {
+  bias: MtfVector;
+  /** TF yang benar-benar punya data cukup (≥21 bar). TF lain = NEUTRAL (no opinion). */
+  coveredTfs: string[];
+  raw: MTFTrendResult;
+}
+
+export function computeRealMtfBias(candles15m?: Candle[], candles4h?: Candle[]): RealMtfResult | null {
+  if ((!candles15m || candles15m.length === 0) && (!candles4h || candles4h.length === 0)) return null;
+  const m15 = candles15m ? candlesToKlines(candles15m, 15 * 60_000) : [];
+  const h4 = candles4h ? candlesToKlines(candles4h, 4 * 3_600_000) : [];
+  const h1 = aggregateKlines(m15, 4);
+  const d1 = aggregateKlines(h4, 6);
+  const klines = { m15, h1, h4, d1 };
+  const coveredTfs = (["m15", "h1", "h4", "d1"] as const).filter((tf) => klines[tf].length >= MTF_MIN_BARS);
+  if (coveredTfs.length === 0) return null;
+  const raw = new MTFEngine().computeAll("keel-mtf", klines);
+  const bias: MtfVector = { m15: raw.m15, h1: raw.h1, h4: raw.h4, d1: raw.d1 };
+  return { bias, coveredTfs, raw };
+}
+
 export function runKeelQuantEngine(input: KeelAdapterInput): {
   decision: LLMDecision;
   rawSignalResult: SignalGenerationResult;
@@ -149,12 +223,28 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
     else if (score <= -2) techBias = "BEARISH";
   }
 
-  const mtfBias: MtfVector = {
+  const legacyMtf: MtfVector = {
     m15: biasVal,
     h1: biasVal,
     h4: techBias,
     d1: techBias,
   };
+
+  // F-02/P1: penalti duplikasi MTF — mtfBias di atas memang dibangun dari
+  // 2 sumber independen (likuiditas untuk m15/h1, teknikal flat untuk h4/d1),
+  // BUKAN 4 timeframe independen. Confluence matrix berbobot (weights d1 .4,
+  // h4 .3, h1 .2, m15 .1) akan menghitung skor dari pasangan duplikat;
+  // published score dipangkas 25% saat duplikasi terdeteksi agar tidak
+  // overstate keyakinan "konfirmasi 4 TF". Flag di reasoning untuk audit.
+  // (Refactor proper TechnicalIndicators per-TF tetap roadmap, bukan v1.)
+  const legacyDuplicated = legacyMtf.m15 === legacyMtf.h1 || legacyMtf.h4 === legacyMtf.d1;
+
+  // F4 — bias REAL 4-TF dari candle OHLCV bila tersedia (m15/h1/h4/d1
+  // independen via MTFEngine). Fallback legacy 2-sumber tetap berlaku bila
+  // candle tidak dikirim — penalti duplikasi hanya berlaku di jalur legacy.
+  const realMtf = computeRealMtfBias(input.candles15m, input.candles4h);
+  const mtfBias: MtfVector = realMtf ? realMtf.bias : legacyMtf;
+  const mtfDuplicated = realMtf ? false : legacyDuplicated;
 
   if (!hasRealDepth) {
     const holdDecision: LLMDecision = {
@@ -225,10 +315,24 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
   let stopLoss = Number((entryPrice * 0.985).toFixed(2));
   let takeProfit = Number((entryPrice * 1.03).toFixed(2));
   let confidence = Math.min(95, Math.max(50, Math.round(signalResult.compositeScore * 100)));
+  if (mtfDuplicated) {
+    // Terapkan penalti 25% SEKARANG (pre-signal fallback) agar jalur HOLD
+    // fail-closed (no real depth) konsisten dengan jalur sinyal di bawah.
+    confidence = Math.max(0, Math.round(confidence * 0.75));
+  }
 
   if (signalResult.signal) {
     action = signalResult.signal.action;
-    confidence = Math.round(signalResult.confluence.score);
+    // F1/P0 (audit): `confluence.score` adalah FRAKSI 0..1 (lihat
+    // confluence-matrix: score = Math.round(Math.abs(bullScore)*100)/100),
+    // sedangkan minConfidenceThreshold (App.tsx: 60) & seluruh UI memakai
+    // skala 0..100. Sebelumnya confidence = round(0..1) → 0 atau 1, sehingga
+    // (a) SEMUA sinyal Keel gagal gate confidence di /api/pipeline/cycle dan
+    // (b) UI menampilkan "conf 1%". Sekarang dikonversi ke skala 0..100.
+    confidence = Math.max(0, Math.min(100, Math.round(signalResult.confluence.score * 100)));
+    if (mtfDuplicated) {
+      confidence = Math.max(0, Math.round(confidence * 0.75));
+    }
 
     if (signalResult.levels) {
       stopLoss = signalResult.levels.stopAbs;
@@ -242,6 +346,11 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
   let reasoning = signalResult.discardedReason
     ? `[Keel Engine] Signal Filtered: ${signalResult.discardedReason} | Flow: ${signalResult.smartMoneyFlow} | Liquidity Depth: $${(signalResult.liquidityDepthUsd / 1000).toFixed(0)}k`
     : `[Keel Engine] Institutional Signal Approved | Flow: ${signalResult.smartMoneyFlow} | Wall Action: ${signalResult.wall?.action || "NONE"} | Confluence: ${signalResult.confluence.score}%`;
+  if (mtfDuplicated) {
+    reasoning += " | MTF-DUP-PENALTY-25pct (2 sumber independen, bukan 4 TF)";
+  } else if (realMtf) {
+    reasoning += ` | MTF REAL 4-TF [${realMtf.coveredTfs.join("/")}]`;
+  }
 
   if (futuresAnalysis && futuresAnalysis.fundingBps != null) {
     const fa = futuresAnalysis;
@@ -254,7 +363,11 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
     targetPrice,
     stopLoss,
     takeProfit,
-    positionSizePercent: action === "HOLD" ? 0 : 5,
+    // F2 (sizing satu satuan): pakai sizePct hasil engine (risk-targeted,
+    // % equity sebagai notional) — sebelumnya hardcode 5 sehingga output
+    // sizing engine selalu dibuang. Fallback 5 = cap notional Keel bila
+    // levels null (bracket fallback default 2%/4%).
+    positionSizePercent: action === "HOLD" ? 0 : (signalResult.levels?.sizePct ?? 5),
     reasoning,
     source: "keel-institutional-quant",
     inferenceLatencyMs: 2,
@@ -263,7 +376,9 @@ export function runKeelQuantEngine(input: KeelAdapterInput): {
       targetZonePrice: takeProfit,
       sweepTriggered: Boolean(signalResult.absorption?.isPreBreakoutAccumulation),
       mtfBias: biasVal === "BULLISH" ? "BULLISH_REVERSAL" : biasVal === "BEARISH" ? "BEARISH_REVERSAL" : "NEUTRAL",
-      confluenceScore: signalResult.confluence.score,
+      confluenceScore: mtfDuplicated
+        ? Math.max(0, Math.round(signalResult.confluence.score * 0.75))
+        : signalResult.confluence.score,
       invalidationLevel: stopLoss,
     },
     futuresAnalysis: futuresAnalysis || undefined,

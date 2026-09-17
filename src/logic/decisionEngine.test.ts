@@ -16,10 +16,14 @@ import type {
 
 vi.mock("./keelAdapter", () => ({
   runKeelQuantEngine: vi.fn(),
+  // F-01/P0: inline risk gate pada fallback keel — mock default LOLOS agar
+  // test routing lama tetap valid; kasus blocked diuji eksplisit di bawah.
+  evaluateKeelRisk: vi.fn(() => ({ passed: true, reasons: [] as string[] })),
 }));
 import * as keelAdapter from "./keelAdapter";
 
 const runKeelMock = vi.mocked(keelAdapter.runKeelQuantEngine);
+const riskMock = vi.mocked(keelAdapter.evaluateKeelRisk);
 
 // --- helpers ---
 
@@ -50,6 +54,7 @@ function mtf(over: Partial<MTFLiquidityAnalysis> = {}): MTFLiquidityAnalysis {
     recentSweep: null,
     zones15m: [],
     zones4h: [],
+    zonesByTimeframe: {},
     confluenceScore: 70,
     confluenceSummary: "",
     huntingTarget: null,
@@ -168,7 +173,11 @@ function keelResult(over: Partial<LLMDecision> = {}): ReturnType<typeof keelAdap
       targetPrice: 102,
       stopLoss: 98.5,
       takeProfit: 105,
-      positionSizePercent: 6,
+      // F-01/P0: keel fallback kini melewati evaluateKeelRisk inline.
+      // F2: gate size cap-only — size > 5% ditolak, size risk-based < 2%
+      // (SL lebar) lolos. Fixture default HARUS ≤ cap agar lolos gate —
+      // kasus oversize diuji eksplisit di test "diblokir" di bawah.
+      positionSizePercent: 5,
       reasoning: "Keel institutional signal (mock)",
       source: "keel-institutional-quant",
       inferenceLatencyMs: 2,
@@ -198,6 +207,8 @@ function mockJsonResponse(body: unknown, status = 200): Response {
 describe("evaluateTradingDecision — MODE KEEL", () => {
   beforeEach(() => {
     runKeelMock.mockReset();
+    riskMock.mockReset();
+    riskMock.mockReturnValue({ passed: true, reasons: [] });
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -276,11 +287,39 @@ describe("evaluateTradingDecision — MODE KEEL", () => {
     expect(d.source).toBe("keel-institutional-quant");
     expect(runKeelMock).toHaveBeenCalledTimes(1);
   });
+
+  it("F-01/P0: keel fallback dengan size oversize → risk gate block → HOLD confidence 0", async () => {
+    runKeelMock.mockReturnValue(keelResult({ action: "BUY", positionSizePercent: 25 }));
+    riskMock.mockReturnValue({ passed: false, reasons: ["POSITION_SIZE_OUT_OF_BAND"] });
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: false }));
+
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+    expect(riskMock).toHaveBeenCalledTimes(1);
+    expect(d.action).toBe("HOLD");
+    expect(d.confidence).toBe(0);
+    expect(d.positionSizePercent).toBe(0);
+    expect(d.reasoning).toContain("Risk blocked");
+  });
+
+  it("F-05: keel fallback SL/TP tidak konsisten arah → HOLD (posisi zombie ditolak)", async () => {
+    runKeelMock.mockReturnValue(
+      keelResult({ action: "BUY", stopLoss: 105, takeProfit: 110 })
+    );
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: false, currentPrice: 100 }));
+
+    expect(d.action).toBe("HOLD");
+    expect(d.confidence).toBe(0);
+    expect(riskMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("evaluateTradingDecision — MODE AI", () => {
   beforeEach(() => {
     runKeelMock.mockReset();
+    riskMock.mockReset();
+    riskMock.mockReturnValue({ passed: true, reasons: [] });
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
@@ -338,6 +377,51 @@ describe("evaluateTradingDecision — MODE AI", () => {
 
     expect(runKeelMock).toHaveBeenCalledTimes(1);
     expect(d.source).toBe("keel-institutional-quant");
+  });
+
+  it("F-05: MODE AI shape invalid (confidence > 100) → HOLD fail-closed, keel TIDAK dipanggil", async () => {
+    // NaN tidak bisa dikirim lewat JSON (diserialisasi jadi null →
+    // ter-coerce ke HOLD default yang lolos validasi). Pakai confidence
+    // out-of-range sebagai contoh shape invalid yang bertahan di JSON.
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse({
+        action: "BUY",
+        confidence: 150,
+        targetPrice: 100,
+        stopLoss: 95,
+        takeProfit: 110,
+        positionSizePercent: 8,
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true, currentPrice: 100 }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(runKeelMock).not.toHaveBeenCalled();
+    expect(d.action).toBe("HOLD");
+    expect(d.confidence).toBe(0);
+    expect(d.reasoning).toContain("shape invalid");
+  });
+
+  it("F-05: MODE AI price-order invalid (BUY dengan SL > price) → HOLD fail-closed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockJsonResponse({
+        action: "BUY",
+        confidence: 90,
+        targetPrice: 100,
+        stopLoss: 105,
+        takeProfit: 110,
+        positionSizePercent: 8,
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true, currentPrice: 100 }));
+
+    expect(d.action).toBe("HOLD");
+    expect(d.confidence).toBe(0);
+    expect(d.reasoning).toContain("tidak valid");
   });
 
   it("env GEMINI_API_KEY ada (tanpa aiEnabled) → MODE AI", async () => {

@@ -16,6 +16,7 @@ import {
 } from "@/broker";
 import {
   PaperOrderError,
+  TAKER_FEE_RATE,
   cancelPaperOrder,
   getPaperBalance,
   getPaperAccount,
@@ -54,8 +55,28 @@ export function registerBrokerRoutes(app: Express): void {
   // ================= BROKER ROUTES (ccxt provider) =================
 
   // Status broker (mode paper/live + apakah live order bisa dipasang) — PROTECTED
-  app.get("/api/broker/status", requireAuth, (_req, res) => {
-    res.json({ success: true, ...getBrokerStatus() });
+  // F-06/P2: diperluas dengan guardrails snapshot (dailyLoss, openCount,
+  // cooldown, killSwitch) agar FE bisa tampilkan PENYEBAB penolakan order,
+  // bukan sekadar mode/armed generik.
+  app.get("/api/broker/status", requireAuth, async (_req, res) => {
+    const snap = getGuardrailsSnapshotSync();
+    const state = snap.state;
+    res.json({
+      success: true,
+      ...getBrokerStatus(),
+      killSwitchActive: state.killSwitch,
+      guardsEnabled: state.guardsEnabled,
+      details: {
+        dailyLossPercent: state.dailyLossPercent,
+        maxDailyLossPercent: snap.config.maxDailyLossPercent,
+        openCount: state.openCount,
+        maxOpenPositions: snap.config.maxOpenPositions,
+        cooldownRemainingMs: state.cooldownRemainingMs,
+        lastOrderAt: state.lastOrderAt,
+        realizedPnlUSD: snap.today.realizedPnlUSD,
+        armedForLive: state.armedForLive,
+      },
+    });
   });
 
   // Ticker via ccxt (public, lintas exchange) — stays public
@@ -303,7 +324,7 @@ export function registerBrokerRoutes(app: Express): void {
         const order = await exchange.cancelOrder(orderId);
         return res.json({ success: true, mode: "live", cancelled: true, order });
       }
-      const order = cancelPaperOrder(orderId);
+      const order = await cancelPaperOrder(orderId);
       try {
         appendAudit("order", {
           id: order.id,
@@ -377,15 +398,19 @@ export function registerBrokerRoutes(app: Express): void {
         const closeSide: "buy" | "sell" = side === "LONG" ? "sell" : "buy";
         const amount = Number(pos.contracts || 0);
 
-        // Break-even live: mirror paperBook BE offset (~0.08% ≈ 2x taker fee + buffer).
+        // F9 (2026-09-17): break-even live sadar-fee — mirror paperBook (store.ts).
+        // SL LONG DI ATAS entry, SHORT DI BAWAH, agar fill stop menutup fee
+        // entry+exit (net ≈ 0): X = E*(1+f)/(1-f) LONG / X = E*(1-f)/(1+f) SHORT.
+        // Rumus lama E*(1∓0.08%) menaruh SL di sisi rugi → net ≈ -2*f*E*qty.
         let sl = stopLoss;
         if (breakEven && (sl === undefined || !isFinite(sl) || sl <= 0)) {
           const entry = Number(pos.entryPrice || 0);
           if (!entry) {
             return res.status(400).json({ success: false, reason: "NO_ENTRY_PRICE", message: "Entry price tidak diketahui, break-even gagal." });
           }
-          const beOffsetPct = 0.0008;
-          sl = side === "LONG" ? entry * (1 - beOffsetPct) : entry * (1 + beOffsetPct);
+          sl = side === "LONG"
+            ? entry * ((1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE))
+            : entry * ((1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE));
         }
 
         // Cancel SL/TP lama dulu (avoid stacking) — best-effort, log kalau gagal.
@@ -453,10 +478,12 @@ export function registerBrokerRoutes(app: Express): void {
           },
         });
       }
-      const updated = updatePaperPosition(positionId, {
+      const updated = await updatePaperPosition(positionId, {
         stopLoss: body.stopLoss !== undefined ? Number(body.stopLoss) : undefined,
         takeProfit: body.takeProfit !== undefined ? Number(body.takeProfit) : undefined,
         breakEven: Boolean(body.breakEven),
+        // F3: pasang/hapus exit plan otomatis (BE/trailing/partial/time-stop).
+        exitConfig: body.exitConfig !== undefined ? ((body.exitConfig as unknown) ?? null) : undefined,
       });
       res.json({ success: true, mode: "paper", position: updated });
     } catch (err: any) {

@@ -7,3 +7,4 @@
  */
 export * from "./src/db/core";
 export * from "./src/db/persistence";
+export * from "./src/db/writerLease";

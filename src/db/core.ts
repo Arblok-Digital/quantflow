@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const DB_FILE = path.join(process.cwd(), "trading.db");
-const AUDIT_KEY_FILE = path.join(process.cwd(), ".audit-signing-key");
+const DB_FILE = () => path.join(process.cwd(), "trading.db");
+const AUDIT_KEY_FILE = () => path.join(process.cwd(), ".audit-signing-key");
 
 // ------------------------------------------------------------------
 // SQLite instance & init (WAL, idempotent migrations)
@@ -37,7 +37,7 @@ export function rollbackTx(): void {
 
 export function initDb(): DatabaseSync {
   if (db) return db;
-  db = new DatabaseSync(DB_FILE);
+  db = new DatabaseSync(DB_FILE());
   // WAL mode for concurrent readers + writer durability
   try {
     db.exec("PRAGMA journal_mode = WAL;");
@@ -101,6 +101,7 @@ export function initDb(): DatabaseSync {
   // entry_source: MANUAL (klik panel entry) | AUTOPILOT (pipeline/auto) | REPLAY.
   // Kolom ini jawaban atas "winrate manual vs autopilot" — statistik gabungan
   // menyembunyikan perbaikan engine, jadi journal WAJIB split per source.
+  // decision_id: trace decision → position → trade untuk training join (F-08/P1).
   db.exec(`
     CREATE TABLE IF NOT EXISTS positions(
       id TEXT PRIMARY KEY,
@@ -118,7 +119,8 @@ export function initDb(): DatabaseSync {
       close_price REAL,
       realized_pnl_usd REAL,
       fees_usd REAL,
-      entry_source TEXT NOT NULL DEFAULT 'MANUAL'
+      entry_source TEXT NOT NULL DEFAULT 'MANUAL',
+      decision_id TEXT
     );
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);`);
@@ -131,6 +133,31 @@ export function initDb(): DatabaseSync {
     }
   } catch {}
   db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_source ON positions(entry_source);`);
+  // F-08/P1: decision_id trace untuk training join + fast lookup.
+  try {
+    const hasDecCol = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('positions') WHERE name='decision_id'`).get() as any;
+    if (!hasDecCol || Number(hasDecCol.n) === 0) {
+      db.exec(`ALTER TABLE positions ADD COLUMN decision_id TEXT`);
+    }
+  } catch {}
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_decision ON positions(decision_id);`);
+  // F-08/P1: decision_id pada orders untuk join order → decision.
+  try {
+    const hasOrderDec = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('orders') WHERE name='decision_id'`).get() as any;
+    if (!hasOrderDec || Number(hasOrderDec.n) === 0) {
+      db.exec(`ALTER TABLE orders ADD COLUMN decision_id TEXT`);
+    }
+  } catch {}
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_decision ON orders(decision_id);`);
+
+  // F3: exit plan per posisi (BE otomatis/trailing/partial TP/time-stop) — JSON.
+  // Opt-in: NULL pada semua posisi lama → engine tidak menyentuhnya.
+  try {
+    const hasExitCol = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('positions') WHERE name='exit_config'`).get() as any;
+    if (!hasExitCol || Number(hasExitCol.n) === 0) {
+      db.exec(`ALTER TABLE positions ADD COLUMN exit_config TEXT`);
+    }
+  } catch {}
 
   // Portfolio snapshots
   db.exec(`
@@ -142,6 +169,15 @@ export function initDb(): DatabaseSync {
       unrealized_pnl REAL NOT NULL
     );
   `);
+  // F5: kolom penulis snapshot — deteksi dua proses menulis trading.db bersamaan
+  // (forensik: dua lineage cash/margin bergantian tiap ~3s). Default '' untuk
+  // baris lama; diisi boot-id acak per proses mulai versi ini.
+  try {
+    const hasWriter = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('portfolio_snapshots') WHERE name='writer_id'`).get() as any;
+    if (!hasWriter || Number(hasWriter.n) === 0) {
+      db.exec(`ALTER TABLE portfolio_snapshots ADD COLUMN writer_id TEXT NOT NULL DEFAULT ''`);
+    }
+  } catch {}
 
   // Agent decisions
   db.exec(`
@@ -208,20 +244,20 @@ function ensureAuditSecret(): string {
     return envSecret;
   }
   try {
-    if (fs.existsSync(AUDIT_KEY_FILE)) {
-      const existing = fs.readFileSync(AUDIT_KEY_FILE, "utf-8").trim();
+    if (fs.existsSync(AUDIT_KEY_FILE())) {
+      const existing = fs.readFileSync(AUDIT_KEY_FILE(), "utf-8").trim();
       if (existing.length >= 32) return existing;
     }
   } catch {}
   // generate
   const generated = crypto.randomBytes(32).toString("hex");
   try {
-    fs.writeFileSync(AUDIT_KEY_FILE, generated, { mode: 0o600 });
+    fs.writeFileSync(AUDIT_KEY_FILE(), generated, { mode: 0o600 });
     try {
-      fs.chmodSync(AUDIT_KEY_FILE, 0o600);
+      fs.chmodSync(AUDIT_KEY_FILE(), 0o600);
     } catch {}
   } catch (e) {
-    console.warn(`[audit] Gagal menulis ${AUDIT_KEY_FILE}: ${(e as Error).message}`);
+    console.warn(`[audit] Gagal menulis ${AUDIT_KEY_FILE()}: ${(e as Error).message}`);
   }
   warnIfDefaultAuditSecret();
   return generated;
@@ -232,8 +268,8 @@ export function getAuditSecret(): string {
   const envSecret = process.env.AUDIT_HMAC_SECRET?.trim();
   if (envSecret && envSecret.length >= 16) return envSecret;
   try {
-    if (fs.existsSync(AUDIT_KEY_FILE)) {
-      const v = fs.readFileSync(AUDIT_KEY_FILE, "utf-8").trim();
+    if (fs.existsSync(AUDIT_KEY_FILE())) {
+      const v = fs.readFileSync(AUDIT_KEY_FILE(), "utf-8").trim();
       if (v.length >= 16) return v;
     }
   } catch {}

@@ -13,6 +13,7 @@ import {
   persistSnapshotTolerant,
   normalizeSymbol,
 } from "./store";
+
 import {
   TAKER_FEE_RATE,
   MAX_LEVERAGE,
@@ -34,6 +35,12 @@ import {
 } from "./types";
 import { PaperOrderError } from "./errors";
 import { beginTx, commitTx, rollbackTx, appendAudit } from "../../db";
+import { withPaperMutationLock } from "./mutex";
+import {
+  evaluateOrderRisk,
+  describeOrderRiskRejection,
+  isOrderRiskGateEnabled,
+} from "../logic/orderRiskGate";
 
 function roundTo(n: number, digits: number): number {
   const f = Math.pow(10, digits);
@@ -143,6 +150,13 @@ async function marketFill(
     }
   } catch {}
 
+  // F-03/P1: slippage DIUKUR dari mid-price pre-trade (bukan touch level).
+  // Rasional: taker market menanggung ~setengah spread intrinsik BAHKAN pada
+  // top-of-book fill sempurna (fill di ask vs mid untuk BUY), ditambah
+  // adverse adverse-selection + walk-the-book per level yang dilewati.
+  // Benchmark vs touch justru menghilangkan komponen spread dan
+  // MERENDAHKAN biaya riil → backtest PnL overstated 1-3%. Lihat catatan
+  // midVsTouchSlippageBps() di bawah untuk derivasi per-komponen.
   try {
     const ticker = await getExchange().fetchTicker(symbol);
     const bid = Number(ticker.bid);
@@ -194,6 +208,33 @@ async function marketFill(
   }
 }
 
+/**
+ * F-03/P1 — dekomposisi slippage per-komponen untuk audit backtest.
+ * Total vs mid  = half-spread (tak terhindarkan taker) + walk-the-book
+ * (VWAP di atas/bawah touch). Total vs touch = HANYA walk-the-book.
+ * Konsekuensi: benchmark vs touch mengabaikan half-spread → biaya taker
+ * sistematis underreported ±(spread/2), kumulatif 20-50 bps per ratusan
+ * order besar → PnL backtest overstated. Benchmark yang benar: MID.
+ *
+ * Contoh (audit report): BUY 200 BTC, depth 100@45000/50@45010/50@45020,
+ * mid 44995, VWAP fill 45010 → vs mid ≈ 33 bps (benar), vs touch ≈ 22 bps
+ * (salah — mengabaikan 11 bps half-spread yang riil dibayar taker).
+ */
+export function midVsTouchSlippageBps(
+  fillPrice: number,
+  bestLevel: number,
+  mid: number
+): { vsMidBps: number; vsTouchBps: number; halfSpreadBps: number } {
+  const vsMidBps = mid > 0 ? (Math.abs(fillPrice - mid) / mid) * 10000 : 0;
+  const vsTouchBps = bestLevel > 0 ? (Math.abs(fillPrice - bestLevel) / bestLevel) * 10000 : 0;
+  const halfSpreadBps = mid > 0 ? (Math.abs(bestLevel - mid) / mid) * 10000 : 0;
+  return {
+    vsMidBps: roundTo(vsMidBps, 2),
+    vsTouchBps: roundTo(vsTouchBps, 2),
+    halfSpreadBps: roundTo(halfSpreadBps, 2),
+  };
+}
+
 export function liquidationPrice(entryPrice: number, leverage: number, side: PaperSide): number {
   const lev = leverage > 0 ? leverage : 1;
   if (side === "LONG") {
@@ -202,11 +243,136 @@ export function liquidationPrice(entryPrice: number, leverage: number, side: Pap
   return roundTo(entryPrice * (1 + 1 / lev - MAINTENANCE_MARGIN_RATE), 6);
 }
 
+/**
+ * F-04/P2 — liquidation dengan funding accrual.
+ *
+ * Formula statis liquidationPrice() mengabaikan biaya funding periodik
+ * (±0.01%/8h tipikal, ekstrem ±0.1%/8h) yang menggerus margin dan
+ * mempercepat likuidasi riil 0.5-2% (terutama leverage 20x+ dengan hold
+ * berhari-hari). Fungsi ini eksplisit: base statis + akumulasi funding.
+ *
+ * Konvensi fundingRate: positif = LONG bayar SHORT per interval 8 jam.
+ * LONG dengan funding positif → liq naik (lebih cepat); SHORT dengan
+ * funding positif → liq turun (lebih lambat, menerima pembayaran).
+ * Tanpa fundingRate/holdDurationHours → identik dengan base statis.
+ */
+export function liquidationPriceWithFunding(
+  entryPrice: number,
+  leverage: number,
+  side: PaperSide,
+  fundingRate?: number,
+  holdDurationHours?: number
+): number {
+  const baseLiq = liquidationPrice(entryPrice, leverage, side);
+  if (fundingRate == null || holdDurationHours == null) return baseLiq;
+  if (!isFinite(fundingRate) || !isFinite(holdDurationHours) || holdDurationHours <= 0) return baseLiq;
+  const lev = leverage > 0 ? leverage : 1;
+  // Akumulasi per interval 8 jam atas notional, dinormalisasi ke harga
+  // (dibagi leverage karena margin = notional / leverage).
+  const intervals = holdDurationHours / 8;
+  const fundingPerUnit = entryPrice * fundingRate * intervals;
+  const adj = fundingPerUnit / lev;
+  if (side === "LONG") {
+    // LONG membayar funding positif → margin terkikis → liq naik.
+    return roundTo(baseLiq + Math.sign(fundingRate) * Math.abs(adj), 6);
+  }
+  // SHORT menerima funding positif → margin bertambah → liq turun (menjauh).
+  return roundTo(baseLiq - Math.sign(fundingRate) * Math.abs(adj), 6);
+}
+
+// ------------------------------------------------------------------
+// Pre-trade risk gate (F1/P0) — CHOKE POINT untuk semua order paper
+// ------------------------------------------------------------------
+//
+// Kenapa di sini (bukan di router): router /api/broker/order hanya menjalankan
+// guardrails (kill-switch, daily-loss, max posisi, cooldown) — tidak ada satu
+// pun aturan matematis, sehingga RR 1.28 dan SL 0.08% lolos ke pasar (forensik
+// trading.db). Gate di sini memakai HARGA EKSEKUSI AKTUAL + qty yang benar-benar
+// terisi, jadi tidak ada jalur (manual, autopilot, replay, atau caller baru)
+// yang bisa melewatinya. Ditolak SEBELUM state/DB tersentuh.
+function enforceOrderRiskGate(
+  orderId: string,
+  input: {
+    symbol: string;
+    side: "buy" | "sell";
+    qty: number;
+    price: number;
+    stopLoss: number;
+    takeProfit: number;
+    leverage: number;
+  }
+): void {
+  if (!isOrderRiskGateEnabled()) return;
+  let equity: number | undefined;
+  try {
+    equity = getPaperAccount().equity;
+  } catch {
+    equity = undefined;
+  }
+  const evaluation = evaluateOrderRisk({ ...input, equity });
+  if (evaluation.approved) return;
+  const message = describeOrderRiskRejection(evaluation);
+  appendEvent("ORDER_REJECTED", {
+    orderId,
+    symbol: input.symbol,
+    side: input.side,
+    reason: "RISK_GATE_REJECTED",
+    message,
+    metrics: evaluation.metrics,
+  });
+  throw new PaperOrderError("RISK_GATE_REJECTED", message);
+}
+
+// ------------------------------------------------------------------
+// Idempotency (F1/P0) — clientOrderId dari FE
+// ------------------------------------------------------------------
+// Klik ganda / retry network dengan clientOrderId yang sama mengembalikan
+// receipt yang SAMA (tidak membuka posisi kedua). In-memory + TTL: menutup
+// double-submit dalam satu sesi server. Ini PELENGKAP, bukan pengganti cek
+// duplikat simbol+side (yang tetap berlaku untuk semua order).
+const IDEMPOTENCY_TTL_MS = 10 * 60_000;
+const clientOrderCache = new Map<string, { at: number; result: OpenPaperPositionResult }>();
+
+function idempotentHit(clientOrderId: string | undefined, now: number): OpenPaperPositionResult | null {
+  if (!clientOrderId) return null;
+  for (const [key, value] of clientOrderCache) {
+    if (now - value.at > IDEMPOTENCY_TTL_MS) clientOrderCache.delete(key);
+  }
+  const hit = clientOrderCache.get(clientOrderId);
+  return hit ? hit.result : null;
+}
+
+function rememberClientOrder(clientOrderId: string | undefined, result: OpenPaperPositionResult, now: number): void {
+  if (!clientOrderId) return;
+  clientOrderCache.set(clientOrderId, { at: now, result });
+}
+
+/** Untuk test: bersihkan cache idempotency. */
+export function _resetClientOrderCacheForTest(): void {
+  clientOrderCache.clear();
+}
+
 // ------------------------------------------------------------------
 // Open / close
 // ------------------------------------------------------------------
 
+/**
+ * Wrapper serialisasi (F1/P0): cek duplikat + guardrail + mutasi cash harus
+ * atomik terhadap request konkuren — lihat src/paperbook/mutex.ts untuk bukti
+ * bug (5 posisi identik dalam 33 ms).
+ */
 export async function openPaperPosition(input: OpenPaperPositionInput): Promise<OpenPaperPositionResult> {
+  return withPaperMutationLock(() => openPaperPositionLocked(input));
+}
+
+async function openPaperPositionLocked(input: OpenPaperPositionInput): Promise<OpenPaperPositionResult> {
+  // Idempotency: klik ganda / retry network dengan clientOrderId sama →
+  // kembalikan receipt yang SAMA (tidak membuka posisi kedua).
+  const clientOrderId = (input.meta as PaperOrderMeta | undefined)?.clientOrderId;
+  const idempotencyNow = Date.now();
+  const cachedResult = idempotentHit(clientOrderId, idempotencyNow);
+  if (cachedResult) return cachedResult;
+
   const qty = Number(input.qty);
   if (!isFinite(qty) || qty <= 0) {
     throw new PaperOrderError("INVALID_QTY", "qty harus angka positif.");
@@ -316,6 +482,16 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     // terlihat di FE (orders NEW, ledger kind=order). Margin sudah dipotong
     // di memori SEBELUM persist agar cash konsisten dengan snapshot.
     // SPOT: margin = notional penuh (leverage sudah dipaksa 1x di atas).
+    // F1/P0: risk gate matematis pada harga limit (harga eksekusi terencana).
+    enforceOrderRiskGate(initialOrder.id, {
+      symbol,
+      side: direction,
+      qty,
+      price: limitPrice!,
+      stopLoss,
+      takeProfit,
+      leverage,
+    });
     const estimatedNotional = limitPrice! * qty;
     const estimatedMargin = estimatedNotional / leverage;
     if (estimatedMargin > state.cash) {
@@ -343,12 +519,20 @@ export async function openPaperPosition(input: OpenPaperPositionInput): Promise<
     } catch (err) {
       console.error("[audit] GAGAL tulis audit limit NEW: ", (err as Error)?.message);
     }
-    return { position: null as any, order: initialOrder, account: getPaperAccount() };
+    const limitResult: OpenPaperPositionResult = {
+      position: null as unknown as PaperPosition,
+      order: initialOrder,
+      account: getPaperAccount(),
+    };
+    rememberClientOrder(clientOrderId, limitResult, Date.now());
+    return limitResult;
   }
-  return handleMarketOpenFill(
+  const filled = await handleMarketOpenFill(
     input, symbol, side, direction, qty, leverage, stopLoss, takeProfit,
     orderType, initialOrder, positionId, now, submittedAt, signed, isSpot
   );
+  rememberClientOrder(clientOrderId, filled, Date.now());
+  return filled;
 }
 
 async function handleMarketOpenFill(
@@ -360,6 +544,8 @@ async function handleMarketOpenFill(
   isSpot = false
 ): Promise<OpenPaperPositionResult> {
   const fill = await marketFill(symbol, direction, qty, undefined, "none");
+  // Actual paper execution completion, not request time or synthetic latency.
+  const filledAt = Date.now();
   const entryPrice = fill.fillPrice;
 
   if (side === "LONG" && !(stopLoss < entryPrice && entryPrice < takeProfit)) {
@@ -395,12 +581,28 @@ async function handleMarketOpenFill(
   }
 
   const notional = entryPrice * filledQty;
+  // F1/P0: risk gate matematis — harga eksekusi AKTUAL (VWAP fill) + qty yang
+  // benar-benar terisi. Ditolak sebelum state/DB tersentuh.
+  enforceOrderRiskGate(initialOrder.id, {
+    symbol,
+    side: direction,
+    qty: filledQty,
+    price: entryPrice,
+    stopLoss,
+    takeProfit,
+    leverage,
+  });
   const marginUSD = notional / leverage;
   if (marginUSD > state.cash) {
     throw new PaperOrderError("INSUFFICIENT_CASH", `Margin ${roundTo(marginUSD, 2)} melebihi cash paper ${roundTo(state.cash, 2)}.`);
   }
 
   const feeUSD = roundTo(fill.feeUSD, 4); // market order => taker fee
+
+  // F-08/P1: decision trace — order.meta.decisionId (dari pipeline /
+  // /api/ai-decision) disalin ke posisi agar join decision → position →
+  // trade utuh untuk training CSV.
+  const positionDecisionId = (input.meta as PaperOrderMeta | undefined)?.decisionId;
 
   const position: PaperPosition = {
     id: positionId,
@@ -413,11 +615,12 @@ async function handleMarketOpenFill(
     marginUSD: roundTo(marginUSD, 2),
     stopLoss,
     takeProfit,
+    ...(positionDecisionId ? { decisionId: positionDecisionId } : {}),
     // SPOT: tanpa liquidation (aset beneran, bukan margin) — liq 0 agar
     // bracket monitor skip cek liq untuk posisi ini.
     liquidationPrice: isSpot ? 0 : liquidationPrice(entryPrice, leverage, side),
     maintenanceMarginRate: isSpot ? 0 : MAINTENANCE_MARGIN_RATE,
-    openedAt: now,
+    openedAt: filledAt,
     status: "OPEN",
     entryReasoning: input.meta?.reasoning,
     confidence: input.meta?.confidence,
@@ -431,7 +634,6 @@ async function handleMarketOpenFill(
     feesPaidUSD: feeUSD,
   };
 
-  const filledAt = submittedAt + Math.floor(Math.random() * 10) + 1; // 1-10ms additional fill time
 
   const order: PaperOrderReceipt = {
     ...initialOrder,
@@ -520,11 +722,33 @@ async function handleMarketOpenFill(
   return { position, order, account: getPaperAccount() };
 }
 
-export async function closePaperPosition(positionId: string, reason?: ExitReason): Promise<ClosePaperPositionResult> {
+export async function closePaperPosition(
+  positionId: string,
+  reason?: ExitReason,
+  closeQty?: number
+): Promise<ClosePaperPositionResult> {
+  return withPaperMutationLock(() => closePaperPositionLocked(positionId, reason, closeQty));
+}
+
+async function closePaperPositionLocked(
+  positionId: string,
+  reason?: ExitReason,
+  closeQtyIn?: number
+): Promise<ClosePaperPositionResult> {
   const pos = state.positions.find((p) => p.id === positionId);
   if (!pos) throw new PaperOrderError("POSITION_NOT_FOUND", `Posisi ${positionId} tidak ditemukan.`);
   if (pos.status !== "OPEN") {
     throw new PaperOrderError("POSITION_ALREADY_CLOSED", `Posisi ${positionId} sudah ${pos.status}.`);
+  }
+
+  // F3: partial close (qty < pos.qty) — kurangi qty tanpa menutup posisi.
+  // Taxing exit tetap lewat marketFill (harga eksekusi aktual, bukan mark).
+  const requestedQty = closeQtyIn != null ? Number(closeQtyIn) : pos.qty;
+  if (!Number.isFinite(requestedQty) || requestedQty <= 0) {
+    throw new PaperOrderError("INVALID_CLOSE_QTY", `closeQty harus angka positif (dapat ${closeQtyIn}).`);
+  }
+  if (requestedQty < pos.qty - 1e-9) {
+    return closePaperPositionPartialLocked(pos, reason || "PARTIAL_TAKE_PROFIT", requestedQty);
   }
 
   const exitReason: ExitReason = reason || "MANUAL";
@@ -556,6 +780,14 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
       bracketMode = "profit";
     }
     fill = await marketFill(pos.symbol, closingSide, pos.qty, triggerPrice, bracketMode);
+  }
+
+  // Depth-aware close: book PnL only for qty that actually filled. A partial
+  // execution reduces the position by filledQty (with its realized PnL) and
+  // leaves the remainder OPEN — never close qty that never filled.
+  const filledQty = fill.filledQty != null && fill.filledQty > 0 ? fill.filledQty : pos.qty;
+  if (filledQty < pos.qty - 1e-9) {
+    return closePaperPositionPartialLocked(pos, exitReason, filledQty);
   }
 
   const exitPrice = fill.fillPrice;
@@ -623,6 +855,22 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
     exitReason: effectiveExitReason,
   };
 
+  // F9 (2026-09-17): snapshot in-memory SEBELUM mutasi agar DB gagal bisa
+  // di-rollback paritas dengan openPaperPositionLocked (fail-closed konsisten).
+  const closeSnap = {
+    cash: state.cash,
+    realizedPnl: state.realizedPnl,
+    ordersLen: state.orders.length,
+    status: pos.status,
+    closedAt: pos.closedAt,
+    exitPrice: pos.exitPrice,
+    exitReason: pos.exitReason,
+    realizedPnlUSD: pos.realizedPnlUSD,
+    feesPaidUSD: pos.feesPaidUSD,
+    lastMark: pos.lastMark,
+    lastMarkUpdatedAt: pos.lastMarkUpdatedAt,
+  };
+
   state.cash += cashRelease;
   state.cash = roundTo(state.cash, 2);
   state.realizedPnl += realizedPnl;
@@ -632,7 +880,8 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
   pos.closedAt = now;
   pos.exitPrice = roundTo(effectiveExitPrice, 6);
   pos.exitReason = effectiveExitReason;
-  pos.realizedPnlUSD = roundTo(realizedPnl, 2);
+  // Position total is cumulative; receipt/account increment is this execution only.
+  pos.realizedPnlUSD = roundTo((pos.realizedPnlUSD ?? 0) + roundTo(realizedPnl, 2), 2);
   pos.feesPaidUSD = roundTo(totalFees, 4);
   pos.lastMark = effectiveExitPrice;
   pos.lastMarkUpdatedAt = now;
@@ -676,9 +925,170 @@ export async function closePaperPosition(positionId: string, reason?: ExitReason
     });
     commitTx();
   } catch (err) {
+    // F9: rollback in-memory menyeluruh — memori dan DB harus sama setelah gagal.
+    state.cash = closeSnap.cash;
+    state.realizedPnl = closeSnap.realizedPnl;
+    state.orders.length = closeSnap.ordersLen;
+    pos.status = closeSnap.status;
+    pos.closedAt = closeSnap.closedAt;
+    pos.exitPrice = closeSnap.exitPrice;
+    pos.exitReason = closeSnap.exitReason;
+    pos.realizedPnlUSD = closeSnap.realizedPnlUSD;
+    pos.feesPaidUSD = closeSnap.feesPaidUSD;
+    pos.lastMark = closeSnap.lastMark;
+    pos.lastMarkUpdatedAt = closeSnap.lastMarkUpdatedAt;
     rollbackTx();
     console.error(`[paperBook] Gagal menulis close ke DB: ${(err as Error).message}`);
     throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis close ke DB: ${(err as Error).message}`);
+  }
+
+  result.position = { ...pos };
+  return result;
+}
+
+// ------------------------------------------------------------------
+// F3: Partial close — kurangi qty posisi tanpa menutupnya (posisi OPEN).
+// Akuntansi jujur: realized = gross(exit−entry × closeQty) − proporsi fee
+// entry − fee exit. Cash += margin yang dilepas + gross − fee exit
+// (fee entry sudah dipotong saat open; proporsinya diperhitungkan di
+// realized). PnL gap-ke-liq & clamp margin bawaan TIDAK berlaku untuk
+// partial (hanya full close yang bisa kena likuidasi).
+// ------------------------------------------------------------------
+async function closePaperPositionPartialLocked(
+  pos: PaperPosition,
+  exitReason: ExitReason,
+  closeQtyIn: number
+): Promise<ClosePaperPositionResult> {
+  const closeQty = Math.min(roundTo(closeQtyIn, 8), pos.qty);
+  const closingSide = pos.side === "LONG" ? "sell" : "buy";
+  const fill = await marketFill(pos.symbol, closingSide, closeQty, undefined, "none");
+  const exitPrice = fill.fillPrice;
+  const filledQty = fill.filledQty > 0 ? fill.filledQty : closeQty;
+  const fraction = Math.min(1, filledQty / pos.qty);
+
+  const grossPnl =
+    pos.side === "LONG" ? (exitPrice - pos.entryPrice) * filledQty : (pos.entryPrice - exitPrice) * filledQty;
+  const entryFeePortion = roundTo(pos.feesPaidUSD * fraction, 4);
+  const realizedPnl = grossPnl - entryFeePortion - fill.feeUSD;
+  const marginRelease = roundTo(pos.marginUSD * fraction, 6);
+
+  const now = Date.now();
+  const orderId = newId("ord");
+  const payload = JSON.stringify({
+    symbol: pos.symbol,
+    side: closingSide,
+    type: "market",
+    amount: filledQty,
+    positionId: pos.id,
+    exitReason,
+    partial: true,
+    timestamp: now,
+    orderId,
+  });
+  const signed = signPayload(payload);
+  const cashDelta = marginRelease + grossPnl - fill.feeUSD;
+
+  const result: ClosePaperPositionResult = {
+    position: { ...pos },
+    order: {
+      id: orderId,
+      mode: "paper",
+      symbol: pos.symbol,
+      side: closingSide,
+      type: "market",
+      amount: filledQty,
+      fillPrice: roundTo(exitPrice, 6),
+      slippageBps: fill.slippageBps,
+      feeUSD: roundTo(fill.feeUSD, 4),
+      qty: filledQty,
+      notional: roundTo(exitPrice * filledQty, 2),
+      leverage: pos.leverage,
+      marginRequired: roundTo(marginRelease, 2),
+      executionLatencyMs: fill.latencyMs,
+      timestamp: now,
+      status: "FILLED",
+      positionId: pos.id,
+      reason: exitReason,
+      signature: signed.signature,
+      payloadHash: signed.payloadHash,
+      filledQty,
+      remainingQty: roundTo(pos.qty - filledQty, 8),
+    },
+    realizedPnlUSD: roundTo(realizedPnl, 2),
+    cashAfter: roundTo(state.cash + cashDelta, 2),
+    exitFillPrice: roundTo(exitPrice, 6),
+    exitSlippageBps: fill.slippageBps,
+    exitFeeUSD: roundTo(fill.feeUSD, 4),
+    exitReason,
+    partial: true,
+    remainingQty: roundTo(pos.qty - filledQty, 8),
+  };
+
+  // Snapshot untuk rollback in-memory bila transaksi DB gagal.
+  const snap = {
+    qty: pos.qty,
+    marginUSD: pos.marginUSD,
+    notionalUSD: pos.notionalUSD,
+    feesPaidUSD: pos.feesPaidUSD,
+    realizedPnlUSD: pos.realizedPnlUSD,
+    lastMark: pos.lastMark,
+    lastMarkUpdatedAt: pos.lastMarkUpdatedAt,
+  };
+
+  state.cash = roundTo(state.cash + cashDelta, 2);
+  state.realizedPnl = roundTo(state.realizedPnl + realizedPnl, 2);
+  pos.qty = roundTo(pos.qty - filledQty, 8);
+  pos.marginUSD = roundTo(pos.marginUSD - marginRelease, 6);
+  pos.notionalUSD = roundTo(pos.notionalUSD * (1 - fraction), 2);
+  pos.feesPaidUSD = roundTo(pos.feesPaidUSD - entryFeePortion, 4);
+  pos.realizedPnlUSD = roundTo((pos.realizedPnlUSD ?? 0) + roundTo(realizedPnl, 2), 2);
+  pos.lastMark = exitPrice;
+  pos.lastMarkUpdatedAt = now;
+
+  appendEvent("POSITION_PARTIAL_CLOSED", {
+    orderId,
+    positionId: pos.id,
+    symbol: pos.symbol,
+    side: pos.side,
+    closeQty: filledQty,
+    remainingQty: pos.qty,
+    exitPrice: roundTo(exitPrice, 6),
+    exitReason,
+    realizedPnlUSD: roundTo(realizedPnl, 2),
+    feesUSD: roundTo(entryFeePortion + fill.feeUSD, 4),
+    cashAfter: result.cashAfter,
+  });
+
+  try {
+    beginTx();
+    dbSavePosition(pos);
+    dbSaveOrder(result.order);
+    persistSnapshot();
+    appendAudit("order", {
+      id: result.order.id,
+      symbol: pos.symbol,
+      side: closingSide,
+      amount: filledQty,
+      fillPrice: result.order.fillPrice,
+      status: "FILLED",
+      realizedPnlUSD: roundTo(realizedPnl, 2),
+      reason: "PAPER_PARTIAL_CLOSE",
+      timestamp: Date.now(),
+    });
+    commitTx();
+  } catch (err) {
+    // Rollback in-memory: posisi tetap OPEN dengan qty lama.
+    state.cash = roundTo(state.cash - cashDelta, 2);
+    state.realizedPnl = roundTo(state.realizedPnl - realizedPnl, 2);
+    pos.qty = snap.qty;
+    pos.marginUSD = snap.marginUSD;
+    pos.notionalUSD = snap.notionalUSD;
+    pos.feesPaidUSD = snap.feesPaidUSD;
+    pos.realizedPnlUSD = snap.realizedPnlUSD;
+    pos.lastMark = snap.lastMark;
+    pos.lastMarkUpdatedAt = snap.lastMarkUpdatedAt;
+    rollbackTx();
+    throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis partial close ke DB: ${(err as Error).message}`);
   }
 
   result.position = { ...pos };

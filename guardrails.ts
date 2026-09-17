@@ -75,9 +75,17 @@ function isLiveMode(): boolean {
   return process.env.TRADING_MODE === "live";
 }
 
-/** Default master toggle: paper = OFF (training bebas), live = ON (wajib). */
+/**
+ * Default master toggle: SELALU ON.
+ *
+ * F1/P0 (audit): sebelumnya default paper = OFF ("training bebas") sehingga
+ * daily-loss, max posisi, dan cooldown semuanya nol limit di akun paper yang
+ * dipakai untuk mengukur strategi — dan burst 5 order dalam 33 ms lolos.
+ * Operator tetap bisa mematikannya eksplisit lewat POST /api/broker/guards
+ * untuk eksperimen terkontrol; live tetap terkunci (tidak bisa dimatikan).
+ */
 function defaultGuardsEnabled(): boolean {
-  return isLiveMode();
+  return true;
 }
 
 function freshGuardState(): GuardStateFile {
@@ -223,15 +231,22 @@ function baselineEquityUSD(mode: "paper" | "live"): number {
 
 function computePaperDailyRealizedPnl(): { realizedPnlUSD: number; lossPercent: number } {
   const start = todayStartMs();
-  const positions = getPaperPositions();
+  // F5: query DB for closed positions today - in-memory loses closed positions after restart.
   let sum = 0;
-  for (const p of positions) {
-    if (p.status === "CLOSED" && typeof p.closedAt === "number" && p.closedAt >= start) {
-      sum += Number(p.realizedPnlUSD || 0);
+  try {
+    const { getDb: _getDb } = require("./src/db/core");
+    const _db = _getDb();
+    const row = _db.prepare("SELECT COALESCE(SUM(realized_pnl_usd), 0) s FROM positions WHERE status = ? AND closed_at >= ?").get("CLOSED", start);
+    sum = Number((row as any)?.s ?? 0);
+  } catch {
+    const positions = getPaperPositions();
+    for (const p of positions) {
+      if (p.status === "CLOSED" && typeof p.closedAt === "number" && p.closedAt >= start) {
+        sum += Number(p.realizedPnlUSD || 0);
+      }
     }
   }
-  // Also need to consider orders that are closes? But positions cover.
-  const initial = baselineEquityUSD("paper"); // equity real paper, bukan INITIAL_PAPER_CASH
+  const initial = baselineEquityUSD("paper");
   const loss = sum < 0 ? Math.abs(sum) : 0;
   const lossPercent = initial > 0 ? (loss / initial) * 100 : 0;
   return { realizedPnlUSD: Number(sum.toFixed(2)), lossPercent: Number(lossPercent.toFixed(4)) };

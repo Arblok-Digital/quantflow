@@ -4,15 +4,13 @@ export type MarketType = "FUTURES" | "SPOT";
 export type Timeframe = "1s" | "1m" | "5m" | "15m" | "1h" | "4h" | "1D" | "1W";
 
 /** Navigation tabs — each renders its panels exactly once (no cross-tab duplication). */
-export type ModuleTab = "dashboard" | "analytics" | "feed" | "advisor" | "pump" | "replay";
+export type ModuleTab = "dashboard" | "analytics" | "pump" | "replay";
 
-export const MODULE_TABS: ModuleTab[] = ["dashboard", "analytics", "feed", "advisor", "pump", "replay"];
+export const MODULE_TABS: ModuleTab[] = ["dashboard", "analytics", "pump", "replay"];
 
 export const MODULE_TAB_LABELS: Record<ModuleTab, string> = {
   dashboard: "Dashboard",
   analytics: "Analytics",
-  feed: "1s Feed",
-  advisor: "Advisor",
   pump: "Pump Radar",
   replay: "Replay",
 };
@@ -119,6 +117,9 @@ export interface MTFLiquidityAnalysis {
   } | null;
   zones15m: LiquidityZone[];
   zones4h: LiquidityZone[];
+  /** Zona likuiditas per timeframe (1s,1m,5m,15m,1h,4h,1D,1W). TF tanpa
+   *  candle ≥5 → slot tidak ada (NO DATA), bukan array kosong tipuan. */
+  zonesByTimeframe: Partial<Record<Timeframe, LiquidityZone[]>>;
   confluenceScore: number; // 0 - 100%
   confluenceSummary: string;
   huntingTarget: {
@@ -241,6 +242,12 @@ export interface AuditLogEntry {
   timeframe?: Timeframe;
   marketType?: MarketType;
   liquidityContext?: string;
+  /**
+   * Decision trace id (dec-<ts>-<rand>) — generated server-side per pipeline
+   * cycle / AI decision. Links decision → order → position → trade → CSV
+   * untuk training join. F-08/P1.
+   */
+  decisionId?: string;
 }
 
 export interface Position {
@@ -266,6 +273,13 @@ export interface Position {
   entryReasoning?: string;
   confidence?: number;
   liquidationPrice?: number;
+  /** Decision trace id — diteruskan dari order.meta.decisionId (F-08/P1). */
+  decisionId?: string;
+  /**
+   * F3: exit plan otomatis dari server (BE/trailing/partial/time-stop) —
+   * config aktif posisi ini; null/undefined = SL/TP statis murni.
+   */
+  exitConfig?: Record<string, unknown> | null;
 }
 
 export interface ClosedTrade {

@@ -1,7 +1,9 @@
 /**
  * Risk gatekeeper — Keel `src/services/risk/gatekeeper.ts` port.
  * 11 hard gates: spot-only venue, max open positions (5), order rate (10/hr),
- * position size band (2-5%), stop-loss protection, daily drawdown (3%),
+ * position size cap (max only — F2: sizing risk-based boleh < band lama),
+ * stop-loss protection, daily drawdown (3%),
+ * F4: gates posisi/rate/size/symbol-guard kini dua arah (BUY & SELL).
  * kill switch, symbol one-position, symbol cooldown, max reentry/day,
  * HOLD-no-action; plus macro-event-flat and weekend-liquidity-flat guards.
  * PG selects adapted to the in-memory store.
@@ -27,6 +29,7 @@ export interface RiskLimitsView {
   maxOpenPositions: number;
   maxOrdersPerHour: number;
   maxDrawdownPct: number;
+  /** @deprecated F2: tidak lagi menolak — sizing risk-based boleh < band lama 2%. */
   minPositionSizePct: number;
   maxPositionSizePct: number;
   stopLossPct: number;
@@ -85,16 +88,20 @@ export function evaluateRisk(
     if (snapshot.dailyDrawdownPct !== null && snapshot.dailyDrawdownPct >= limits.maxDrawdownPct) {
       reasons.push(RISK_REASONS.DAILY_DRAWDOWN_BREACH);
     }
-    if (candidate.action === 'BUY' && snapshot.openPositions + 1 > limits.maxOpenPositions) {
+    // F4: gate posisi/rate/size kini BERLAKU dua arah — sebelumnya BUY-only,
+    // sinyal SELL lolos dari 3 gate ini (dan symbolGuard di
+    // reserveAndPersistDecision). SELL membuka posisi juga → gate sama.
+    if (snapshot.openPositions + 1 > limits.maxOpenPositions) {
       reasons.push(RISK_REASONS.MAX_OPEN_POSITIONS);
     }
-    if (candidate.action === 'BUY' && snapshot.ordersLastHour + 1 > limits.maxOrdersPerHour) {
+    if (snapshot.ordersLastHour + 1 > limits.maxOrdersPerHour) {
       reasons.push(RISK_REASONS.ORDER_RATE_LIMIT);
     }
-    if (
-      candidate.action === 'BUY' &&
-      (candidate.sizePct < limits.minPositionSizePct || candidate.sizePct > limits.maxPositionSizePct)
-    ) {
+    // F2 (sizing satu satuan): ukuran hasil sizing risk-targeted BOLEH di
+    // bawah band lama 2% (SL lebar → size kecil adalah perilaku BENAR — risiko
+    // tetap ≤ target). Gate hanya menegakkan CAP notional maksimum;
+    // `minPositionSizePct` disimpan di limits untuk kompatibilitas API.
+    if (candidate.sizePct > limits.maxPositionSizePct) {
       reasons.push(RISK_REASONS.POSITION_SIZE_OUT_OF_BAND);
     }
     if (candidate.stopLossPct >= 0) {
@@ -193,7 +200,9 @@ export async function reserveAndPersistDecision(
     if (mv.level === 'FLAT') guardReasons.push(`${RISK_REASONS.MACRO_EVENT_FLAT}:${mv.active?.type ?? mv.next?.type ?? 'UNKNOWN'}:${mv.reason}`);
     const sv = classifySession(serverNow);
     if (sv.kind === 'WEEKEND_THIN' && sv.execMult === 0) guardReasons.push(`${RISK_REASONS.WEEKEND_LIQUIDITY_FLAT}:${sv.reason}`);
-    if (!guardReasons.length && signal.action === 'BUY') {
+    if (!guardReasons.length) {
+      // F4: symbolGuard (posisi duplikat per simbol + cooldown + reentry/day)
+      // kini dua arah — sebelumnya hanya BUY, jadi SELL bebas spam re-entry.
       const guard = await symbolGuard(_tx, signal, serverNow);
       if (guard.blocked) guardReasons = [...guard.reasons];
     }

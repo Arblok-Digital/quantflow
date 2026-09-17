@@ -227,7 +227,10 @@ describe("7.2 paper order lifecycle", () => {
   test("POST /order(paper) → GET /order-status/:id → POST /close", async () => {
     const token = await getToken();
 
-    // Open: BTC/USDT buy, SL=50 TP=150 (entry ~100 → LONG valid)
+    // Open: BTC/USDT buy, SL=99.5 TP=101 (entry ~100 → LONG valid, R:R 3)
+    // Catatan F1/P0: bracket lama SL=50/TP=150 = stop 50% & R:R 1.0, sekarang
+    // ditolak risk gate matematis (RISK_MIN_RR 1.5) — bracket diperbaiki agar
+    // test menguji lifecycle, bukan melanggar policy.
     const open = await request(app)
       .post("/api/broker/order")
       .set("Authorization", `Bearer ${token}`)
@@ -235,8 +238,8 @@ describe("7.2 paper order lifecycle", () => {
         symbol: "BTC/USDT",
         side: "buy",
         amount: 0.001,
-        stopLoss: 50,
-        takeProfit: 150,
+        stopLoss: 99.5,
+        takeProfit: 101,
       });
     expect(open.status).toBe(200);
     expect(open.body.success).toBe(true);
@@ -328,8 +331,8 @@ describe("7.3 spot semantics (satu panel, mode-aware)", () => {
         side: "buy",
         amount: 0.001,
         leverage: 10, // sengaja 10x → SPOT harus paksa jadi 1x
-        stopLoss: 50,
-        takeProfit: 150,
+        stopLoss: 99.5,
+        takeProfit: 101,
         meta: { marketType: "SPOT" },
       });
     expect(open.status).toBe(200);
@@ -379,8 +382,8 @@ describe("7.3 spot semantics (satu panel, mode-aware)", () => {
         side: "sell",
         amount: 0.001,
         leverage: 10,
-        stopLoss: 150,
-        takeProfit: 50,
+        stopLoss: 100.5,
+        takeProfit: 98.5,
         meta: { marketType: "FUTURES" },
       });
     expect(open.status).toBe(200);
@@ -394,5 +397,144 @@ describe("7.3 spot semantics (satu panel, mode-aware)", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ positionId: open.body.position.id });
     expect(close.status).toBe(200);
+  });
+});
+
+// =====================================================================
+// F1/P0 — audit remediation regression tests
+//   * risk gate matematis di choke point eksekusi (jalur manual)
+//   * anti race-condition (burst order konkuren)
+//   * idempotency clientOrderId
+// Semua lewat HTTP endpoint nyata (server.ts) supaya jalur yang diuji identik
+// dengan yang dipakai UI.
+// =====================================================================
+describe("F1/P0 risk gate matematis di /api/broker/order", () => {
+  // fill mock: bestAsk 100 → entry BUY ≈ 100.
+  test("R:R di bawah minimum (TP terlalu dekat) → 400 RISK_GATE_REJECTED", async () => {
+    const token = await getToken();
+    const res = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        symbol: "BTC/USDT",
+        side: "buy",
+        amount: 0.001,
+        stopLoss: 99.5, // 0.5% (lolos lantai 0.35%)
+        takeProfit: 100.4, // 0.4% → R:R 0.8 < 1.5
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.status).toBe("REJECTED");
+    expect(res.body.reason).toBe("RISK_GATE_REJECTED");
+    expect(String(res.body.message)).toContain("RISK_RR_BELOW_MIN");
+  });
+
+  test("SL di dalam noise (0.08%) → 400 RISK_GATE_REJECTED (RISK_STOP_TOO_TIGHT)", async () => {
+    const token = await getToken();
+    const res = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        symbol: "BTC/USDT",
+        side: "buy",
+        amount: 0.001,
+        stopLoss: 99.92, // 0.08% — kasus nyata di trading.db
+        takeProfit: 101,
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.reason).toBe("RISK_GATE_REJECTED");
+    expect(String(res.body.message)).toContain("RISK_STOP_TOO_TIGHT");
+  });
+
+  test("bracket sehat + notional wajar → tetap FILLED (gate tidak memblokir alur normal)", async () => {
+    const token = await getToken();
+    const open = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        symbol: "BTC/USDT",
+        side: "buy",
+        amount: 0.001,
+        leverage: 10,
+        stopLoss: 99.5,
+        takeProfit: 101,
+      });
+    expect(open.status).toBe(200);
+    expect(open.body.success).toBe(true);
+    expect(open.body.order.status).toBe("FILLED");
+
+    const close = await request(app)
+      .post("/api/broker/close")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ positionId: open.body.position.id });
+    expect(close.status).toBe(200);
+  });
+});
+
+describe("F1/P0 anti race-condition (burst order konkuren)", () => {
+  test("5 request konkuren simbol+arah sama → HANYA 1 posisi terbuka", async () => {
+    const token = await getToken();
+    const body = {
+      symbol: "ETH/USDT",
+      side: "buy",
+      amount: 0.001,
+      leverage: 10,
+      stopLoss: 99.5,
+      takeProfit: 101,
+    };
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        request(app).post("/api/broker/order").set("Authorization", `Bearer ${token}`).send(body)
+      )
+    );
+
+    const filled = results.filter((r) => r.status === 200 && r.body?.success === true);
+    const rejected = results.filter((r) => r.body?.status === "REJECTED");
+    expect(filled).toHaveLength(1);
+    expect(rejected).toHaveLength(4);
+    // Sisanya ditolak karena posisi sudah ada — bukan karena error tak terduga.
+    for (const r of rejected) {
+      expect(r.body.reason).toBe("DUPLICATE_POSITION_DIRECTION");
+    }
+
+    // Request ke-6 (sekuensial) masih ditolak → posisi tunggal itu benar-benar ada.
+    const after = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send(body);
+    expect(after.status).toBe(400);
+    expect(after.body.reason).toBe("DUPLICATE_POSITION_DIRECTION");
+  });
+});
+
+describe("F1/P0 idempotency clientOrderId", () => {
+  test("request ulang dengan clientOrderId sama → receipt sama, tidak dobel posisi", async () => {
+    const token = await getToken();
+    const body = {
+      symbol: "SOL/USDT",
+      side: "buy",
+      amount: 0.001,
+      leverage: 10,
+      stopLoss: 99.5,
+      takeProfit: 101,
+      meta: { clientOrderId: "cli-test-sol-1" },
+    };
+
+    const first = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send(body);
+    expect(first.status).toBe(200);
+    const firstOrderId = first.body.order.id;
+
+    const replay = await request(app)
+      .post("/api/broker/order")
+      .set("Authorization", `Bearer ${token}`)
+      .send(body);
+    expect(replay.status).toBe(200);
+    expect(replay.body.success).toBe(true);
+    expect(replay.body.order.id).toBe(firstOrderId);
+    expect(replay.body.position.id).toBe(first.body.position.id);
   });
 });

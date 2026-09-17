@@ -71,7 +71,7 @@ export function registerMarketRoutes(app: Express, heartbeatState: { lastWsTick:
   app.get("/api/klines", async (req, res) => {
     const symbol = String(req.query.symbol || "BTC/USDT");
     const tf = String(req.query.interval || req.query.timeframe || "15m");
-    const limit = Math.min(100, Math.max(10, parseInt(String(req.query.limit || "50"))));
+    const limit = Math.min(300, Math.max(10, parseInt(String(req.query.limit || "50"))));
 
     try {
       const { candles, source } = await fetchOHLCVWithFallback(symbol, tf, limit);

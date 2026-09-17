@@ -1,6 +1,6 @@
 export type PaperSide = "LONG" | "SHORT";
 export type PaperPositionStatus = "OPEN" | "CLOSING" | "CLOSED";
-export type ExitReason = "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL" | "LIQUIDATED";
+export type ExitReason = "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL" | "LIQUIDATED" | "PARTIAL_TAKE_PROFIT" | "TIMEOUT";
 export type PaperOrderStatus = "NEW" | "PARTIALLY_FILLED" | "FILLED" | "REJECTED" | "CANCELLED";
 export type PaperEventType =
   | "ORDER_FILLED"
@@ -11,6 +11,8 @@ export type PaperEventType =
   | "ORDER_PARTIAL"
   | "ORDER_REJECTED"
   | "ORDER_CANCELLED"
+  | "POSITION_PARTIAL_CLOSED"
+  | "EXIT_ENGINE_ACTION"
   | "ERROR";
 
 export interface PaperPosition {
@@ -28,6 +30,12 @@ export interface PaperPosition {
   maintenanceMarginRate: number;
   openedAt: number;
   status: PaperPositionStatus;
+  /**
+   * F3 — Exit plan opt-in (BE otomatis / trailing / partial TP / time-stop).
+   * TIDAK ADA pada posisi lama → engine tidak pernah menyentuh posisi yang
+   * sudah open sampai exit plan dipasang eksplisit (API/panel).
+   */
+  exitPlan?: PositionExitPlan;
   entryReasoning?: string;
   confidence?: number;
   timeframe?: string;
@@ -35,6 +43,8 @@ export interface PaperPosition {
   targetPool?: string;
   /** MANUAL (klik panel) | AUTOPILOT (pipeline) | REPLAY — untuk split statistik journal. */
   entrySource?: string;
+  /** Decision trace id dari order.meta.decisionId — join decision → fill (F-08/P1). */
+  decisionId?: string;
   sourceOrderId: string;
   lastMark?: number;
   lastMarkUpdatedAt?: number;
@@ -93,6 +103,8 @@ export interface PaperAccountSnapshot {
   realizedPnl: number;
   openCount: number;
   marginLocked: number;
+  /** F9: margin tercadang order limit NEW — bagian equity, bukan loss. */
+  reservedMargin: number;
 }
 
 export interface PaperBalanceEntry {
@@ -112,6 +124,11 @@ export interface PaperOrderMeta {
   decisionId?: string;
   /** MANUAL | AUTOPILOT | REPLAY — asal entry, diteruskan ke posisi + DB. */
   entrySource?: string;
+  /**
+   * Idempotency key dari FE (satu nilai per klik order). Request ulang dengan
+   * clientOrderId sama → receipt yang sama, TIDAK membuka posisi kedua.
+   */
+  clientOrderId?: string;
 }
 
 export interface OpenPaperPositionInput {
@@ -148,12 +165,62 @@ export interface ClosePaperPositionResult {
   exitSlippageBps: number;
   exitFeeUSD: number;
   exitReason: ExitReason;
+  /** F3: true bila ini partial close (posisi tetap OPEN, qty berkurang). */
+  partial?: boolean;
+  /** F3: sisa qty setelah partial close. */
+  remainingQty?: number;
+}
+
+// ---------------------------------------------------------------------------
+// F3 — Exit engine (opt-in per posisi): BE otomatis, trailing, partial TP, time-stop
+// ---------------------------------------------------------------------------
+export interface PositionExitPartialLevel {
+  /** Level R (× risiko awal per unit) yang memicu partial close. */
+  rMultiple: number;
+  /** % dari qty SAAT TRIGGER yang ditutup di level ini (1–100). */
+  closePct: number;
+}
+
+export interface PositionExitConfig {
+  /** Auto break-even: SL digeser ke entry±offset begitu profit ≥ triggerR × risiko awal. */
+  breakEvenTriggerR?: number;
+  /** Offset BE dari entry sebagai fraksi harga (default 0.0008 ≈ 2× taker fee + buffer). */
+  breakEvenOffsetPct?: number;
+  /** Trailing chandelier sederhana: SL mengikuti puncak − trailingPct% harga. */
+  trailingPct?: number;
+  /** Tangga partial TP berbasis R (naik, tiap level dieksekusi sekali). */
+  partialLevels?: PositionExitPartialLevel[];
+  /** Time stop: tutup penuh setelah posisi berumur ≥ maxHoldMs. */
+  maxHoldMs?: number;
+}
+
+export interface PositionExitState {
+  deadlineAttempt?: { status: "FAILED" | "PARTIAL" | "CLOSED"; attemptedAt: number; message?: string };
+
+  /** Risiko awal per unit ($/unit) = |entry − SL saat plan dipasang| — anchor R. */
+  initialRiskPerUnit: number;
+  breakevenArmed?: boolean;
+  /** Level R partial yang sudah dieksekusi (tidak diulang). */
+  takenPartialR?: number[];
+  /** Puncak harga favorable sejak open — di-track monitor (persist ikut event tulis). */
+  peakMark?: number;
+}
+
+export interface PositionExitPlan {
+  config: PositionExitConfig;
+  state: PositionExitState;
 }
 
 export interface UpdatePaperPositionInput {
   stopLoss?: number;
   takeProfit?: number;
   breakEven?: boolean;
+  /**
+   * F3: pasang/ubah/hapus exit plan. `undefined` = tidak mengubah;
+   * `null` = hapus plan (kembali SL/TP statis murni); objek = pasang
+   * (divalidasi + di-clamp oleh normalizeExitConfig()).
+   */
+  exitConfig?: PositionExitConfig | null;
 }
 
 export interface FillResult {

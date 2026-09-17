@@ -6,7 +6,7 @@
 import { getDbFilePath } from "./src/db/persistence";
 
 export { updatePaperMarkCache } from "./src/paperbook/markCache";
-export { signPayload, liquidationPrice, openPaperPosition, closePaperPosition } from "./src/paperbook/fill";
+export { signPayload, liquidationPrice, liquidationPriceWithFunding, openPaperPosition, closePaperPosition } from "./src/paperbook/fill";
 export { startBracketMonitor, stopBracketMonitor, runBracketMonitorPass } from "./src/paperbook/bracketMonitor";
 export { refreshPaperMarks, fetchMarkTicker } from "./src/paperbook/bracketMonitor";
 
@@ -14,6 +14,7 @@ export type {
   PaperSide, PaperPosition, PaperOrderReceipt, PaperAccountSnapshot, PaperBalanceEntry, PaperOrderMeta,
   OpenPaperPositionInput, OpenPaperPositionResult, ClosePaperPositionResult, ExitReason, FillResult,
   UpdatePaperPositionInput, PaperPositionStatus, PaperOrderStatus, PaperEventType,
+  PositionExitConfig, PositionExitState, PositionExitPlan, PositionExitPartialLevel,
 } from "./src/paperbook/types";
 
 export {

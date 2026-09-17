@@ -69,6 +69,8 @@ interface ServerPaperPosition {
   targetPool?: string;
   entryReasoning?: string;
   confidence?: number;
+  /** Decision trace id (F-08/P1) — dari order.meta.decisionId server. */
+  decisionId?: string;
 }
 
 /** Limit NEW yang belum jadi posisi — diteruskan agar pipeline/FE bisa tampilkan pending. */
@@ -184,7 +186,10 @@ async function postJson(url: string, body: unknown): Promise<any> {
   return payload;
 }
 
-function mapServerPosition(p: ServerPaperPosition): Position {
+function mapServerPosition(p: ServerPaperPosition & { decisionId?: string }): Position & { decisionId?: string } {
+  // F-08/P1: decisionId dari server (order.meta.decisionId) diteruskan ke
+  // posisi agar join decision → position → trade utuh di training CSV.
+  const decisionId = (p as { decisionId?: string })?.decisionId;
   const mark = p.lastMark ?? p.entryPrice;
   const unrealizedPnl = p.side === "LONG" ? (mark - p.entryPrice) * p.qty : (p.entryPrice - mark) * p.qty;
   const unrealizedPnlPercent = p.notionalUSD > 0 ? (unrealizedPnl / p.notionalUSD) * 100 : 0;
@@ -213,5 +218,6 @@ function mapServerPosition(p: ServerPaperPosition): Position {
     entryReasoning: p.entryReasoning,
     confidence: p.confidence,
     liquidationPrice: p.liquidationPrice,
+    ...(decisionId ? { decisionId } : {}),
   };
 }

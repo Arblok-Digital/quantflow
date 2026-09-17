@@ -37,6 +37,16 @@ export function parseMarketSymbol(input: string): ParsedSymbol {
   return { base, quote, raw: `${base}${quote}`, ccxt: `${base}/${quote}` };
 }
 
+// Server-side SHA-256 hex (Node) — untuk blockHash pipeline (F-07/P0).
+// Client memakai WebCrypto async; server butuh versi sync deterministik.
+export function sha256HexNode(data: string): string {
+  // Lazy-require node:crypto agar bundel client (vite) tidak ikut menarik
+  // modul node — fungsi ini hanya dipanggil dari route server.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeCrypto = require("node:crypto") as typeof import("node:crypto");
+  return nodeCrypto.createHash("sha256").update(data, "utf-8").digest("hex");
+}
+
 // Helper with timeout
 export async function fetchWithTimeout(url: string, timeoutMs = 3000): Promise<any> {
   const controller = new AbortController();

@@ -1,5 +1,7 @@
 import { getDb, initDb, loadAllOrdersDb, loadOpenPositionsDb, getLatestSnapshotDb, savePositionDb, saveOrderDb, saveFillDb, saveSnapshotDb, beginTx, commitTx, rollbackTx, appendAudit } from "../../db";
 import { INITIAL_PAPER_CASH, MAINTENANCE_MARGIN_RATE, EVENT_RING_SIZE, TAKER_FEE_RATE } from "./config";
+import { getBootId } from "./bootId";
+import { withPaperMutationLock } from "./mutex";
 import {
   PaperAccountSnapshot,
   PaperBalanceEntry,
@@ -13,6 +15,7 @@ import {
   UpdatePaperPositionInput,
 } from "./types";
 import { PaperOrderError } from "./errors";
+import { normalizeExitConfig } from "./exitEngine";
 
 export interface PaperBookState {
   positions: PaperPosition[];
@@ -74,6 +77,9 @@ export function persistSnapshot(): void {
     margin_used: r2(marginLocked),
     equity: r2(equity),
     unrealized_pnl: r2(unrealized),
+    // F5: tandai penulis — kalau dua proses menulis DB yang sama, lineage
+    // bercabang akan terlihat sebagai dua writer_id bergantian (forensik $123).
+    writer_id: getBootId(),
   });
 }
 
@@ -95,6 +101,9 @@ export function dbSavePosition(pos: PaperPosition): void {
     realized_pnl_usd: pos.realizedPnlUSD ?? null,
     fees_usd: pos.feesPaidUSD ?? null,
     entry_source: pos.entrySource || "MANUAL",
+    decision_id: pos.decisionId ?? null,
+    // F3: exit plan (BE/trailing/partial/time-stop) — JSON atau NULL.
+    exit_config: pos.exitPlan ? JSON.stringify(pos.exitPlan) : null,
   });
 }
 
@@ -126,6 +135,7 @@ export function dbSaveOrder(order: PaperOrderReceipt): void {
     created_at: order.timestamp,
     closed_at: null,
     realized_pnl_usd: null,
+    decision_id: order.meta?.decisionId ?? null,
   });
   // also save fills row (amount = filledQty terukur; sisa unfilled TIDAK pernah jadi fill)
   if (order.fillPrice != null) {
@@ -241,6 +251,13 @@ export function initPaperBook(): void {
       const leverage = Number(r.leverage);
       const notional = entryPrice * qty;
       const marginUSD = notional / (leverage || 1);
+      // F3: rehydrate exit plan (JSON di kolom exit_config) — posisi lama NULL.
+      let exitPlan: PaperPosition["exitPlan"] | undefined;
+      try {
+        exitPlan = r.exit_config != null && String(r.exit_config).trim() !== "" ? JSON.parse(String(r.exit_config)) : undefined;
+      } catch {
+        exitPlan = undefined;
+      }
       return {
         id: String(r.id),
         symbol: String(r.symbol),
@@ -257,10 +274,12 @@ export function initPaperBook(): void {
         maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
         openedAt: Number(r.opened_at),
         status: String(r.status) as PaperPositionStatus,
+        ...(exitPlan ? { exitPlan } : {}),
         sourceOrderId: String(r.id),
         lastMark: entryPrice,
         lastMarkUpdatedAt: Date.now(),
         feesPaidUSD: r.fees_usd != null ? Number(r.fees_usd) : r4(entryPrice * qty * TAKER_FEE_RATE),
+        realizedPnlUSD: r.realized_pnl_usd != null ? Number(r.realized_pnl_usd) : 0,
       };
     });
 
@@ -274,9 +293,9 @@ export function initPaperBook(): void {
       const locked = positions.reduce((s, p) => s + p.marginUSD, 0);
       cash = r2(INITIAL_PAPER_CASH - locked);
     }
-    // Realized PnL = sum of closed positions
+    // Each position stores cumulative realized PnL, including partial exits while OPEN.
     try {
-      const closedSum = db.prepare("SELECT SUM(realized_pnl_usd) as sumReal FROM positions WHERE status='CLOSED'").get() as any;
+      const closedSum = db.prepare("SELECT SUM(realized_pnl_usd) as sumReal FROM positions").get() as any;
       if (closedSum?.sumReal != null) realizedPnl = r2(Number(closedSum.sumReal));
     } catch {}
 
@@ -351,8 +370,14 @@ export function unrealizedPnlFor(pos: PaperPosition): number {
 export function getPaperAccount(): PaperAccountSnapshot {
   const open = state.positions.filter((p) => p.status === "OPEN");
   const marginLocked = open.reduce((sum, p) => sum + p.marginUSD, 0);
+  // F9 (2026-09-17): margin order limit NEW adalah CADANGAN — bagian equity,
+  // bukan uang hilang. Tanpa ini, pasang limit menurunkan equity semu
+  // (terverifikasi E2E: 10000 → 9991 tanpa loss apa pun).
+  const reservedMargin = state.orders
+    .filter((o) => o.status === "NEW" && o.type === "limit" && o.limitPrice && o.limitPrice > 0)
+    .reduce((sum, o) => sum + (o.limitPrice! * o.amount) / (o.leverage || 1), 0);
   const unrealized = open.reduce((sum, p) => sum + unrealizedPnlFor(p), 0);
-  const equity = state.cash + marginLocked + unrealized;
+  const equity = state.cash + marginLocked + reservedMargin + unrealized;
   return {
     cash: r2(state.cash),
     equity: r2(equity),
@@ -360,6 +385,7 @@ export function getPaperAccount(): PaperAccountSnapshot {
     realizedPnl: r2(state.realizedPnl),
     openCount: open.length,
     marginLocked: r2(marginLocked),
+    reservedMargin: r2(reservedMargin),
   };
 }
 
@@ -403,12 +429,54 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
   }
 
   if (input.breakEven === true) {
-    // Break-even sejati harus selalu dalam kondisi NET PROFIT setelah fee.
-    // Taruh SL sedikit di bawah/atas entry sebesar ~2x taker fee (entry+exit)
-    // supaya exit di BE bukan rugi kecil gara-gara fee. (F7)
-    const beOffsetPct = 0.0008; // 0.08% ≈ 2 * takerFee (0.04%) + buffer
+    // F9 (2026-09-17): break-even sadar-fee. SL LONG harus DI ATAS entry, SHORT
+    // DI BAWAH entry, agar fill stop menutup fee entry+exit:
+    //   gross = (X - E) * qty ; fees = (E + X) * qty * fee ; net = 0
+    //   → X = E * (1 + fee) / (1 - fee)   (LONG; SHORT kebalikannya)
+    // Offset lama E * (1 - 2*fee) menaruh stop di sisi RUGI → net ≈ -2*fee*E*qty
+    // (terverifikasi E2E: -0.16 pada E=100, qty=1).
+    const feeRate = TAKER_FEE_RATE;
     pos.stopLoss =
-      pos.side === "LONG" ? pos.entryPrice * (1 - beOffsetPct) : pos.entryPrice * (1 + beOffsetPct);
+      pos.side === "LONG"
+        ? pos.entryPrice * ((1 + feeRate) / (1 - feeRate))
+        : pos.entryPrice * ((1 - feeRate) / (1 + feeRate));
+  }
+  // F3: exit plan opt-in (BE otomatis/trailing/partial/time-stop).
+  // undefined = tidak mengubah; null = hapus; objek = pasang/update.
+  // Risiko awal (anchor R) DIBEKUKAN dari SL saat plan PERTAMA dipasang.
+  if (input.exitConfig !== undefined) {
+    if (input.exitConfig === null) {
+      if (pos.exitPlan) {
+        delete pos.exitPlan;
+        appendEvent("EXIT_ENGINE_ACTION", { positionId: pos.id, symbol: pos.symbol, action: "PLAN_REMOVED" });
+      }
+    } else {
+      const cfg = normalizeExitConfig(input.exitConfig);
+      if (!cfg) {
+        throw new PaperOrderError(
+          "INVALID_EXIT_CONFIG",
+          "exitConfig tidak berisi komponen valid (breakEvenTriggerR / trailingPct / partialLevels / maxHoldMs)."
+        );
+      }
+      const fresh = pos.exitPlan == null;
+      pos.exitPlan = {
+        config: cfg,
+        state: fresh
+          ? {
+              initialRiskPerUnit: Math.abs(pos.entryPrice - pos.stopLoss),
+              breakevenArmed: false,
+              takenPartialR: [],
+              peakMark: pos.lastMark && pos.lastMark > 0 ? pos.lastMark : pos.entryPrice,
+            }
+          : { ...pos.exitPlan.state },
+      };
+      appendEvent("EXIT_ENGINE_ACTION", {
+        positionId: pos.id,
+        symbol: pos.symbol,
+        action: fresh ? "PLAN_SET" : "PLAN_UPDATED",
+        config: cfg,
+      });
+    }
   }
   if (input.stopLoss !== undefined) {
     const sl = Number(input.stopLoss);
@@ -435,23 +503,32 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
   return { ...pos };
 }
 
-export function cancelPaperOrder(orderId: string): PaperOrderReceipt {
-  const order = state.orders.find((o) => o.id === orderId);
-  if (!order) throw new PaperOrderError("ORDER_NOT_FOUND", `Order ${orderId} tidak ditemukan.`);
-  if (order.status !== "NEW") {
-    throw new PaperOrderError("ORDER_NOT_CANCELLABLE", `Order ${orderId} berstatus ${order.status}; hanya NEW yang bisa dibatalkan.`);
-  }
-  const now = Date.now();
-  order.status = "CANCELLED";
-  order.cancelledAt = now;
-  order.reason = "MANUAL_CANCEL";
-  if (order.limitPrice && order.limitPrice > 0) {
-    const margin = (order.limitPrice * order.amount) / (order.leverage || 1);
-    state.cash = r2(state.cash + margin);
-  }
-  appendEvent("ORDER_CANCELLED", { orderId: order.id, symbol: order.symbol, reason: "MANUAL_CANCEL", cancelledAt: now });
-  dbSaveOrderTolerant(order);
-  persistSnapshotTolerant();
-  return { ...order };
+export async function cancelPaperOrder(orderId: string): Promise<PaperOrderReceipt> {
+  return withPaperMutationLock(async () => {
+    const order = state.orders.find((o) => o.id === orderId);
+    if (!order) throw new PaperOrderError("ORDER_NOT_FOUND", `Order ${orderId} tidak ditemukan.`);
+    if (order.status !== "NEW") {
+      throw new PaperOrderError("ORDER_NOT_CANCELLABLE", `Order ${orderId} berstatus ${order.status}; hanya NEW yang bisa dibatalkan.`);
+    }
+    const now = Date.now();
+    order.status = "CANCELLED";
+    order.cancelledAt = now;
+    order.reason = "MANUAL_CANCEL";
+    if (order.limitPrice && order.limitPrice > 0) {
+      const margin = (order.limitPrice * order.amount) / (order.leverage || 1);
+      state.cash = r2(state.cash + margin);
+    }
+    appendEvent("ORDER_CANCELLED", { orderId: order.id, symbol: order.symbol, reason: "MANUAL_CANCEL", cancelledAt: now });
+    try {
+      beginTx();
+      dbSaveOrder(order);
+      persistSnapshot();
+      commitTx();
+    } catch (err) {
+      rollbackTx();
+      console.error(`[paperBook] Gagal persist cancel ${orderId}: ${(err as Error).message}`);
+    }
+    return { ...order };
+  });
 }
 

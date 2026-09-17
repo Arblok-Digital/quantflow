@@ -4,9 +4,81 @@
  * Behavior-preserving move dari server.ts /api/broker/order (branch live).
  */
 import type { Request, Response } from "express";
-import { placeBrokerOrder, getBrokerStatus, getExchange, ensureMarketsLoaded } from "../../broker";
+import {
+  placeBrokerOrder,
+  getBrokerStatus,
+  getExchange,
+  ensureMarketsLoaded,
+  fetchCcxtTicker,
+  fetchBrokerBalance,
+} from "../../broker";
 import { evaluateGuardrails, GuardrailRejectedError, recordOrderPlaced } from "../../guardrails";
 import { guardReject } from "./routerUtils";
+import {
+  evaluateOrderRisk,
+  describeOrderRiskRejection,
+  isOrderRiskGateEnabled,
+  defaultOrderRiskPolicy,
+  type OrderRiskEvaluation,
+} from "../logic/orderRiskGate";
+
+/**
+ * F1/P0 — risk gate matematis untuk jalur LIVE.
+ * Live TIDAK boleh lebih longgar dari paper: bracket sanity, lantai jarak SL,
+ * dan R:R minimum selalu diperiksa; cap berbasis equity ikut diperiksa dan
+ * WAJIB tersedia (requireEquity: true → fail-closed bila saldo tak terbaca).
+ * Harga acuan: limitPrice (limit) atau ticker live (market); bila harga tidak
+ * bisa diambil → order DITOLAK (bracket tak bisa diverifikasi).
+ */
+async function evaluateLiveRiskGate(body: any): Promise<OrderRiskEvaluation | null> {
+  if (!isOrderRiskGateEnabled()) return null;
+  const symbol = String(body.symbol || "BTC/USDT");
+  const side: "buy" | "sell" = String(body.side || "buy").toLowerCase() === "sell" ? "sell" : "buy";
+  const qty = Number(body.amount);
+  const isLimit = String(body.type || "market").toLowerCase() === "limit";
+  const limitPrice = Number(body.limitPrice);
+
+  let price = isLimit && Number.isFinite(limitPrice) && limitPrice > 0 ? limitPrice : NaN;
+  if (!Number.isFinite(price)) {
+    try {
+      const ticker = await fetchCcxtTicker(symbol);
+      price = Number(ticker?.last ?? ticker?.bid ?? ticker?.ask ?? NaN);
+    } catch {
+      price = NaN;
+    }
+  }
+  if (!Number.isFinite(price) || price <= 0) {
+    return {
+      approved: false,
+      reasons: ["RISK_PRICE_UNAVAILABLE:harga live tidak bisa diambil — bracket & sizing tidak bisa diverifikasi"],
+      metrics: null,
+      capsSkipped: true,
+    };
+  }
+
+  let equity: number | undefined;
+  try {
+    const balances = await fetchBrokerBalance();
+    const usdt = balances.find((b) => b.currency === "USDT") ?? balances[0];
+    equity = usdt ? Number(usdt.total) : undefined;
+  } catch {
+    equity = undefined;
+  }
+
+  return evaluateOrderRisk(
+    {
+      symbol,
+      side,
+      qty,
+      price,
+      stopLoss: Number(body.stopLoss),
+      takeProfit: Number(body.takeProfit),
+      leverage: Number(body.leverage),
+      equity,
+    },
+    { ...defaultOrderRiskPolicy(), requireEquity: true },
+  );
+}
 
 /**
  * Handle order masuk di LIVE MODE — pass-through guarded + double-lock.
@@ -32,6 +104,21 @@ export async function handleLiveOrder(req: Request, res: Response): Promise<Resp
       reasons: guardLive.reasons,
     });
   }
+  // F1/P0: pre-trade risk gate matematis (bracket sanity, lantai SL, R:R, cap
+  // equity) — live tidak boleh lebih longgar dari paper.
+  const liveRisk = await evaluateLiveRiskGate(body);
+  if (liveRisk && !liveRisk.approved) {
+    console.warn(`[live] risk gate menolak order ${body.symbol}: ${liveRisk.reasons.join("; ")}`);
+    return guardReject(res, liveRisk.reasons[0] as string, describeOrderRiskRejection(liveRisk), {
+      riskGate: {
+        approved: liveRisk.approved,
+        reasons: liveRisk.reasons,
+        metrics: liveRisk.metrics,
+        capsSkipped: liveRisk.capsSkipped,
+      },
+    });
+  }
+
   // Double-lock: liveArmed check is inside placeBrokerOrder via assertLiveAllowed, but we surface clearly
   try {
     const result = await placeBrokerOrder(body);

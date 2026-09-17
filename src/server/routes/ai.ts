@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
+import { liquidityPoolContext, onChainDecisionContext, promptNumber } from "../aiDataContext";
 import { requireAuth } from "@/auth";
 import { appendAudit, saveAgentDecisionDb, listReplayRunsDb } from "@/db";
 import { getPaperAccount } from "@/paperBook";
@@ -64,19 +65,13 @@ Konteks Pasar & MTF Liquidation Hunt:
 - Asset: ${symbol}
 - Market Type: ${mtfLiquidity?.marketType || "FUTURES"} (Primary TF: ${mtfLiquidity?.primaryTimeframe || "15m"}, Macro TF: ${mtfLiquidity?.macroTimeframe || "4h"})
 - Harga Saat Ini: $${currentPrice}
-- Status Liquidity Hunt: ${mtfLiquidity?.activeState || "EQUILIBRIUM"}
-- Confluence Score: ${mtfLiquidity?.confluenceScore ?? 75}% (${mtfLiquidity?.confluenceSummary || "Neutral"})
-- Upper BSL Pool (Short Stops): $${mtfLiquidity?.nearestBSL?.midPrice ?? "N/A"} (est. $${mtfLiquidity?.nearestBSL?.estimatedVolumeUSD ?? "14"}M Liq)
-- Lower SSL Pool (Long Stops): $${mtfLiquidity?.nearestSSL?.midPrice ?? "N/A"} (est. $${mtfLiquidity?.nearestSSL?.estimatedVolumeUSD ?? "18"}M Liq)
+- Status Liquidity Hunt: ${mtfLiquidity?.activeState || "No data"}
+- Confluence Score: ${promptNumber(mtfLiquidity?.confluenceScore, "%")} (${mtfLiquidity?.confluenceSummary || "No data"})
+- Upper BSL candidate: ${liquidityPoolContext(mtfLiquidity?.nearestBSL)}
+- Lower SSL candidate: ${liquidityPoolContext(mtfLiquidity?.nearestSSL)}
 - Recent Sweep: ${mtfLiquidity?.recentSweep ? `${mtfLiquidity.recentSweep.type} dengan ${mtfLiquidity.recentSweep.wickRejectionPercent}% wick absorption. Invalidation: $${mtfLiquidity.recentSweep.invalidationPrice}` : "Belum ada sweep terbaru"}
 
-Analisa On-Chain (Smart Money & Whale Dynamics):
-- Netflow Bursa 24 Jam: ${onChainMetrics?.exchangeNetflow24hUSD != null ? (onChainMetrics.exchangeNetflow24hUSD > 0 ? `+$${onChainMetrics.exchangeNetflow24hUSD}M (Net Inflow / Potensi Jual)` : `-$${Math.abs(onChainMetrics.exchangeNetflow24hUSD)}M (Net Outflow / Akumulasi Whale ke Cold Storage)`) : "No data"}
-- Status Netflow: ${onChainMetrics?.netflowStatus || "No data"}
-- Smart Money Bias: ${onChainMetrics?.smartMoneyBias || "No data"} (Confidence: ${onChainMetrics?.onChainConfidence != null ? `${onChainMetrics.onChainConfidence}%` : "No data"})
-- MVRV Z-Score: ${onChainMetrics?.mvrvZScore != null ? `${onChainMetrics.mvrvZScore} (${onChainMetrics.mvrvTerritory || "unknown"})` : "No data"}
-- SOPR: ${onChainMetrics?.sopr != null ? `${onChainMetrics.sopr} (${onChainMetrics.soprStatus || "unknown"})` : "No data"}
-- Whale Alerts: ${onChainMetrics?.whaleAlerts?.[0] ? `${onChainMetrics.whaleAlerts[0].type} $${(onChainMetrics.whaleAlerts[0].usdValue / 1e6).toFixed(1)}M (${onChainMetrics.whaleAlerts[0].from} -> ${onChainMetrics.whaleAlerts[0].to})` : "No whale alert data"}
+${onChainDecisionContext(onChainMetrics)}
 
 Kalender Makroekonomi (Macro Knowledge & Catalysts):
 - Sikap Moneter The Fed: ${macroCalendar?.fedPolicyStance || "No data"}
@@ -85,9 +80,9 @@ Kalender Makroekonomi (Macro Knowledge & Catalysts):
 - Panduan Risiko Makro: ${macroCalendar?.macroTradingAdvice || "No data"}
 
 Indikator Teknikal Pendukung:
-- RSI (14): ${technicals?.rsi ?? 50}
-- EMA (20): $${technicals?.ema20 ?? currentPrice} | EMA (50): $${technicals?.ema50 ?? currentPrice}
-- Order Book Imbalance: ${technicals?.orderBookImbalance?.toFixed(2) ?? "1.0"}
+- RSI (14): ${promptNumber(technicals?.rsi)}
+- EMA (20): ${promptNumber(technicals?.ema20)} | EMA (50): ${promptNumber(technicals?.ema50)}
+- Order Book Imbalance: ${promptNumber(technicals?.orderBookImbalance)}
 
 Portfolio & Risk Context:
 - Total Equity: $${(() => { try { const a = getPaperAccount(); return `${a.equity} (real — cash ${a.cash} + margin ${a.marginLocked} + uPnL ${a.unrealizedPnl})`; } catch { return portfolioEquity != null ? `${portfolioEquity} (client-supplied)` : "equity tidak tersedia"; } })()}
@@ -761,20 +756,8 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
       !!mtfLiquidity,
       mtfLiquidity ? `state=${(mtfLiquidity as any).activeState ?? "?"}` : "GAGAL — struktur likuiditas tak tersedia"
     );
-    // F-01: gate on-chain cek PROVENANCE (realData), bukan sekadar presence.
-    // Tanpa anchor blockchain.com, metrik on-chain = simulasi murni (baseline
-    // + noise di logic/onchain.ts) → ok:false agar otomatis masuk failedSources
-    // dan wajib diakui LLM sama seperti sumber GAGAL lain.
-    const onChainHasRealAnchor = !!((body.onChainMetrics as any)?.realData);
-    pushHealth(
-      "onchain",
-      onChainHasRealAnchor,
-      body.onChainMetrics
-        ? onChainHasRealAnchor
-          ? "client-sent + REAL anchor blockchain.com"
-          : "SIMULASI MURNI (tanpa anchor real) — bukan data real, bobot on-chain harus NOL"
-        : "GAGAL/tidak dikirim — bobot on-chain harus diturunkan"
-    );
+    // Network anchors do not validate synthetic directional analytics.
+    pushHealth("onchain", false, onChainDecisionContext(body.onChainMetrics));
     pushHealth(
       "macro",
       !!body.macroCalendar,
@@ -863,21 +846,9 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
 
     // Echo on-chain/macro dari body FE (LLM sebelumnya hanya dapat 3 field
     // on-chain + 3 field makro — sisanya tak terlihat).
-    const oc: any = body.onChainMetrics;
+    // No verified analytics adapter: do not echo synthetic projections to the UI.
+    const onChainEcho = null;
     const mc: any = body.macroCalendar;
-    const onChainEcho = oc
-      ? {
-          netflowStatus: oc.netflowStatus ?? null,
-          smartMoneyBias: oc.smartMoneyBias ?? null,
-          onChainConfidence: oc.onChainConfidence ?? null,
-          sopr: oc.sopr ?? null,
-          soprStatus: oc.soprStatus ?? null,
-          activeAddressesGrowth24h: oc.activeAddressesGrowth24h ?? null,
-          // F-01: flag provenance agar konsumen (keel-only insight/FE) bisa
-          // bedakan anchor real vs simulasi murni tanpa menebak dari teks.
-          hasRealAnchor: !!oc.realData,
-        }
-      : null;
     const macroEcho = mc
       ? {
           upcomingHighImpactCount: mc.upcomingHighImpactCount ?? null,
@@ -957,14 +928,7 @@ ${(["15m", "1h", "4h"] as const)
 - SSL (Sell Side Liquidity): ${keelSummary.mtfState?.nearestSSL ? "$" + keelSummary.mtfState.nearestSSL.midPrice : "N/A"}
 - Sweep: ${keelSummary.mtfState?.recentSweep ? keelSummary.mtfState.recentSweep.type + " (" + keelSummary.mtfState.recentSweep.wickRejectionPercent + "%)" : "None"}
 
-[ON-CHAIN METRICS]:
-- Netflow: ${oc?.exchangeNetflow24hUSD != null ? oc.exchangeNetflow24hUSD : "N/A"} (${onChainEcho?.netflowStatus || "N/A"})
-- Smart money: ${onChainEcho?.smartMoneyBias || "N/A"} (confidence ${onChainEcho?.onChainConfidence ?? "N/A"}%)
-- MVRV Z-score: ${oc?.mvrvZScore ?? "N/A"} (${oc?.mvrvTerritory || "N/A"})
-- SOPR: ${onChainEcho?.sopr ?? "N/A"} (${onChainEcho?.soprStatus || "N/A"})
-- Active addr growth 24h: ${onChainEcho?.activeAddressesGrowth24h ?? "N/A"}%
-- Whale Move: ${oc?.whaleAlerts?.[0] ? oc.whaleAlerts[0].type + " $" + (oc.whaleAlerts[0].usdValue / 1e6).toFixed(1) + "M" : "None"}
-${oc?.realData ? `- REAL anchor blockchain.com: block ${oc.realData.blockHeight}, tx24h ${oc.realData.txCount24h}, mempool ${oc.realData.mempoolSizeMB}MB, hashrate ${oc.realData.hashrateEH}EH (fetched ${new Date(oc.realData.fetchedAt).toISOString()})` : "- Tanpa anchor real blockchain.com (simulasi murni) — turunkan bobot on-chain dalam sintesis."}
+${onChainDecisionContext(body.onChainMetrics)}
 
 [MACRO CONTEXT]:
 - Fed Stance: ${mc?.fedPolicyStance || "N/A"}
@@ -1133,13 +1097,7 @@ Jawab HANYA JSON valid tanpa markdown:
       futBits.push(`OI ${oi >= 1e9 ? "$" + (oi / 1e9).toFixed(2) + "B" : "$" + (oi / 1e6).toFixed(1) + "M"}`);
     }
     if (futuresDetail?.biasReason) futBits.push(futuresDetail.biasReason);
-    const ocBits: string[] = [];
-    // F-01: insight keel-only TIDAK boleh menyajikan metrik simulasi murni
-    // seolah fakta — beri label eksplisit, atau drop bila tanpa anchor real.
-    if (onChainEcho?.hasRealAnchor) {
-      if (onChainEcho?.smartMoneyBias) ocBits.push(`smart money ${onChainEcho.smartMoneyBias}`);
-      if (onChainEcho?.sopr != null) ocBits.push(`SOPR ${onChainEcho.sopr} (${onChainEcho.soprStatus || "?"})`);
-    }
+    // Same policy for non-LLM fallback: anchors do not validate analytics.
     const mcNote =
       mc && mc.macroRiskIndex > 0
         ? `Makro: ${mc.fedPolicyStance || "?"} risk ${mc.macroRiskIndex}/100.`
@@ -1152,7 +1110,7 @@ Jawab HANYA JSON valid tanpa markdown:
       `${base}` +
       (techBits.length > 0 ? ` Teknikal: ${techBits.join(", ")}.` : "") +
       (futBits.length > 0 ? ` Futures: ${futBits.join("; ")}.` : "") +
-      (ocBits.length > 0 ? ` On-chain: ${ocBits.join(", ")}.` : " On-chain: no-data/simulasi (tanpa anchor real — diabaikan).") +
+      " On-chain: analitik belum terverifikasi (termasuk proyeksi real-anchored) — diabaikan." +
       ` ${mcNote} Eksekusi TETAP keputusan Anda — periksa level SL/TP sebelum bertindak.`;
 
     return res.json({

@@ -44,7 +44,12 @@ export type LiquidityVolumeSource = "ORDERBOOK" | "EST_NODATA";
 /**
  * Identifies Swing Highs & Swing Lows in candle series to map out
  * Buy-Side Liquidity (BSL) and Sell-Side Liquidity (SSL) pools.
+ * MTF-aware: setiap timeframe dihitung independen dari candle serinya sendiri
+ * (bukan proxy TF aktif). Macro timeframe (1h/4h/1D/1W) memakai buffer &
+ * leverage tier yang lebih lebar; intraday (1s/1m/5m/15m) memakai buffer ketat.
  */
+const MACRO_TIMEFRAMES: Timeframe[] = ["1h", "4h", "1D", "1W"];
+
 export function detectLiquidityZones(
   candles: Candle[],
   timeframe: Timeframe,
@@ -54,7 +59,10 @@ export function detectLiquidityZones(
   if (candles.length < 5) return [];
 
   const zones: LiquidityZone[] = [];
-  const lookback = timeframe === "4h" ? 4 : 3;
+  const isMacro = MACRO_TIMEFRAMES.includes(timeframe);
+  const lookback = isMacro ? 4 : 3;
+  const bufferPct = isMacro ? 0.005 : 0.0025;
+  const leverageTiers = isMacro ? "20x - 50x" : "50x - 100x";
 
   // Detect Swing Highs (BSL - Buy-Side Liquidity / Short Liquidation Pools)
   for (let i = lookback; i < candles.length - lookback; i++) {
@@ -70,7 +78,7 @@ export function detectLiquidityZones(
 
     if (isSwingHigh) {
       const priceMin = curr.high;
-      const buffer = timeframe === "4h" ? curr.high * 0.005 : curr.high * 0.0025;
+      const buffer = curr.high * bufferPct;
       const priceMax = curr.high + buffer;
       const midPrice = (priceMin + priceMax) / 2;
       const distancePercent = Number((((midPrice - currentPrice) / currentPrice) * 100).toFixed(2));
@@ -87,7 +95,7 @@ export function detectLiquidityZones(
         priceMax: Number(priceMax.toFixed(2)),
         midPrice: Number(midPrice.toFixed(2)),
         estimatedVolumeUSD,
-        leverageTiers: timeframe === "4h" ? "20x - 50x" : "50x - 100x",
+        leverageTiers,
         status: currentPrice > priceMax ? "FULLY_SWEPT" : "ACTIVE",
         touches: 1,
         distancePercent,
@@ -95,7 +103,7 @@ export function detectLiquidityZones(
     }
 
     if (isSwingLow) {
-      const buffer = timeframe === "4h" ? curr.low * 0.005 : curr.low * 0.0025;
+      const buffer = curr.low * bufferPct;
       const priceMin = curr.low - buffer;
       const priceMax = curr.low;
       const midPrice = (priceMin + priceMax) / 2;
@@ -111,7 +119,7 @@ export function detectLiquidityZones(
         priceMax: Number(priceMax.toFixed(2)),
         midPrice: Number(midPrice.toFixed(2)),
         estimatedVolumeUSD,
-        leverageTiers: timeframe === "4h" ? "20x - 50x" : "50x - 100x",
+        leverageTiers,
         status: currentPrice < priceMin ? "FULLY_SWEPT" : "ACTIVE",
         touches: 1,
         distancePercent,
@@ -125,33 +133,83 @@ export function detectLiquidityZones(
 
 /**
  * Multi-Timeframe (MTF) Liquidity Hunt Evaluator
- * Evaluates 15m (tactical Futures timeframe) against 4h (macro Spot timeframe)
+ * Evaluates likuiditas lintas SEMUA timeframe yang tersedia (1s–1W), bukan
+ * hardcode 15m+4h. Tiap TF menghitung zona independen dari candle serinya
+ * sendiri; nearest BSL/SSL = gabungan seluruh TF (paling dekat dari harga).
+ *
+ * Dua bentuk panggilan:
+ *  - Legacy: analyzeMTFLiquidity(candles15m, candles4h, price, mktType?, book?)
+ *  - Full map: analyzeMTFLiquidity(candlesByTimeframe, price, mktType?, book?)
  */
 export function analyzeMTFLiquidity(
   candles15m: Candle[],
   candles4h: Candle[],
   currentPrice: number,
-  marketType: MarketType = "FUTURES",
-  orderBook: OrderBook = { bids: [], asks: [], spread: 0 }
+  marketType?: MarketType,
+  orderBook?: OrderBook
+): MTFLiquidityAnalysis;
+export function analyzeMTFLiquidity(
+  candlesByTimeframe: Partial<Record<Timeframe, Candle[]>>,
+  currentPrice: number,
+  marketType?: MarketType,
+  orderBook?: OrderBook
+): MTFLiquidityAnalysis;
+export function analyzeMTFLiquidity(
+  a: Candle[] | Partial<Record<Timeframe, Candle[]>>,
+  b: Candle[] | number,
+  c: number | MarketType = "FUTURES",
+  d: MarketType | OrderBook = "FUTURES",
+  e?: OrderBook
 ): MTFLiquidityAnalysis {
-  const zones15m = detectLiquidityZones(candles15m, "15m", currentPrice, orderBook);
-  const zones4h = detectLiquidityZones(candles4h, "4h", currentPrice, orderBook);
+  const candlesByTimeframe: Partial<Record<Timeframe, Candle[]>> = {};
+  let currentPrice: number;
+  let marketType: MarketType = "FUTURES";
+  let orderBook: OrderBook = { bids: [], asks: [], spread: 0 };
 
-  // Active BSL (above price) and SSL (below price)
-  const bslPools = [...zones15m, ...zones4h]
+  if (Array.isArray(a)) {
+    // Legacy: dua array 15m/4h + price + marketType + orderBook
+    candlesByTimeframe["15m"] = a;
+    candlesByTimeframe["4h"] = b as Candle[];
+    currentPrice = c as number;
+    marketType = (d as MarketType) ?? "FUTURES";
+    orderBook = e ?? { bids: [], asks: [], spread: 0 };
+  } else {
+    // Full map: Record<Timeframe, Candle[]> + price + marketType + orderBook
+    Object.assign(candlesByTimeframe, a);
+    currentPrice = b as number;
+    marketType = (c as MarketType) ?? "FUTURES";
+    orderBook = (d as OrderBook) ?? { bids: [], asks: [], spread: 0 };
+  }
+
+  // Zona per-TF: hanya TF yang punya candle ≥5 dihitung (valid), sisanya NO DATA.
+  const zonesByTimeframe: Partial<Record<Timeframe, LiquidityZone[]>> = {};
+  const TF_ORDER: Timeframe[] = ["1s", "1m", "5m", "15m", "1h", "4h", "1D", "1W"];
+  for (const tf of TF_ORDER) {
+    const series = candlesByTimeframe[tf];
+    if (series && series.length >= 5) {
+      zonesByTimeframe[tf] = detectLiquidityZones(series, tf, currentPrice, orderBook);
+    }
+  }
+  const zones15m = zonesByTimeframe["15m"] ?? [];
+  const zones4h = zonesByTimeframe["4h"] ?? [];
+  const allZones = Object.values(zonesByTimeframe).flat();
+
+  // Active BSL (above price) and SSL (below price) across ALL timeframes
+  const bslPools = allZones
     .filter((z) => z.type === "BSL" && z.priceMin >= currentPrice)
-    .sort((a, b) => a.midPrice - b.midPrice);
+    .sort((x, y) => x.midPrice - y.midPrice);
 
-  const sslPools = [...zones15m, ...zones4h]
+  const sslPools = allZones
     .filter((z) => z.type === "SSL" && z.priceMax <= currentPrice)
-    .sort((a, b) => b.midPrice - a.midPrice);
+    .sort((x, y) => y.midPrice - x.midPrice);
 
   const nearestBSL = bslPools[0] || null;
   const nearestSSL = sslPools[0] || null;
 
-  // Detect Recent Sweep in last 3 candles
+  // Detect Recent Sweep in last 3 candles of tactical 15m
   let recentSweep: MTFLiquidityAnalysis["recentSweep"] = null;
-  const recent15m = candles15m.slice(-3);
+  const candles15mLocal = candlesByTimeframe["15m"] || [];
+  const recent15m = candles15mLocal.slice(-3);
 
   for (const c of recent15m) {
     // Check if pierced swing low and closed higher (Bullish SSL Sweep)
@@ -225,15 +283,16 @@ export function analyzeMTFLiquidity(
     };
   }
 
-  // Calculate MTF Confluence Score (0 - 100)
-  // F-13: skor ini KONSTANTA per state (bukan dihitung kontinu dari depth) —
-  // tampilkan apa adanya, jangan dibaca sebagai pengukuran bertingkat presisi.
-  let confluenceScore = 70;
-  let confluenceSummary = "15m & 4H structure building equal liquidity pools.";
+  // -----------------------------------------------------------------------
+  // F4 — Confluence score DIHITUNG dari struktur riil, bukan konstanta per
+  // state (lama: 88/85/78/76 hardcode → prompt AI & UI selalu melihat skor
+  // tinggi palsu). Komponen: sweep (+15), depth sweep TERUKUR dari book (+5),
+  // target aktif (+6), target super dekat ≤0.3% (+6), konfirmasi multi-TF
+  // (+5 per TF yang punya zona, cap +10). Netral = 50. Clamp 0..100.
+  // -----------------------------------------------------------------------
+  let confluenceScore = 50;
+  let confluenceSummary = "Struktur likuiditas lintas timeframe membangun pool seimbang.";
 
-  // Honest volume label: show real depth-derived $M when the order book had
-  // levels near the zone; otherwise say EST/NODATA instead of presenting a
-  // fabricated number as fact.
   const volLabel = (z: LiquidityZone | null): string => {
     if (!z) return "N/A";
     return z.estimatedVolumeUSD > 0
@@ -241,19 +300,28 @@ export function analyzeMTFLiquidity(
       : "EST(no book depth)";
   };
 
+  const activeTfZones = Object.entries(zonesByTimeframe).filter(([, z]) => z && z.length > 0);
+  const coveredTfs = activeTfZones.map(([tf]) => tf).join(",") || "NONE";
+
   if (activeState === "SWEPT_SSL") {
-    confluenceScore = 88;
-    confluenceSummary = `Liquidity Hunt: Long stop-loss pool swept on 15m (${volLabel(recentSweep?.zone ?? null)}) with absorption wick. Macro 4H bias remains bullish.`;
+    confluenceSummary = `Liquidity Hunt: Long stop-loss pool swept pada 15m (${volLabel(recentSweep?.zone ?? null)}) dengan absorption wick. Bias macro (${coveredTfs}) tetap bullish.`;
   } else if (activeState === "SWEPT_BSL") {
-    confluenceScore = 85;
-    confluenceSummary = `Liquidity Hunt: Short stop-loss pool swept on 15m (${volLabel(recentSweep?.zone ?? null)}) with rejection. Target lower 4H SSL pool.`;
+    confluenceSummary = `Liquidity Hunt: Short stop-loss pool swept pada 15m (${volLabel(recentSweep?.zone ?? null)}) dengan rejection. Target SSL pool terdekat di TF lain.`;
   } else if (activeState === "HUNTING_BSL") {
-    confluenceScore = 78;
-    confluenceSummary = `Magnet effect towards 15m/4H BSL liquidation pool at $${nearestBSL?.midPrice} (${volLabel(nearestBSL)} depth).`;
+    confluenceSummary = `Magnet effect menuju BSL pool ${nearestBSL?.timeframe} di $${nearestBSL?.midPrice} (${volLabel(nearestBSL)} depth).`;
   } else if (activeState === "HUNTING_SSL") {
-    confluenceScore = 76;
-    confluenceSummary = `Downward liquidity hunt toward major SSL pool at $${nearestSSL?.midPrice} (${volLabel(nearestSSL)} depth).`;
+    confluenceSummary = `Liquidity hunt turun menuju SSL pool ${nearestSSL?.timeframe} di $${nearestSSL?.midPrice} (${volLabel(nearestSSL)} depth).`;
   }
+
+  let score = 50;
+  if (recentSweep) score += 15;
+  if (recentSweep?.zone && recentSweep.zone.estimatedVolumeUSD > 0) score += 5;
+  if (huntingTarget) score += 6;
+  if (huntingTarget && huntingTarget.potentialPnlPercent != null && Math.abs(huntingTarget.potentialPnlPercent) <= 0.3) {
+    score += 6;
+  }
+  score += Math.min(10, activeTfZones.length * 5);
+  confluenceScore = Math.max(0, Math.min(100, Math.round(score)));
 
   return {
     marketType,
@@ -265,6 +333,7 @@ export function analyzeMTFLiquidity(
     recentSweep,
     zones15m,
     zones4h,
+    zonesByTimeframe,
     confluenceScore,
     confluenceSummary,
     huntingTarget,

@@ -10,10 +10,22 @@ import { timeService } from '../time-sync.js';
 import { closePosition as executorClosePosition } from '../execution/executor.js';
 import { audit } from '../audit/audit-service.js';
 
+/**
+ * P-C: time-stop intraday untuk posisi non-SWING.
+ *
+ * Sebelumnya: maxHoldMs = 0 untuk non-swing → posisi 15m/manual boleh hidup
+ * selamanya (hanya keluar via bracket/manual) — tidak koheren dengan thesis
+ * liquidity hunt yang mati dalam hitungan jam. Sekarang: posisi non-swing
+ * kena time exit 24 jam (96 bar 15m) sebagai batas kewarasan; SWING tetap
+ * 3 hari. Di bawah: maxHoldMs > 0 untuk semua strategi + reason TIMEOUT
+ * yang benar (sebelumnya reason dicatat 'TAKE_PROFIT' — F-6).
+ */
+export const NON_SWING_MAX_HOLD_MS = 24 * 60 * 60_000;
+
 export interface ExitSignal {
   positionId: string;
   symbol: string;
-  reason: 'STOP_LOSS' | 'TAKE_PROFIT' | 'TRAILING_STOP';
+  reason: 'STOP_LOSS' | 'TAKE_PROFIT' | 'TRAILING_STOP' | 'TIMEOUT';
   price: number;
   sl: number;
   tp: number;
@@ -114,7 +126,7 @@ export async function runExitMonitor(_tx?: QueryTx): Promise<ExitMonitorResult> 
   }
   const strat = (globalThis as unknown as { __keelStrategy?: string }).__keelStrategy;
   const isSwing = strat === 'SWING';
-  const maxHoldMs = isSwing ? 3 * 24 * 60 * 60_000 : 0;
+  const maxHoldMs = isSwing ? 3 * 24 * 60 * 60_000 : NON_SWING_MAX_HOLD_MS;
 
   for (const position of open) {
     try {
@@ -204,11 +216,11 @@ export async function runExitMonitor(_tx?: QueryTx): Promise<ExitMonitorResult> 
           }
         }
       }
-      if (!hit && isSwing && maxHoldMs > 0) {
+      if (!hit && maxHoldMs > 0) {
         const ageMs = position.createdAt ? timeService.now() - position.createdAt : 0;
         if (ageMs >= maxHoldMs) {
           await executorClosePosition(position.id, 'TIMEOUT', mid);
-          closed.push({ positionId: position.id, symbol: position.symbol, reason: 'TAKE_PROFIT', price: mid, sl: effCurSl, tp: effTp });
+          closed.push({ positionId: position.id, symbol: position.symbol, reason: 'TIMEOUT', price: mid, sl: effCurSl, tp: effTp });
           peakMidByPos.delete(position.id);
           breakevenArmedByPos.delete(position.id);
           continue;

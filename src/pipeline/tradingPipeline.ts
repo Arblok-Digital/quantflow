@@ -21,6 +21,9 @@ import { sha256Hex } from "../utils/crypto";
 
 // F-13: ledger client (hash-chain ini) hanya untuk tampilan real-time;
 // server /api/ledger (HMAC sinkron dengan appendAudit di db.ts) adalah sumber otoritatif.
+// LEGACY PATH: hook useTradingPipeline sudah server-driven (POST /api/pipeline/cycle).
+// Fungsi ini dipertahankan untuk kompatibilitas (manual trigger / tooling) —
+// decisionId diteruskan dari input agar trace tetap utuh (F-08/P1).
 let warnedClientLedgerDisplayOnly = false;
 
 export interface PipelineCycleInput {
@@ -100,6 +103,8 @@ export async function runTradingPipelineCycle(
     symbol: input.symbol,
     currentPrice: input.currentPrice,
     candles: input.timeframe === "4h" ? input.candles4h : input.candles15m,
+    candles15m: input.candles15m,
+    candles4h: input.candles4h,
     technicals: input.technicals,
     mtfLiquidity,
     onChainMetrics: input.onChainMetrics,
@@ -250,6 +255,8 @@ export async function runTradingPipelineCycle(
     timeframe: input.timeframe,
     marketType: input.marketType,
     liquidityContext: decision.liquidityHuntAnalysis?.mtfBias,
+    // F-08/P1: decision trace end-to-end (decision → order → position → audit).
+    decisionId: input.decisionId,
   };
 
   return {

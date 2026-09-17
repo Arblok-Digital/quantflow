@@ -8,6 +8,7 @@ import {
   newId,
   dbSavePosition,
   dbSaveOrder,
+  dbSavePositionTolerant,
   persistSnapshot,
 } from "./store";
 import { freshMarkFromCache } from "./markCache";
@@ -15,6 +16,7 @@ import { MAINTENANCE_MARGIN_RATE, ERROR_LOG_THROTTLE_MS, TAKER_FEE_RATE, MAKER_F
 import { PaperSide, PaperPosition, ExitReason } from "./types";
 import { appendAudit, beginTx, commitTx, rollbackTx } from "../../db";
 import { closePaperPosition, liquidationPrice } from "./fill";
+import { evaluatePositionExits } from "./exitEngine";
 
 function roundTo(n: number, digits: number): number {
   const f = Math.pow(10, digits);
@@ -121,7 +123,26 @@ export async function runBracketMonitorPass(): Promise<void> {
     const pendingLimits = state.orders.filter((o) => o.status === "NEW" && o.type === "limit" && o.limitPrice && o.limitPrice > 0);
     if (open.length === 0 && pendingLimits.length === 0) return;
 
-    const symbols = [...new Set([...open.map((p) => p.symbol), ...pendingLimits.map((o) => o.symbol)])];
+    // Evaluate deadlines BEFORE price fetching; a failed mark must not hide expiry.
+    const expired = new Set<string>();
+    for (const pos of open) {
+      const ev = evaluatePositionExits(pos, { mark: 0, high1m: 0, low1m: 0, now: Date.now() });
+      if (ev.fullCloseReason !== "TIMEOUT" || !pos.exitPlan) continue;
+      expired.add(pos.id);
+      const attemptedAt = Date.now();
+      try {
+        const result = await closePaperPosition(pos.id, "TIMEOUT");
+        pos.exitPlan.state.deadlineAttempt = { status: result.partial ? "PARTIAL" : "CLOSED", attemptedAt };
+        appendEvent("EXIT_ENGINE_ACTION", { positionId: pos.id, action: "DEADLINE_RESULT", ...pos.exitPlan.state.deadlineAttempt, remainingQty: result.remainingQty ?? 0 });
+      } catch (err) {
+        const message = (err as Error).message;
+        pos.exitPlan.state.deadlineAttempt = { status: "FAILED", attemptedAt, message };
+        appendEvent("ERROR", { positionId: pos.id, source: "deadline-close", message });
+      }
+      // Failure remains OPEN and will be retried on the next server pass.
+      dbSavePositionTolerant(pos);
+    }
+    const symbols = [...new Set([...open.filter(p => !expired.has(p.id)).map((p) => p.symbol), ...pendingLimits.map((o) => o.symbol)])];
     const results = await Promise.all(symbols.map(async (symbol) => ({ symbol, ...(await fetchMarkTicker(symbol)) })));
     const marks = new Map(results.map((result) => [result.symbol, result]));
 
@@ -129,6 +150,7 @@ export async function runBracketMonitorPass(): Promise<void> {
 
     let persisted = false;
     for (const pos of open) {
+      if (expired.has(pos.id) || pos.status !== "OPEN") continue;
       const entry = marks.get(pos.symbol);
       if (!entry || !entry.ok) {
         logThrottledError(pos.symbol, entry?.error || "unknown");
@@ -140,6 +162,63 @@ export async function runBracketMonitorPass(): Promise<void> {
 
       const rangeHigh = Number.isFinite(entry.high1m) && entry.high1m > 0 ? entry.high1m : entry.mark;
       const rangeLow = Number.isFinite(entry.low1m) && entry.low1m > 0 ? entry.low1m : entry.mark;
+
+      // -----------------------------------------------------------------
+      // F3 — Exit engine (opt-in): BE otomatis / trailing / partial TP /
+      // time-stop dievaluasi SEBELUM cek bracket statis. Tanpa exitPlan =
+      // tidak ada perubahan perilaku (posisi lama aman).
+      // -----------------------------------------------------------------
+      if (pos.exitPlan) {
+        try {
+          const ev = evaluatePositionExits(pos, {
+            mark: entry.mark,
+            high1m: rangeHigh,
+            low1m: rangeLow,
+            now: Date.now(),
+          });
+          if (ev.statePatch) {
+            pos.exitPlan = { config: pos.exitPlan.config, state: { ...pos.exitPlan.state, ...ev.statePatch } };
+          }
+          if (ev.newStopLoss !== undefined) {
+            const oldSl = pos.stopLoss;
+            pos.stopLoss = roundTo(ev.newStopLoss, 6);
+            dbSavePositionTolerant(pos);
+            appendEvent("EXIT_ENGINE_ACTION", {
+              positionId: pos.id,
+              symbol: pos.symbol,
+              action: "SL_TIGHTENED",
+              oldSl,
+              newSl: pos.stopLoss,
+              notes: ev.notes,
+            });
+          }
+          if (ev.partialCloseQty != null && ev.partialCloseQty > 0) {
+            appendEvent("EXIT_ENGINE_ACTION", {
+              positionId: pos.id,
+              symbol: pos.symbol,
+              action: "PARTIAL_TP",
+              qty: ev.partialCloseQty,
+              notes: ev.notes,
+            });
+            await closePaperPosition(pos.id, ev.partialReason || "PARTIAL_TAKE_PROFIT", ev.partialCloseQty);
+            continue; // posisi berubah (qty) — bracket statis dievaluasi pass berikutnya
+          }
+          if (ev.fullCloseReason) {
+            appendEvent("EXIT_ENGINE_ACTION", {
+              positionId: pos.id,
+              symbol: pos.symbol,
+              action: "FULL_CLOSE",
+              reason: ev.fullCloseReason,
+              notes: ev.notes,
+            });
+            await closePaperPosition(pos.id, ev.fullCloseReason);
+            continue;
+          }
+        } catch (err) {
+          console.warn(`[paperBook] Exit engine gagal untuk ${pos.id}: ${(err as Error).message}`);
+          appendEvent("ERROR", { positionId: pos.id, symbol: pos.symbol, message: (err as Error).message, source: "exit-engine" });
+        }
+      }
       // SPOT: tanpa liquidation (aset beneran). liq_price 0 dari fill.ts juga
       // sudah membuat hitLiq false, tapi cek marketType eksplisit agar tahan
       // terhadap posisi lama/korup yang liq_price-nya tidak nol.
@@ -230,7 +309,7 @@ export async function fillPendingLimitOrders(
     // fail-closed di titik fill, bukan cuma di openPaperPosition.
     const limitMarketType = String(order.meta?.marketType || "FUTURES").toUpperCase();
     if (limitMarketType === "SPOT" && order.side === "sell") {
-      cancelPaperOrder(order.id);
+      await cancelPaperOrder(order.id);
       appendEvent("ORDER_REJECTED", {
         orderId: order.id,
         symbol: order.symbol,
@@ -253,7 +332,7 @@ export async function fillPendingLimitOrders(
     void TAKER_FEE_RATE;
 
     if (dup) {
-      cancelPaperOrder(order.id);
+      await cancelPaperOrder(order.id);
       changed = true;
       continue;
     }

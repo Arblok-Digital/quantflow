@@ -17,12 +17,15 @@ export function savePositionDb(row: {
   realized_pnl_usd: number | null;
   fees_usd: number | null;
   entry_source?: string;
+  decision_id?: string | null;
+  /** F3: JSON { config, state } exit plan — NULL = statis murni (opt-in). */
+  exit_config?: string | null;
 }): void {
   const _db = getDb();
   _db.prepare(
     `INSERT OR REPLACE INTO positions
-     (id, symbol, side, entry_price, amount, leverage, stop_loss, take_profit, liq_price, status, opened_at, closed_at, close_price, realized_pnl_usd, fees_usd, entry_source)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, symbol, side, entry_price, amount, leverage, stop_loss, take_profit, liq_price, status, opened_at, closed_at, close_price, realized_pnl_usd, fees_usd, entry_source, decision_id, exit_config)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.symbol,
@@ -39,7 +42,9 @@ export function savePositionDb(row: {
     row.close_price,
     row.realized_pnl_usd,
     row.fees_usd,
-    row.entry_source || "MANUAL"
+    row.entry_source || "MANUAL",
+    row.decision_id ?? null,
+    row.exit_config ?? null
   );
 }
 
@@ -59,12 +64,13 @@ export function saveOrderDb(row: {
   created_at: number;
   closed_at: number | null;
   realized_pnl_usd: number | null;
+  decision_id?: string | null;
 }): void {
   const _db = getDb();
   _db.prepare(
     `INSERT OR REPLACE INTO orders
-     (id, symbol, side, type, status, amount, price, stop_loss, take_profit, leverage, slippage_bps, mode, created_at, closed_at, realized_pnl_usd)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, symbol, side, type, status, amount, price, stop_loss, take_profit, leverage, slippage_bps, mode, created_at, closed_at, realized_pnl_usd, decision_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.symbol,
@@ -80,7 +86,8 @@ export function saveOrderDb(row: {
     row.mode,
     row.created_at,
     row.closed_at,
-    row.realized_pnl_usd
+    row.realized_pnl_usd,
+    row.decision_id ?? null
   );
 }
 
@@ -91,16 +98,22 @@ export function saveFillDb(row: { id: string; order_id: string; symbol: string; 
   ).run(row.id, row.order_id, row.symbol, row.side, row.price, row.amount, row.fee_usd, row.created_at);
 }
 
-export function saveSnapshotDb(row: { ts: number; cash: number; margin_used: number; equity: number; unrealized_pnl: number }): void {
+export function saveSnapshotDb(row: { ts: number; cash: number; margin_used: number; equity: number; unrealized_pnl: number; writer_id?: string }): void {
   const _db = getDb();
+  const writer = typeof row.writer_id === "string" ? row.writer_id : "";
   // ts is PRIMARY KEY; if collision (same ms), bump by 1 until free
   let ts = Math.floor(row.ts);
   for (let i = 0; i < 5; i++) {
     try {
-      _db.prepare("INSERT INTO portfolio_snapshots (ts, cash, margin_used, equity, unrealized_pnl) VALUES (?, ?, ?, ?, ?)").run(ts, row.cash, row.margin_used, row.equity, row.unrealized_pnl);
+      _db.prepare("INSERT INTO portfolio_snapshots (ts, cash, margin_used, equity, unrealized_pnl, writer_id) VALUES (?, ?, ?, ?, ?, ?)").run(ts, row.cash, row.margin_used, row.equity, row.unrealized_pnl, writer);
       return;
     } catch (e: any) {
       const msg = String(e?.message || "");
+      // DB lama tanpa kolom writer_id (pre-F5): fallback tanpa kolom.
+      if (/no such column:\s*writer_id/i.test(msg)) {
+        _db.prepare("INSERT INTO portfolio_snapshots (ts, cash, margin_used, equity, unrealized_pnl) VALUES (?, ?, ?, ?, ?)").run(ts, row.cash, row.margin_used, row.equity, row.unrealized_pnl);
+        return;
+      }
       if (msg.includes("UNIQUE") || msg.includes("PRIMARY")) {
         ts += 1;
         continue;
@@ -109,7 +122,15 @@ export function saveSnapshotDb(row: { ts: number; cash: number; margin_used: num
     }
   }
   // fallback: replace
-  _db.prepare("INSERT OR REPLACE INTO portfolio_snapshots (ts, cash, margin_used, equity, unrealized_pnl) VALUES (?, ?, ?, ?, ?)").run(ts, row.cash, row.margin_used, row.equity, row.unrealized_pnl);
+  try {
+    _db.prepare("INSERT OR REPLACE INTO portfolio_snapshots (ts, cash, margin_used, equity, unrealized_pnl, writer_id) VALUES (?, ?, ?, ?, ?, ?)").run(ts, row.cash, row.margin_used, row.equity, row.unrealized_pnl, writer);
+  } catch (e: any) {
+    if (/no such column:\s*writer_id/i.test(String(e?.message || ""))) {
+      _db.prepare("INSERT OR REPLACE INTO portfolio_snapshots (ts, cash, margin_used, equity, unrealized_pnl) VALUES (?, ?, ?, ?, ?)").run(ts, row.cash, row.margin_used, row.equity, row.unrealized_pnl);
+      return;
+    }
+    throw e;
+  }
 }
 
 export function saveAgentDecisionDb(row: {
