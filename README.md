@@ -1,3 +1,8 @@
+> **Status aktif: baca [TODO.md](./TODO.md) dan [AGENTS.md](./AGENTS.md) terlebih dahulu.**
+> Paper belum terverifikasi menyeluruh; live belum disetujui. Deskripsi fitur di bawah bukan sertifikat kesiapan.
+> Riwayat dan keterbatasan pengujian: [AUDIT_2026-09-17.md](./AUDIT_2026-09-17.md).
+
+
 # ⚡ QuantFlow — AI Trading Terminal
 
 > Full-stack trading terminal dengan **paper-trading engine yang realistis**, **backtest deterministik**, quant engine institusional, dan **live execution yang dijaga berlapis** — dibangun end-to-end oleh satu developer.
@@ -5,7 +10,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![Node](https://img.shields.io/badge/Node-24-339933?logo=node.js&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-76%2F76_passing-22c55e)
+**Test terakhir (17 Sep 2026):** 178/178 lulus di sandbox (lint + build exit 0); cakupan dan celah tetap lihat TODO.
 
 **Screenshots:** *(tambahkan GIF dashboard di sini — replay mode, order ticket, guardrails cockpit)*
 
@@ -73,7 +78,7 @@ npm run build && npm start
 
 ```bash
 npx tsc --noEmit        # type-safe, zero errors
-npx vitest run          # 76/76 tests (unit + integration)
+npx vitest run          # jalankan di sandbox; jumlah/hasil terbaru lihat TODO
 npm run test:smoke      # end-to-end API smoke test
 ```
 
@@ -114,10 +119,9 @@ Mode adalah **server-truth** — FE hanya reader, tidak pernah menghitung ekseku
 
 ## 🗺️ Roadmap
 
-- ✅ Paper engine, replay/backtest + training export, audit chain, FE terminal upgrade
-- 🔜 Exchange-native TP/SL untuk live (stopMarket/takeProfitMarket), WebSocket user stream, reconciliation otomatis, backtest matrix paralel
+Urutan: **konsistensi accounting paper → realisme/data real-only → acceptance E2E → validasi strategi → validasi live terpisah**.
 
-Lihat [PRODUCTION_ROADMAP.md](./PRODUCTION_ROADMAP.md) & [IMPLEMENTATION.md](./IMPLEMENTATION.md) untuk detail teknis lengkap.
+Daftar tugas, acceptance dan progres hanya di [TODO.md](./TODO.md). Agent baca [AGENTS.md](./AGENTS.md). Riwayat bukti di [AUDIT_2026-09-17.md](./AUDIT_2026-09-17.md).
 
 ---
 

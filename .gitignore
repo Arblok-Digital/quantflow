@@ -20,5 +20,14 @@ trading.db
 # OpenCode task artifacts
 .oc-tasks/
 
-# workflow butuh token scope 'workflow' � push manual aja kalau dibutuhkin
+# workflow butuh token scope 'workflow' � push manual aja kalau dibutuhkin
 .github/workflows/
+
+# artifact agent internal (plans, worktrees branch lain) — jangan masuk repo utama
+.kilo/
+
+# design mockup lokal (portfolio opsional) — tidak di-push
+opendesign/
+
+# audit opini auditor — status validasi mengikuti TODO.md
+LOGIC_AUDIT_2026-09-17.md
