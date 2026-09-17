@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { Candle, TechnicalIndicators, OrderBook, MTFLiquidityAnalysis, Timeframe } from "../types";
-import { Layers, BarChart2, Flame, Crosshair, Compass, ChevronDown } from "lucide-react";
+import { BarChart2, Flame, Crosshair, Compass, ChevronDown } from "lucide-react";
 import { calculateEMA, calculateRSI, calculateMACD } from "../logic/indicators";
 
 interface MarketChartProps {
@@ -20,6 +20,13 @@ interface MarketChartProps {
   /** F-02: provenance TF aktif — badge per-TF, bukan status agregat market-feed. */
   activeTfSource?: string;
   activeTfOrigin?: string;
+  /** Compact mini-chart (dashboard exchange): header ringkas + SVG candles +
+   *  hover crosshair + band BSL/SSL TF aktif saja. Matrix 8 TF / indikator /
+   *  orderbook disembunyikan agar tetap ringan. */
+  compact?: boolean;
+  /** Zona likuidasi dari TF yang sedang dipilih (swing high/low series aktif
+   *  + depth orderbook real). Bila null → fallback ke mtfLiquidity global. */
+  tfLiquidity?: { nearestBSL: import("../types").LiquidityZone | null; nearestSSL: import("../types").LiquidityZone | null } | null;
 }
 
 const ALL_TIMEFRAMES: { id: Timeframe; label: string; tag?: string; desc: string }[] = [
@@ -37,7 +44,6 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   candles,
   symbol,
   technicals,
-  orderBook,
   currentPrice,
   mtfLiquidity,
   timeframe,
@@ -48,6 +54,8 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   activeTfCandleCount,
   activeTfSource,
   activeTfOrigin,
+  compact = false,
+  tfLiquidity = null,
 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
@@ -56,13 +64,65 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   // Matrix TF collapsible — default ringkas (8 tile → 1 baris ringkas).
   const [matrixOpen, setMatrixOpen] = useState(false);
 
+  // Zoom ala TradingView: window candle terlihat, selalu berakhir di candle
+  // terbaru. zoom=1 → semua candle; zoom>1 → makin sedikit & bar makin lebar.
+  const [zoom, setZoom] = useState(1);
+
+  useEffect(() => {
+    setZoom(1);
+    userScrolledRef.current = false;
+  }, [timeframe]);
+
+  // Scroll horizontal ala exchange-pro: SVG punya min-width = panjang riwayat,
+  // container overflow-x-auto memungkinkan pan ke kiri (kandle lama). Auto-pin
+  // ke kanan (kandle terbaru) saat baru mount / zoom berubah, KECUALI pengguna
+  // sudah sengaja scroll manual ke kiri.
+  const chartScrollRef = useRef<HTMLDivElement | null>(null);
+  const userScrolledRef = useRef(false);
+
+  const candleWindow = useMemo(() => {
+    const total = candles.length;
+    if (total === 0) return [] as Candle[];
+    const minV = Math.min(20, total);
+    const count = Math.max(minV, Math.min(total, Math.round(total / zoom)));
+    return candles.slice(total - count);
+  }, [candles, zoom]);
+  const visibleCount = candleWindow.length;
+
+  const applyZoom = useCallback(
+    (factor: number) => {
+      setZoom((z) => {
+        const total = candles.length;
+        if (total === 0) return z;
+        const minV = Math.min(20, total);
+        const maxZ = total / minV;
+        const next = Math.min(maxZ, Math.max(1, z * factor));
+        return Math.round(next * 100) / 100;
+      });
+    },
+    [candles.length]
+  );
+
+  // Wheel zoom dengan preventDefault (React passive wheel di root tidak reliable).
+  const chartSvgRef = useRef<SVGSVGElement | null>(null);
+  useEffect(() => {
+    const el = chartSvgRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      applyZoom(e.deltaY < 0 ? 1.4 : 1 / 1.4);
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [applyZoom, compact]);
+
   // Compute bounds for SVG candlestick chart
   const { minPrice, maxPrice, priceRange, svgCandles } = useMemo(() => {
     if (candles.length === 0) {
       return { minPrice: 0, maxPrice: 100, priceRange: 100, svgCandles: [] };
     }
 
-    const prices = candles.flatMap((c) => [c.low, c.high]);
+    const prices = candleWindow.flatMap((c) => [c.low, c.high]);
     // Also factor in the nearest liquidation pools so they sit comfortably within chart viewport
     if (mtfLiquidity.nearestBSL) prices.push(mtfLiquidity.nearestBSL.midPrice);
     if (mtfLiquidity.nearestSSL) prices.push(mtfLiquidity.nearestSSL.midPrice);
@@ -71,7 +131,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     const max = Math.max(...prices) * 1.0015;
     const range = Math.max(max - min, 1);
 
-    const svgC = candles.map((c, i) => {
+    const svgC = candleWindow.map((c, i) => {
       const x = i * 16 + 10;
       const yHigh = 220 - ((c.high - min) / range) * 200;
       const yLow = 220 - ((c.low - min) / range) * 200;
@@ -91,15 +151,26 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     });
 
     return { minPrice: min, maxPrice: max, priceRange: range, svgCandles: svgC };
-  }, [candles, mtfLiquidity]);
+  }, [candleWindow, mtfLiquidity, tfLiquidity, compact]);
+
+  useEffect(() => {
+    const el = chartScrollRef.current;
+    if (!el) return;
+    const nearRight = el.scrollLeft + el.clientWidth >= el.scrollWidth - 12;
+    if (!userScrolledRef.current || nearRight) {
+      el.scrollLeft = el.scrollWidth;
+    }
+  }, [svgCandles.length, zoom]);
 
   // Compute EMA lines for the chart
   const ema20Y = 220 - ((technicals.ema20 - minPrice) / priceRange) * 200;
   const ema50Y = 220 - ((technicals.ema50 - minPrice) / priceRange) * 200;
 
-  // Compute Liquidity Pool Zone Y coords
-  const nearestBSL = mtfLiquidity.nearestBSL;
-  const nearestSSL = mtfLiquidity.nearestSSL;
+  // Compute Liquidity Pool Zone Y coords — compact memakai zona TF aktif
+  // (prop tfLiquidity), full memakai mtfLiquidity global (gabungan SELURUH TF:
+  // 1s–1W, pool terdekat dari harga mana pun asal TF-nya).
+  const nearestBSL = (compact && tfLiquidity ? tfLiquidity.nearestBSL : null) ?? mtfLiquidity.nearestBSL;
+  const nearestSSL = (compact && tfLiquidity ? tfLiquidity.nearestSSL : null) ?? mtfLiquidity.nearestSSL;
 
   const bslY = nearestBSL ? 220 - ((nearestBSL.midPrice - minPrice) / priceRange) * 200 : -100;
   const sslY = nearestSSL ? 220 - ((nearestSSL.midPrice - minPrice) / priceRange) * 200 : -100;
@@ -114,6 +185,10 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     hoveredIndex !== null && svgCandles[hoveredIndex]
       ? svgCandles[hoveredIndex]
       : svgCandles[svgCandles.length - 1];
+
+  // Rentang waktu terlihat di window zoom (untuk label interval ala TradingView).
+  const visibleFirst = candleWindow[0]?.timestamp;
+  const visibleLast = candleWindow[candleWindow.length - 1]?.timestamp;
 
   const formatTimeLabel = (timestamp: number, tf: Timeframe) => {
     const d = new Date(timestamp);
@@ -265,6 +340,124 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     return { rsiState, rsiCls, macdBull };
   }, [technicals]);
 
+  if (compact) {
+    return (
+      <div className="relative flex flex-col">
+        <div
+          ref={chartScrollRef}
+          onScroll={() => {
+            userScrolledRef.current = true;
+          }}
+          className="w-full overflow-x-auto relative"
+        >
+          <svg
+            ref={chartSvgRef}
+            style={{ minWidth: `${Math.max(680, svgCandles.length * 16 + 40)}px` }}
+            viewBox={`0 0 ${Math.max(680, svgCandles.length * 16 + 40)} 240`}
+            preserveAspectRatio="none"
+            className="w-full h-56 select-none cursor-crosshair bg-zinc-950/70 rounded-xl border border-zinc-800"
+            onMouseMove={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const mouseX = e.clientX - rect.left;
+              const mouseY = e.clientY - rect.top;
+              const svgWidth = rect.width;
+              const totalSvgWidth = Math.max(680, svgCandles.length * 16 + 40);
+              const scale = totalSvgWidth / svgWidth;
+              const actualX = mouseX * scale;
+              const actualY = (mouseY / rect.height) * 240;
+              const candleIdx = Math.min(
+                svgCandles.length - 1,
+                Math.max(0, Math.round((actualX - 10) / 16))
+              );
+              setHoveredIndex(candleIdx);
+              setCrosshairPos({ x: svgCandles[candleIdx]?.x + 5 || actualX, y: actualY });
+            }}
+            onMouseLeave={() => {
+              setHoveredIndex(null);
+              setCrosshairPos(null);
+            }}
+          >
+            {[40, 90, 140, 190].map((y) => (
+              <line key={y} x1="0" y1={y} x2="100%" y2={y} stroke="#27272a" strokeDasharray="3 3" strokeWidth="0.8" />
+            ))}
+            {candles.length > 0 && (
+              <line
+                x1="0"
+                y1={220 - ((currentPrice - minPrice) / priceRange) * 200}
+                x2="100%"
+                y2={220 - ((currentPrice - minPrice) / priceRange) * 200}
+                stroke="#38bdf8"
+                strokeWidth="1"
+                strokeDasharray="2 2"
+                opacity="0.9"
+              />
+            )}
+            {bslY >= 10 && bslY <= 230 && (
+              <g>
+                <rect x="0" y={Math.max(0, bslY - 12)} width="100%" height="20" fill="#f43f5e" fillOpacity="0.08" />
+                <line x1="0" y1={bslY} x2="100%" y2={bslY} stroke="#f43f5e" strokeWidth="1.2" strokeDasharray="5 3" />
+                <text x="98%" y={bslY - 3} textAnchor="end" fill="#fb7185" fontSize="9.5" fontFamily="monospace" fontWeight="bold">
+                  ▲ BSL {nearestBSL?.timeframe ?? timeframe}: ${nearestBSL?.midPrice}
+                </text>
+              </g>
+            )}
+            {sslY >= 10 && sslY <= 230 && (
+              <g>
+                <rect x="0" y={Math.min(220, sslY - 8)} width="100%" height="20" fill="#10b981" fillOpacity="0.08" />
+                <line x1="0" y1={sslY} x2="100%" y2={sslY} stroke="#10b981" strokeWidth="1.2" strokeDasharray="5 3" />
+                <text x="98%" y={sslY + 12} textAnchor="end" fill="#34d399" fontSize="9.5" fontFamily="monospace" fontWeight="bold">
+                  ▼ SSL {nearestSSL?.timeframe ?? timeframe}: ${nearestSSL?.midPrice}
+                </text>
+              </g>
+            )}
+            {svgCandles.map((c, idx) => {
+              const isHovered = hoveredIndex === idx;
+              return (
+                <g key={idx} className="cursor-pointer">
+                  <line x1={c.x + 5} y1={c.yHigh} x2={c.x + 5} y2={c.yLow} stroke={c.isUp ? "#10b981" : "#f43f5e"} strokeWidth={isHovered ? "2" : "1.2"} />
+                  <rect x={c.x} y={c.yTop} width={10} height={c.bodyHeight} fill={c.isUp ? "#10b981" : "#f43f5e"} stroke={isHovered ? "#ffffff" : "none"} strokeWidth={isHovered ? "1" : "0"} rx={1} />
+                </g>
+              );
+            })}
+            {crosshairPos && (
+              <g className="pointer-events-none">
+                <line x1={crosshairPos.x} y1={0} x2={crosshairPos.x} y2={240} stroke="#71717a" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
+                <line x1={0} y1={crosshairPos.y} x2="100%" y2={crosshairPos.y} stroke="#71717a" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
+                <text x="95%" y={Math.max(13, crosshairPos.y + 4)} textAnchor="middle" fill="#f4f4f5" fontSize="9" fontFamily="monospace" fontWeight="bold">
+                  ${(maxPrice - (crosshairPos.y / 200) * priceRange).toFixed(1)}
+                </text>
+              </g>
+            )}
+          </svg>
+        </div>
+
+        {/* Zoom controls — ala TradingView: wheel + tombol −/+ & label interval */}
+        <div className="absolute right-2 bottom-2 z-10 flex items-center gap-1">
+          <span className="hidden sm:inline font-mono text-[9px] text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5">
+            {visibleFirst ? `${formatTimeLabel(visibleFirst, timeframe)} — ${formatTimeLabel(visibleLast ?? visibleFirst, timeframe)}` : "—"}
+          </span>
+          <button
+            onClick={() => applyZoom(1 / 1.4)}
+            title="Zoom out (scroll wheel juga bisa)"
+            className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
+          >
+            −
+          </button>
+          <span className="font-mono text-[9px] font-bold text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5" title="Candle terlihat / total">
+            {visibleCount}
+          </span>
+          <button
+            onClick={() => applyZoom(1.4)}
+            title="Zoom in (scroll wheel juga bisa)"
+            className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
+          >
+            +
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-5 relative overflow-hidden shadow-sm flex flex-col">
       {/* Ambient Bento Dot Grid */}
@@ -403,10 +596,10 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         </div>
       </div>
 
-      {/* Main Grid: Candlestick Chart + Order Book Ladder */}
-      <div className="relative z-10 grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Candlestick & Liquidity Pool Canvas (3 cols) */}
-        <div className="lg:col-span-3 flex flex-col rounded-xl bg-zinc-950 p-3 border border-zinc-800 overflow-hidden relative shadow-inner">
+      {/* Main Grid: Candlestick Chart */}
+      <div className="relative z-10 grid grid-cols-1 gap-4">
+        {/* Candlestick & Liquidity Pool Canvas */}
+        <div className="flex flex-col rounded-xl bg-zinc-950 p-3 border border-zinc-800 overflow-hidden relative shadow-inner">
           
           {/* TOP INTEGRATED TIMEFRAME SELECTOR BAR (Directly inside Chart Column) */}
           <div className="flex flex-wrap items-center justify-between gap-2 bg-zinc-900/95 border border-zinc-800 rounded-xl p-1.5 mb-2.5 z-20">
@@ -472,8 +665,16 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           </div>
 
           {/* SVG Candlestick & Liquidity Overlay Plot */}
-          <div className="w-full overflow-x-auto relative">
+          <div
+              ref={chartScrollRef}
+              onScroll={() => {
+                userScrolledRef.current = true;
+              }}
+              className="w-full overflow-x-auto relative"
+            >
             <svg
+              ref={chartSvgRef}
+              style={{ minWidth: `${Math.max(680, svgCandles.length * 16 + 40)}px` }}
               viewBox={`0 0 ${Math.max(680, svgCandles.length * 16 + 40)} 240`}
               className="w-full h-64 select-none cursor-crosshair bg-zinc-950/70"
               onMouseMove={(e) => {
@@ -712,7 +913,24 @@ export const MarketChart: React.FC<MarketChartProps> = ({
               })}
 
               {/* Interactive Crosshair Overlay */}
-              {crosshairPos && (
+{svgCandles.map((c, idx) => {
+              const timeStep = Math.max(1, Math.ceil(svgCandles.length / 26));
+              if (idx % timeStep !== 0) return null;
+              return (
+                <text
+                  key={`t${idx}`}
+                  x={c.x + 5}
+                  y={232}
+                  textAnchor="middle"
+                  fill="#52525b"
+                  fontSize="9.5"
+                  fontFamily="monospace"
+                >
+                  {formatTimeLabel(c.timestamp, timeframe)}
+                </text>
+              );
+            })}
+            {crosshairPos && (
                 <g className="pointer-events-none">
                   <line
                     x1={crosshairPos.x}
@@ -757,6 +975,29 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                 </g>
               )}
             </svg>
+            {/* Zoom controls — ala TradingView: wheel + tombol −/+ & label interval */}
+            <div className="absolute right-3 bottom-2 z-10 flex items-center gap-1">
+              <span className="hidden sm:inline font-mono text-[9px] text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5">
+                {visibleFirst ? `${formatTimeLabel(visibleFirst, timeframe)} — ${formatTimeLabel(visibleLast ?? visibleFirst, timeframe)}` : "—"}
+              </span>
+              <button
+                onClick={() => applyZoom(1 / 1.4)}
+                title="Zoom out (scroll wheel juga bisa)"
+                className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
+              >
+                −
+              </button>
+              <span className="font-mono text-[9px] font-bold text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5" title="Candle terlihat / total">
+                {visibleCount}
+              </span>
+              <button
+                onClick={() => applyZoom(1.4)}
+                title="Zoom in (scroll wheel juga bisa)"
+                className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
+              >
+                +
+              </button>
+            </div>
           </div>
 
           {/* MULTI-TIMEFRAME (MTF) CONFLUENCE MATRIX RIBBON ("INDIKATOR TF") */}
@@ -857,66 +1098,6 @@ export const MarketChart: React.FC<MarketChartProps> = ({
             </div>
             <div className="text-zinc-400">
               <strong className="text-zinc-100">${currentPrice.toFixed(2)}</strong> | <strong className="text-amber-300">{timeframe}</strong> | Anchor <strong className="text-emerald-400">15m</strong>
-            </div>
-          </div>
-        </div>
-
-        {/* Order Book Depth Ladder (1 col) */}
-        <div className="flex flex-col rounded-xl bg-zinc-950 p-3 border border-zinc-800/80 font-mono text-xs">
-          <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2 mb-2">
-            <span className="text-zinc-400 font-bold flex items-center gap-1">
-              <Layers className="h-3 w-3 text-amber-400" /> ORDER BOOK (L2)
-            </span>
-            <span className="text-[10px] text-zinc-400">SPREAD: ${orderBook.spread}</span>
-          </div>
-
-          {/* Asks (Sells) - top */}
-          <div className="flex flex-col gap-1 mb-1.5">
-            {orderBook.asks.slice(-4).reverse().map((ask, i) => (
-              <div key={i} className="relative flex justify-between px-1 py-0.5 text-[11px]">
-                <div
-                  className="absolute right-0 top-0 bottom-0 bg-rose-500/10 rounded-r"
-                  style={{ width: `${Math.min(100, (ask.total / 15) * 100)}%` }}
-                />
-                <span className="text-rose-400 font-semibold relative z-10">${ask.price.toFixed(2)}</span>
-                <span className="text-zinc-400 relative z-10">{ask.size.toFixed(2)}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Mid Market Price */}
-          <div className="py-1.5 my-0.5 border-y border-zinc-800/80 bg-zinc-900/60 rounded px-2 flex justify-between items-center text-xs font-bold">
-            <span className="text-zinc-400 text-[10px] uppercase">MID PRICE</span>
-            <span className="text-zinc-100">${currentPrice.toFixed(2)}</span>
-          </div>
-
-          {/* Bids (Buys) - bottom */}
-          <div className="flex flex-col gap-1 mt-1.5">
-            {orderBook.bids.slice(0, 4).map((bid, i) => (
-              <div key={i} className="relative flex justify-between px-1 py-0.5 text-[11px]">
-                <div
-                  className="absolute left-0 top-0 bottom-0 bg-emerald-500/10 rounded-l"
-                  style={{ width: `${Math.min(100, (bid.total / 15) * 100)}%` }}
-                />
-                <span className="text-emerald-400 font-semibold relative z-10">${bid.price.toFixed(2)}</span>
-                <span className="text-zinc-400 relative z-10">{bid.size.toFixed(2)}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Depth Imbalance Meter */}
-          <div className="mt-auto pt-3 border-t border-zinc-800/80">
-            <div className="flex justify-between text-[10px] text-zinc-500 mb-1">
-              <span>Bids Ratio</span>
-              <span>Asks Ratio</span>
-            </div>
-            <div className="h-1.5 w-full bg-rose-500/30 rounded-full overflow-hidden flex">
-              <div
-                className="bg-emerald-500 h-full transition-all duration-300"
-                style={{
-                  width: `${Math.max(10, Math.min(90, (technicals.orderBookImbalance / (technicals.orderBookImbalance + 1)) * 100))}%`,
-                }}
-              />
             </div>
           </div>
         </div>

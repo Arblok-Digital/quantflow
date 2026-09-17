@@ -155,10 +155,17 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     );
   }, [feedMode, stream.messageRate]);
 
-  const mtfLiquidity: MTFLiquidityAnalysis = useMemo(
-    () => analyzeMTFLiquidity(candles15m, candles4h, currentPrice, "FUTURES", orderBook),
-    [candles15m, candles4h, currentPrice, orderBook]
-  );
+  // MTF liquidity lintas SEMUA timeframe: candlesByTimeframe yang sudah di-load
+  // (1s–1W) + 15m/4h yang di-update live via feed. TF tanpa candle ≥5 dilabeli
+  // NO DATA oleh analyzer — bukan dilewati diam-diam.
+  const mtfLiquidity: MTFLiquidityAnalysis = useMemo(() => {
+    const allCandles: Partial<Record<Timeframe, Candle[]>> = {
+      ...candlesByTimeframe,
+      "15m": candles15m.length > 0 ? candles15m : candlesByTimeframe["15m"],
+      "4h": candles4h.length > 0 ? candles4h : candlesByTimeframe["4h"],
+    };
+    return analyzeMTFLiquidity(allCandles, currentPrice, "FUTURES", orderBook);
+  }, [candles15m, candles4h, candlesByTimeframe, currentPrice, orderBook]);
 
   // Refs terbarui tiap render -> interval 1s tidak pernah re-subscribe (anti churn).
   const symbolRef = useRef(symbol);
@@ -247,7 +254,7 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
 
   const loadTimeframe = useCallback(async (tf: Timeframe) => {
     try {
-      const result = await fetchKlinesForTimeframe(symbolRef.current, tf, priceRef.current, 50);
+      const result = await fetchKlinesForTimeframe(symbolRef.current, tf, priceRef.current, 300);
       const loadedCandles = result.candles;
       if (loadedCandles && loadedCandles.length > 0) {
         setCandlesByTimeframe((prev) => ({ ...prev, [tf]: loadedCandles }));
@@ -302,6 +309,20 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
   useEffect(() => {
     syncLiveExchangeData();
   }, [symbol, syncLiveExchangeData]);
+
+  // Eager-load semua TF (1m/5m/1h/1D/1W) saat symbol pertama kali maupun ganti,
+  // agar MTF matrix dashboard & confluence browser punya zona likuiditas lintas
+  // timeframe TANPA user harus klik TF satu-satu. 15m/4h sudah terisi feed live
+  // dan 1s dari micro-tick stream — tidak perlu di-load ulang.
+  const eagerLoadedSymbolRef = useRef<string>("");
+  useEffect(() => {
+    if (eagerLoadedSymbolRef.current === symbol) return;
+    eagerLoadedSymbolRef.current = symbol;
+    const eagerTfs: Timeframe[] = ["1m", "5m", "1h", "1D", "1W"];
+    eagerTfs.forEach((tf) => {
+      loadTimeframe(tf);
+    });
+  }, [symbol, loadTimeframe]);
 
   // Re-anchor otomatis ke harga real exchange tiap 20s, agar simulasi tick 1s
   // selalu berjalan dekat dengan basis data real terbaru.
@@ -360,7 +381,7 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
       }
 
       setCurrentPrice(newPrice);
-      setMicroTicks((prev) => [...prev.slice(-119), nextTick]);
+      setMicroTicks((prev) => [...prev.slice(-399), nextTick]);
 
       // Task 5.4: priceDelta TIDAK lagi diskalakan `+ delta * 10`. Nilainya
       // adalah priceChangePercent 24h real dari ticker Binance (set saat

@@ -79,12 +79,17 @@ async function tryBinance(symbol: string): Promise<FetchResult<any>> {
   const rawSymbol = parsed.raw;
   
   try {
-    const [tickerData, klines15mData, klines4hData, depthData] = await Promise.all([
+    // Depth sengaja di luar Promise.all — kalau /depth flaky, jangan
+    // membunuh ticker + klines yang sudah valid.
+    const [tickerData, klines15mData, klines4hData] = await Promise.all([
       fetchWithTimeout(`https://api.binance.com/api/v3/ticker/24hr?symbol=${rawSymbol}`),
-      fetchWithTimeout(`https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=15m&limit=40`),
-      fetchWithTimeout(`https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=4h&limit=40`),
-      fetchWithTimeout(`https://api.binance.com/api/v3/depth?symbol=${rawSymbol}&limit=12`),
+      fetchWithTimeout(`https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=15m&limit=300`),
+      fetchWithTimeout(`https://api.binance.com/api/v3/klines?symbol=${rawSymbol}&interval=4h&limit=300`),
     ]);
+
+    if (!tickerData?.lastPrice || !Array.isArray(klines15mData) || klines15mData.length === 0) {
+      return { data: null, source: "BINANCE_LIVE", error: "No klines/ticker returned" };
+    }
 
     const candles15m = klines15mData.map((k: any) => ({
       timestamp: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]),
@@ -95,19 +100,12 @@ async function tryBinance(symbol: string): Promise<FetchResult<any>> {
       low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
     }));
 
-    let bidAccum = 0;
-    const bids = (depthData.bids || []).map((b: any) => {
-      const price = parseFloat(b[0]); const size = parseFloat(b[1]);
-      bidAccum += size;
-      return { price, size: Number(size.toFixed(4)), total: Number(bidAccum.toFixed(4)) };
-    });
-
-    let askAccum = 0;
-    const asks = (depthData.asks || []).map((a: any) => {
-      const price = parseFloat(a[0]); const size = parseFloat(a[1]);
-      askAccum += size;
-      return { price, size: Number(size.toFixed(4)), total: Number(askAccum.toFixed(4)) };
-    });
+    let orderBook: any = null;
+    try {
+      const depthData = await fetchWithTimeout(`https://api.binance.com/api/v3/depth?symbol=${rawSymbol}&limit=12`);
+      if (Array.isArray(depthData?.bids) && depthData.bids.length > 0) orderBook = buildBook(depthData.bids, depthData.asks);
+    } catch {}
+    if (!orderBook) orderBook = await fetchDepthFallback(symbol);
 
     const currentPrice = parseFloat(tickerData.lastPrice);
 
@@ -122,7 +120,7 @@ async function tryBinance(symbol: string): Promise<FetchResult<any>> {
         },
         candles15m,
         candles4h,
-        orderBook: { bids, asks, spread: bids[0] && asks[0] ? Number((asks[0].price - bids[0].price).toFixed(2)) : 0.5 },
+        orderBook,
       },
       source: "BINANCE_LIVE",
     };
@@ -137,12 +135,17 @@ async function tryBinanceVision(symbol: string): Promise<FetchResult<any>> {
   const rawSymbol = parsed.raw;
   
   try {
-    const [tickerData, klines15mData, klines4hData, depthData] = await Promise.all([
+    // Depth OPSIONAL — /depth pada data-api.binance.vision sering netral/tidak
+    // disajikan; jangan sampai satu endpoint flaky menggagalkan semuanya.
+    const [tickerData, klines15mData, klines4hData] = await Promise.all([
       fetchWithTimeout(`https://data-api.binance.vision/api/v3/ticker/24hr?symbol=${rawSymbol}`),
-      fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${rawSymbol}&interval=15m&limit=40`),
-      fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${rawSymbol}&interval=4h&limit=40`),
-      fetchWithTimeout(`https://data-api.binance.vision/api/v3/depth?symbol=${rawSymbol}&limit=12`),
+      fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${rawSymbol}&interval=15m&limit=300`),
+      fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${rawSymbol}&interval=4h&limit=300`),
     ]);
+
+    if (!tickerData?.lastPrice || !Array.isArray(klines15mData) || klines15mData.length === 0) {
+      return { data: null, source: "BINANCE_VISION", error: "No klines/ticker returned" };
+    }
 
     const candles15m = klines15mData.map((k: any) => ({
       timestamp: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]),
@@ -153,19 +156,12 @@ async function tryBinanceVision(symbol: string): Promise<FetchResult<any>> {
       low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
     }));
 
-    let bidAccum = 0;
-    const bids = (depthData.bids || []).map((b: any) => {
-      const price = parseFloat(b[0]); const size = parseFloat(b[1]);
-      bidAccum += size;
-      return { price, size: Number(size.toFixed(4)), total: Number(bidAccum.toFixed(4)) };
-    });
-
-    let askAccum = 0;
-    const asks = (depthData.asks || []).map((a: any) => {
-      const price = parseFloat(a[0]); const size = parseFloat(a[1]);
-      askAccum += size;
-      return { price, size: Number(size.toFixed(4)), total: Number(askAccum.toFixed(4)) };
-    });
+    let orderBook: any = null;
+    try {
+      const depthData = await fetchWithTimeout(`https://data-api.binance.vision/api/v3/depth?symbol=${rawSymbol}&limit=12`);
+      if (Array.isArray(depthData?.bids) && depthData.bids.length > 0) orderBook = buildBook(depthData.bids, depthData.asks);
+    } catch {}
+    if (!orderBook) orderBook = await fetchDepthFallback(symbol);
 
     const currentPrice = parseFloat(tickerData.lastPrice);
 
@@ -180,7 +176,7 @@ async function tryBinanceVision(symbol: string): Promise<FetchResult<any>> {
         },
         candles15m,
         candles4h,
-        orderBook: { bids, asks, spread: bids[0] && asks[0] ? Number((asks[0].price - bids[0].price).toFixed(2)) : 0.5 },
+        orderBook,
       },
       source: "BINANCE_VISION",
     };
@@ -197,8 +193,8 @@ async function tryGateIO(symbol: string): Promise<FetchResult<any>> {
   try {
     const [tickerRes, klines15mRes, klines4hRes] = await Promise.all([
       fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/tickers?currency_pair=${gateSymbol}`),
-      fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${gateSymbol}&interval=15m&limit=40`),
-      fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${gateSymbol}&interval=4h&limit=40`),
+      fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${gateSymbol}&interval=15m&limit=300`),
+      fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${gateSymbol}&interval=4h&limit=300`),
     ]);
 
     const ticker = tickerRes?.[0];
@@ -217,6 +213,9 @@ async function tryGateIO(symbol: string): Promise<FetchResult<any>> {
         low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
 
+      // Depth best-effort — tidak wajib, tapi kalau tersedia lengkapi.
+      const orderBook = await fetchDepthFallback(symbol);
+
       return {
         data: {
           currentPrice,
@@ -230,6 +229,7 @@ async function tryGateIO(symbol: string): Promise<FetchResult<any>> {
           },
           candles15m,
           candles4h,
+          orderBook,
         },
         source: "GATE_IO",
       };
@@ -248,8 +248,8 @@ async function tryBybit(symbol: string): Promise<FetchResult<any>> {
   try {
     const [tickerRes, kline15mRes, kline4hRes] = await Promise.all([
       fetchWithTimeout(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${rawSymbol}`),
-      fetchWithTimeout(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=15&limit=40`),
-      fetchWithTimeout(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=240&limit=40`),
+      fetchWithTimeout(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=15&limit=300`),
+      fetchWithTimeout(`https://api.bybit.com/v5/market/kline?category=spot&symbol=${rawSymbol}&interval=240&limit=300`),
     ]);
 
     const ticker = tickerRes?.result?.list?.[0];
@@ -268,6 +268,8 @@ async function tryBybit(symbol: string): Promise<FetchResult<any>> {
         low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
       }));
 
+      const orderBook = await fetchDepthFallback(symbol);
+
       return {
         data: {
           currentPrice,
@@ -281,6 +283,7 @@ async function tryBybit(symbol: string): Promise<FetchResult<any>> {
           },
           candles15m,
           candles4h,
+          orderBook,
         },
         source: "BYBIT_FALLBACK",
       };
@@ -295,8 +298,29 @@ async function tryBybit(symbol: string): Promise<FetchResult<any>> {
 async function tryCCXT(symbol: string): Promise<FetchResult<any>> {
   try {
     const exchange = getExchange();
-    const ticker = await exchange.fetchTicker(symbol);
-    
+    const [ticker, c15m, c4h] = await Promise.all([
+      exchange.fetchTicker(symbol),
+      exchange.fetchOHLCV(symbol, "15m", undefined, 300).catch(() => []),
+      exchange.fetchOHLCV(symbol, "4h", undefined, 300).catch(() => []),
+    ]);
+
+    if (!ticker?.last) return { data: null, source: `CCXT:${exchange.id}`, error: "No ticker" };
+
+    const normalizeCandles = (rows: any[]): Candle[] => (rows || []).map((k: any) => ({
+      timestamp: k[0], open: parseFloat(k[1]), high: parseFloat(k[2]),
+      low: parseFloat(k[3]), close: parseFloat(k[4]), volume: parseFloat(k[5]),
+    }));
+    const candles15m = normalizeCandles(c15m);
+    const candles4h = normalizeCandles(c4h);
+
+    let orderBook: any = null;
+    try {
+      const book = await exchange.fetchOrderBook(symbol, 20);
+      if (book && Array.isArray(book.bids) && book.bids.length > 0 && book.asks.length > 0) {
+        orderBook = buildBook(book.bids, book.asks);
+      }
+    } catch {}
+
     return {
       data: {
         currentPrice: ticker.last,
@@ -306,6 +330,9 @@ async function tryCCXT(symbol: string): Promise<FetchResult<any>> {
           priceChangePercent: ticker.percentage,
           volumeUSD: ticker.quoteVolume,
         },
+        candles15m,
+        candles4h,
+        orderBook,
       },
       source: `CCXT:${exchange.id}`,
     };
@@ -344,8 +371,8 @@ function generateSynthetic(symbol: string): FetchResult<any> {
       currentPrice: basePrice,
       // F-09: seluruh bidikan sintetis adalah ESTIMASI, bukan fakta pasar.
       ticker24h: { high: basePrice * 1.02, low: basePrice * 0.98, priceChangePercent: 0, volumeUSD: 50000000, estimated: true },
-      candles15m: candles(40, 0.005),
-      candles4h: candles(40, 0.01),
+      candles15m: candles(300, 0.005),
+      candles4h: candles(300, 0.01),
     },
     source: "SIMULATED",
     error: "All live sources unavailable; using synthetic data.",
@@ -424,6 +451,50 @@ export async function fetchTickerPrice(symbol: string): Promise<{ price: number;
   } catch {}
 
   return { price: 64250, source: "SYNTHETIC", ok: false };
+}
+
+/**
+ * Normalize raw exchange order book rows into { price, size, total } ladder.
+ * Rows are [price, amount] tuples (binance/gate/binance-visions/ccxt compatible).
+ */
+function buildBook(bidsRaw: any[], asksRaw: any[]): any {
+  let bidAccum = 0;
+  const bids = (bidsRaw || []).map((b: any) => {
+    const price = parseFloat(b[0]); const size = parseFloat(b[1]);
+    bidAccum += size;
+    return { price, size: Number(size.toFixed(4)), total: Number(bidAccum.toFixed(4)) };
+  });
+  let askAccum = 0;
+  const asks = (asksRaw || []).map((a: any) => {
+    const price = parseFloat(a[0]); const size = parseFloat(a[1]);
+    askAccum += size;
+    return { price, size: Number(size.toFixed(4)), total: Number(askAccum.toFixed(4)) };
+  });
+  return { bids, asks, spread: bids[0] && asks[0] ? Number((asks[0].price - bids[0].price).toFixed(2)) : 0.5 };
+}
+
+/**
+ * Best-effort depth fetch — dips into Gate order_book (data-api.binance.vision
+ * kadang tidak menyediakan /depth), lalu CCXT sebagai lapis akhir.
+ * Depth OPSIONAL: kalau gagal balikin null, jangan membunuh klines/ticker.
+ */
+async function fetchDepthFallback(symbol: string): Promise<any> {
+  try {
+    const parsed = parseMarketSymbol(symbol);
+    const gateSymbol = parsed.base + "_" + parsed.quote;
+    const res = await fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/order_book?currency_pair=${gateSymbol}&limit=20`);
+    if (res && Array.isArray(res.bids) && Array.isArray(res.asks) && res.bids.length > 0 && res.asks.length > 0) {
+      return buildBook(res.bids, res.asks);
+    }
+  } catch {}
+  try {
+    const exchange = getExchange();
+    const book = await exchange.fetchOrderBook(symbol, 20);
+    if (book && Array.isArray(book.bids) && Array.isArray(book.asks) && book.bids.length > 0 && book.asks.length > 0) {
+      return buildBook(book.bids, book.asks);
+    }
+  } catch {}
+  return null;
 }
 
 /**

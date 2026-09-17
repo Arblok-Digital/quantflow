@@ -114,7 +114,35 @@ interface AiAdvisorPanelProps {
   onChainMetrics?: OnChainMetrics | null;
   macroSummary?: MacroSummary | null;
   geminiActive: boolean;
+  /** TF chart aktif — cooldown cache insight diskala per TF (15m < 1h < 4h). */
+  timeframe?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Cache smart per (symbol, TF) — komponen unmount saat tab ditutup (state React
+// hilang), tapi insight terakhir tetap di-ingat agar membuka panel lagi TIDAK
+// menghitung ulang dari nol. Cooldown diskala TF aktif.
+// ---------------------------------------------------------------------------
+const TF_COOLDOWN_MS: Record<string, number> = {
+  "15M": 3 * 60_000,
+  "1H": 15 * 60_000,
+  "4H": 30 * 60_000,
+  "1D": 60 * 60_000,
+};
+
+const cooldownFor = (tf: string): number => {
+  const t = String(tf || "15m").toUpperCase();
+  return TF_COOLDOWN_MS[t] ?? 3 * 60_000;
+};
+
+const cacheKey = (symbol: string, tf: string): string => `${symbol}@${String(tf || "15m").toUpperCase()}`;
+
+interface AdvisorCacheEntry {
+  result: AiAdvisorResponse | null;
+  ts: number;
+}
+
+const advisorCache = new Map<string, AdvisorCacheEntry>();
 
 function biasBadge(bias?: string) {
   const b = String(bias || "NEUTRAL").toUpperCase();
@@ -142,11 +170,14 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
   onChainMetrics,
   macroSummary,
   geminiActive,
+  timeframe = "15m",
 }) => {
   const [result, setResult] = useState<AiAdvisorResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [requestedSymbol, setRequestedSymbol] = useState<string>(symbol);
+  // True saat menampilkan hasil cache segar (dalam cooldown TF) — tanpa auto-request.
+  const [usingCache, setUsingCache] = useState<boolean>(false);
 
   const requestInsight = useCallback(async () => {
     const diagT0 = Date.now();
@@ -165,6 +196,7 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
     setLoading(true);
     setError(null);
     setRequestedSymbol(symbol);
+    setUsingCache(false);
     try {
       const res = await authFetch("/api/ai-advisor", {
         method: "POST",
@@ -204,23 +236,42 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
         });
       } catch {}
       setResult(data as AiAdvisorResponse);
+      advisorCache.set(cacheKey(symbol, timeframe), { result: data as AiAdvisorResponse, ts: Date.now() });
     } catch (e: any) {
       setError(e?.message || "Kesalahan jaringan saat meminta insight.");
     } finally {
       setLoading(false);
     }
-  }, [symbol, currentPrice, onChainMetrics, macroSummary]);
+  }, [symbol, currentPrice, onChainMetrics, macroSummary, timeframe]);
 
-  // Auto-load saat mount & symbol berubah (bukan setiap tick harga).
+  // Auto-load saat mount / symbol / TF berubah. Cache fresh (dalam cooldown TF)
+  // langsung ditampilkan tanpa hit ulang; cache basi ditampilkan dulu lalu
+  // di-refresh di background (tidak blank dari nol).
   useEffect(() => {
-    requestInsight();
+    const k = cacheKey(symbol, timeframe);
+    const cached = advisorCache.get(k);
+    if (cached?.result) {
+      setResult(cached.result);
+      setError(null);
+      setRequestedSymbol(symbol);
+    }
+    if (cached?.result && Date.now() - cached.ts < cooldownFor(timeframe)) {
+      setUsingCache(true);
+      setLoading(false);
+      return;
+    }
+    setUsingCache(false);
+    void requestInsight();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol]);
+  }, [symbol, timeframe]);
 
   const mode = result?.mode ?? "keel";
   const isAi = mode === "ai";
   const keel = result?.keelSummary;
   const ai = result?.ai;
+  // Umur insight (menit) dari timestamp server — buat indikator cache/refresh.
+  const fetchedAgeMin = result?.timestamp ? Math.max(0, Math.floor((Date.now() - Number(result.timestamp)) / 60000)) : null;
+  const cooldownMin = Math.round(cooldownFor(timeframe) / 60000);
   const tech = result?.technicals ?? null;
   const fut = result?.futuresDetail ?? null;
   const multiTf = result?.multiTfTechnicals ?? null;
@@ -276,6 +327,22 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                 {isAi
                   ? "Insight naratif AI — penasihat, bukan eksekutor"
                   : "Tanpa Gemini — insight deterministik dari keel"}
+                {fetchedAgeMin != null && (
+                  <>
+                    {" "}— diperbarui{" "}
+                    {fetchedAgeMin < 1 ? "<1m" : fetchedAgeMin < 60 ? `${fetchedAgeMin}m` : `${Math.floor(fetchedAgeMin / 60)}h ${fetchedAgeMin % 60}m`} lalu
+                  </>
+                )}
+                {usingCache && (
+                  <span className="ml-1 px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 text-[9px] font-bold font-mono align-middle">
+                    cache aktif
+                  </span>
+                )}
+                {loading && result && (
+                  <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] font-bold font-mono align-middle">
+                    refreshing…
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -291,6 +358,11 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
             )}
             {loading ? "Menganalisis..." : "Minta Insight"}
           </button>
+          {!loading && (
+            <span className="hidden sm:inline text-[9px] font-mono text-zinc-600" title="Dalam cooldown, membuka panel memakai cache tanpa hit ulang. Tombol Minta Insight memaksa refresh.">
+              cache {cooldownMin}m / TF {String(timeframe).toUpperCase()}
+            </span>
+          )}
         </div>
 
         {error && (

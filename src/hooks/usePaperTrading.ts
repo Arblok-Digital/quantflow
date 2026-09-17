@@ -4,6 +4,7 @@ import { authFetch, useAuth } from "./useAuth";
 import { useBrokerPositions, ServerPosition } from "./useBrokerPositions";
 import { useLedgerStats, LedgerClosedTrade } from "./useLedgerStats";
 import { derivePortfolio, INITIAL_PAPER_CASH } from "./usePaperPortfolio";
+import { bracketDefaultsForTf } from "../logic/bracketDefaults";
 
 // ---------------------------------------------------------------------------
 // usePaperTrading — reader murni dari BE (roadmap 3.6)
@@ -29,6 +30,22 @@ function isSimPositionId(id?: string): boolean {
 }
 function isServerBackedId(id?: string): boolean {
   return typeof id === "string" && id.startsWith("pos-");
+}
+
+/**
+ * Idempotency key per klik order (F1/P0). Dikirim ke server sebagai
+ * meta.clientOrderId: request ulang dengan id yang sama mengembalikan receipt
+ * yang SAMA — tidak membuka posisi kedua. Guard crypto.randomUUID karena
+ * bundle client bisa jalan di konteks non-secure (HTTP non-localhost).
+ */
+function newClientOrderId(): string {
+  const g = globalThis as unknown as { crypto?: { randomUUID?: () => string } };
+  try {
+    if (typeof g.crypto?.randomUUID === "function") return `cli-${g.crypto.randomUUID()}`;
+  } catch {
+    /* fallback di bawah */
+  }
+  return `cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function mapServerPosition(p: any): Position {
@@ -66,6 +83,8 @@ function mapServerPosition(p: any): Position {
     entryReasoning: p.entryReasoning || p.entry_reasoning || undefined,
     confidence: p.confidence != null ? Number(p.confidence) : undefined,
     liquidationPrice: p.liquidationPrice != null ? Number(p.liquidationPrice) : p.liq_price != null ? Number(p.liq_price) : undefined,
+    // F3: exit plan otomatis dari server (posisi lama = null = statis murni).
+    exitConfig: (p.exitPlan?.config ?? null) as Record<string, unknown> | null,
   };
 }
 
@@ -431,18 +450,21 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
         return null;
       }
       // SL/TP dari panel entry bila valid & urutan harga benar; fallback default
-      // 1.5%/3.5% (selaras default OrderEntryPanel — SL 0.9% lama terlalu sempit
-      // untuk BTC, ATR H4 ~1.5-2%+).
-      const fbSL = isLong ? Number((entryPrice * 0.985).toFixed(2)) : Number((entryPrice * 1.015).toFixed(2));
-      const fbTP = isLong ? Number((entryPrice * 1.035).toFixed(2)) : Number((entryPrice * 0.965).toFixed(2));
+      // diskala TF entry (bracketDefaultsForTf — selaras OrderEntryPanel).
+      // Anchor bracket = entry eksekusi aktual: LIMIT → limitPrice, MARKET → harga live.
+      const execEntry =
+        orderType === "limit" && limitPrice && isFinite(limitPrice) && limitPrice > 0 ? Number(limitPrice) : entryPrice;
+      const { slPct: fbSlPct, tpPct: fbTpPct } = bracketDefaultsForTf(entryTfRef.current || "15m");
+      const fbSL = isLong ? Number((execEntry * (1 - fbSlPct / 100)).toFixed(2)) : Number((execEntry * (1 + fbSlPct / 100)).toFixed(2));
+      const fbTP = isLong ? Number((execEntry * (1 + fbTpPct / 100)).toFixed(2)) : Number((execEntry * (1 - fbTpPct / 100)).toFixed(2));
       let stopLoss = fbSL;
       let takeProfit = fbTP;
       if (opts?.stopLoss != null && opts?.takeProfit != null && isFinite(opts.stopLoss) && isFinite(opts.takeProfit)) {
         const oSL = Number(opts.stopLoss);
         const oTP = Number(opts.takeProfit);
         const okOrder = isLong
-          ? oSL < entryPrice && entryPrice < oTP
-          : oTP < entryPrice && entryPrice < oSL;
+          ? oSL < execEntry && execEntry < oTP
+          : oTP < execEntry && execEntry < oSL;
         if (okOrder) {
           stopLoss = Number(oSL.toFixed(2));
           takeProfit = Number(oTP.toFixed(2));
@@ -468,14 +490,16 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
             ...(effectiveType === "limit" ? { limitPrice: Number(limitPrice) } : {}),
             meta: {
               reasoning: isLong
-                ? `Simulated LONG via paper book: 15m SSL sweep @ ${(entryPrice * 0.994).toFixed(0)}`
-                : `Simulated SHORT via paper book: 15m BSL sweep @ ${(entryPrice * 1.006).toFixed(0)}`,
+                ? `Simulated LONG manual (${entryTfRef.current || "15m"}) @ ${entryPrice.toFixed(2)}`
+                : `Simulated SHORT manual (${entryTfRef.current || "15m"}) @ ${entryPrice.toFixed(2)}`,
               confidence: 89,
               // TF entry = TF chart yang sedang aktif saat user klik (bukan hardcode 15m).
               timeframe: entryTfRef.current || "15m",
               // Market aktif dari SubBar — BE enforce semantics (SPOT: LONG-only, lev 1).
               marketType: marketTypeRef.current || "FUTURES",
-              targetPool: isLong ? "15m BSL ($21.5M Pool)" : "15m SSL ($19.8M Pool)",
+              targetPool: isLong ? `${entryTfRef.current || "15m"} BSL` : `${entryTfRef.current || "15m"} SSL`,
+              // F1/P0: idempotency key — klik ganda / retry tidak membuka posisi kedua.
+              clientOrderId: newClientOrderId(),
             },
           }),
         });

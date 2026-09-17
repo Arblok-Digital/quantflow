@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { ProbResult, ProbInput, calibratedProb, coldProb } from "../logic/probabilityEngine";
+import { bracketDefaultsForTf } from "../logic/bracketDefaults";
+import type { Timeframe } from "../types";
 import { Percent, Target, Shield, TrendingUp, TrendingDown, Info, Sparkles } from "lucide-react";
 
 interface ProbabilityBadgeProps {
@@ -10,6 +12,8 @@ interface ProbabilityBadgeProps {
   compact?: boolean;
   stopLoss?: number | null;
   takeProfit?: number | null;
+  /** TF konteks (chart aktif) — untuk skala default est bila tak ada level real. */
+  timeframe?: Timeframe;
   /** Posisi aktual terbuka (dipakai untuk TP/SL + side real, bukan default). */
   livePosition?: {
     side: string;
@@ -38,6 +42,7 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
   compact = false,
   stopLoss = null,
   takeProfit = null,
+  timeframe = "15m",
   livePosition = null,
   liveDecision = null,
 }) => {
@@ -78,8 +83,10 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
         : liveDecision?.takeProfit != null && isFinite(liveDecision.takeProfit) && liveDecision.takeProfit > 0
           ? liveDecision.takeProfit
           : null;
+  // Default est diskala TF konteks bila tak ada level real (bracketDefaultsForTf).
+  const estDefaults = bracketDefaultsForTf(timeframe);
   const [result, setResult] = useState<ProbResult | null>(() =>
-    coldProb(resolvedEntry, 0.035, 0.015)
+    coldProb(resolvedEntry, estDefaults.tpPct / 100, estDefaults.slPct / 100)
   );
   const [loading, setLoading] = useState(true);
 
@@ -88,15 +95,16 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
     const run = async () => {
       setLoading(true);
       try {
-        // TP/SL real dari posisi/decision bila ada; fallback default est 3.5/1.5%.
+        // TP/SL real dari posisi/decision bila ada; fallback default est
+        // diskala TF (bracketDefaultsForTf — intraday 1.2/0.8, bukan 3.5/1.5).
         const tpPct =
           resolvedTP != null && resolvedEntry > 0
             ? Math.abs(resolvedTP - resolvedEntry) / resolvedEntry
-            : 0.035;
+            : estDefaults.tpPct / 100;
         const slPctAbs =
           resolvedSL != null && resolvedEntry > 0
             ? Math.abs(resolvedEntry - resolvedSL) / resolvedEntry
-            : 0.015;
+            : estDefaults.slPct / 100;
         const input: ProbInput = {
           flow: resolvedSide === "LONG" ? "BULLISH" : "BEARISH",
           confluenceScore: probInput?.confluenceScore ?? 0.6,
@@ -195,7 +203,7 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
           </div>
           <div className="text-xs font-bold text-emerald-300 mt-0.5">
             ${hasLiveLevels ? Number(resolvedTP).toFixed(2) : isLong ? Math.max(result.tp1, result.tp2 * 0.98).toFixed(2) : Math.min(result.tp1 / 1.5, result.tp2).toFixed(2)}</div>
-          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(resolvedTP)) : "+3.5% default est."}</div>
+          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(resolvedTP)) : `+${estDefaults.tpPct}% default est.`}</div>
         </div>
         <div className="bg-zinc-950/80 rounded-lg p-2 border border-amber-500/20">
           <div className="flex items-center gap-1 text-[9px] text-amber-400 font-bold uppercase">
@@ -210,8 +218,8 @@ export const ProbabilityBadge: React.FC<ProbabilityBadgeProps> = ({
             <Shield className="w-2.5 h-2.5" /> {hasLiveLevels ? `SL (${resolvedSide})` : "SL — default est."}
           </div>
           <div className="text-xs font-bold text-rose-300 mt-0.5">
-            ${hasLiveLevels ? Number(resolvedSL).toFixed(2) : isLong ? result.sl.toFixed(2) : (resolvedEntry * 1.015).toFixed(2)}</div>
-          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(resolvedSL)) : "-1.5% default est."}</div>
+            ${hasLiveLevels ? Number(resolvedSL).toFixed(2) : (resolvedEntry * (1 - estDefaults.slPct / 100)).toFixed(2)}</div>
+          <div className="text-[9px] text-zinc-500">{hasLiveLevels ? pctLabel(Number(resolvedSL)) : `-${estDefaults.slPct}% default est.`}</div>
         </div>
       </div>
 

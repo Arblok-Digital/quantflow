@@ -25,35 +25,35 @@ export const EnvironmentBar: React.FC<EnvironmentBarProps> = ({ liveMode, isLive
 
   if (liveMode === "live" && isLiveArmed) {
     return (
-      <div className="sticky top-0 z-50 bg-rose-600 text-white px-4 py-1.5 text-center text-xs font-mono font-bold tracking-wide">
-        <span className="inline-flex items-center gap-2">
+      <div className="sticky top-0 z-50 bg-rose-600 text-white border-b border-rose-500">
+        <div className="max-w-[1920px] mx-auto px-4 py-1.5 flex items-center gap-2 text-xs font-mono font-bold tracking-wide">
           <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
           LIVE — REAL ORDERS {testnet ? "(TESTNET)" : "MAINNET"}
           {ctxRight}
-        </span>
+        </div>
       </div>
     );
   }
 
   if (liveMode === "live" && !isLiveArmed) {
     return (
-      <div className="sticky top-0 z-50 bg-amber-500 text-zinc-950 px-4 py-1.5 text-center text-xs font-mono font-bold tracking-wide">
-        <span className="inline-flex items-center gap-2">
+      <div className="sticky top-0 z-50 bg-amber-500 text-zinc-950 border-b border-amber-400">
+        <div className="max-w-[1920px] mx-auto px-4 py-1.5 flex items-center gap-2 text-xs font-mono font-bold tracking-wide">
           <span className="w-2 h-2 rounded-full bg-zinc-950" />
           LIVE MODE — BELUM ARMED, order baru ditolak server
           {ctxRight}
-        </span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="sticky top-0 z-50 bg-zinc-800/70 text-zinc-400 px-4 py-1.5 text-center text-xs font-mono tracking-wide border-b border-zinc-800/60 backdrop-blur-sm">
-      <span className="inline-flex items-center gap-2">
+    <div className="sticky top-0 z-50 bg-zinc-800/70 text-zinc-400 border-b border-zinc-800/60 backdrop-blur-sm">
+      <div className="max-w-[1920px] mx-auto px-4 py-1.5 flex items-center gap-2 text-xs font-mono tracking-wide">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
         Paper Trading — no real funds at risk
         {ctxRight}
-      </span>
+      </div>
     </div>
   );
 };

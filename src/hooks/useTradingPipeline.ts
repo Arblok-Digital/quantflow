@@ -15,7 +15,14 @@ import {
   TechnicalIndicators,
   Timeframe,
 } from "../types";
-import { runTradingPipelineCycle } from "../pipeline/tradingPipeline";
+/**
+ * Server-driven pipeline (F-07/P0): seluruh siklus feeder → decision →
+ * risk → broker → ledger dieksekusi di POST /api/pipeline/cycle.
+ * Browser hanya mengumpulkan snapshot market data + merender hasil.
+ * API keys (Gemini) TIDAK pernah menyentuh browser; decisionId di-generate
+ * server-side per cycle dan tertaut end-to-end (F-08/P1).
+ */
+import { authFetch } from "./useAuth";
 
 export interface UseTradingPipelineOptions {
   symbol: string;
@@ -65,9 +72,11 @@ const INITIAL_LATENCY: LatencyBreakdown = {
 };
 
 /**
- * Orchestrator siklus trading pipeline (feeder -> decision -> risk -> broker
- * -> ledger). Semua input volatile disimpan di snapshot ref, jadi
- * `runTradingCycle` stabil dan loop auto-pilot tidak re-subscribe setiap tick.
+ * Orchestrator siklus trading pipeline — thin client atas server endpoint
+ * POST /api/pipeline/cycle (feeder -> decision -> risk -> broker -> ledger
+ * dieksekusi server-side). Semua input volatile disimpan di snapshot ref,
+ * jadi `runTradingCycle` stabil dan loop auto-pilot tidak re-subscribe
+ * setiap tick.
  */
 export function useTradingPipeline(options: UseTradingPipelineOptions) {
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -88,33 +97,49 @@ export function useTradingPipeline(options: UseTradingPipelineOptions) {
     setIsAnalyzing(true);
     isAnalyzingRef.current = true;
     try {
-      const result = await runTradingPipelineCycle({
-        symbol: s.symbol,
-        currentPrice: s.currentPrice,
-        candles15m: s.candles15m,
-        candles4h: s.candles4h,
-        technicals: s.technicals,
-        marketType: s.marketType,
-        timeframe: s.timeframe,
-        portfolio: s.portfolio,
-        activePositions: s.positions,
-        riskConfig: s.riskConfig,
-        lastBlockHash: s.latestBlockHash,
-        onChainMetrics: s.onChainMetrics,
-        macroCalendar: s.macroSummary,
-        orderBook: s.orderBook,
-        recentTrades: s.recentTrades,
-        futures: s.futures,
-        aiEnabled: s.aiEnabled,
+      const res = await authFetch("/api/pipeline/cycle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: s.symbol,
+          currentPrice: s.currentPrice,
+          candles15m: s.candles15m,
+          candles4h: s.candles4h,
+          technicals: s.technicals,
+          marketType: s.marketType,
+          timeframe: s.timeframe,
+          riskConfig: s.riskConfig,
+          lastBlockHash: s.latestBlockHash,
+          onChainMetrics: s.onChainMetrics,
+          macroCalendar: s.macroSummary,
+          orderBook: s.orderBook,
+          recentTrades: s.recentTrades,
+          futures: s.futures,
+          aiEnabled: s.aiEnabled,
+        }),
       });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(
+          `Pipeline cycle gagal: HTTP ${res.status} ${String(errData?.message || errData?.reason || "")}`.trim()
+        );
+      }
+
+      const result = await res.json();
 
       if (result.decision) {
         setLatestDecision(result.decision);
       }
       if (result.auditEntry) {
         s.prependAudit(result.auditEntry);
-        setLastRiskEvaluation(result.auditEntry.riskEvaluation);
-        setLatestLatency(result.auditEntry.latency);
+        setLastRiskEvaluation(result.auditEntry.riskEvaluation ?? result.riskResult ?? null);
+        setLatestLatency(result.auditEntry.latency ?? result.latencyBreakdown ?? INITIAL_LATENCY);
+      } else if (result.riskResult) {
+        setLastRiskEvaluation(result.riskResult);
+      }
+      if (result.latencyBreakdown && !result.auditEntry) {
+        setLatestLatency(result.latencyBreakdown);
       }
       if (result.newPosition) {
         s.onPositionOpened(result.newPosition);

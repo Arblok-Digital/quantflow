@@ -14,13 +14,9 @@ import { ArchitectureModal } from "./components/ArchitectureModal";
 import { KeyVaultModal } from "./components/KeyVaultModal";
 import { BrokerModal } from "./components/BrokerModal";
 import { KeelEnginePanel, KeelAnalysisResult } from "./components/KeelEnginePanel";
-import { AiAdvisorPanel } from "./components/AiAdvisorPanel";
 import { PumpRadarPanel } from "./components/PumpRadarPanel";
 
-import { Realtime1sMLFeed } from "./components/Realtime1sMLFeed";
-import { PaperTradingPanel } from "./components/PaperTradingPanel";
-import { ExecutionConsole } from "./components/ExecutionConsole";
-import { PositionsPanel } from "./components/PositionsPanel";
+import { DashboardExchange } from "./components/DashboardExchange";
 import { ReplayControlPanel } from "./components/ReplayControlPanel";
 import { ReplayRunsPanel } from "./components/ReplayRunsPanel";
 import { ProbabilityBadge } from "./components/ProbabilityBadge";
@@ -42,7 +38,6 @@ import { GuardrailsPanel } from "./components/GuardrailsPanel";
 import { useLiveMode } from "./hooks/useLiveMode";
 import { ModeProvider } from "./hooks/useMode";
 import { ToastProvider } from "./components/ExecutionToasts";
-import { TradeJournalPanel } from "./components/TradeJournalPanel";
 import { AgentDecisionsPanel } from "./components/AgentDecisionsPanel";
 import type { RecentTrade, FuturesMetrics } from "./data/marketFetcher";
 
@@ -61,6 +56,7 @@ export default function App() {
   const [isBrokerOpen, setIsBrokerOpen] = useState<boolean>(false);
   const [keelResult, setKeelResult] = useState<KeelAnalysisResult | null>(null);
   const [keelLoading, setKeelLoading] = useState<boolean>(false);
+  const [keelError, setKeelError] = useState<string | null>(null);
 
   // Keel Context — data order-flow + futures yang di-fetch server-side (endpoint
   // /api/market/keel-context), di-refresh per-menit / saat symbol berubah.
@@ -254,44 +250,94 @@ export default function App() {
 
   const runKeelSignal = useCallback(async () => {
     setKeelLoading(true);
+    setKeelError(null);
     try {
-      const decision = await evaluateTradingDecision({
-        symbol,
-        currentPrice: market.currentPrice,
-        candles: timeframe === "4h" ? market.candles4h : market.candles15m,
-        technicals: market.technicals,
-        mtfLiquidity: market.mtfLiquidity,
-        onChainMetrics,
-        macroCalendar: macroSummary,
-        activePositions: paper.positions,
-        portfolioEquity: paper.portfolio.equity,
-        riskConfig,
-        aiEnabled: geminiActive,
-        orderBook: market.orderBook,
-        recentTrades: keelContext.recentTrades,
-        futures: keelContext.futures,
-      });
-      setKeelResult({
-        action: String(decision.action ?? "HOLD"),
-        confidence: Number(decision.confidence ?? 0),
-        targetPrice: decision.targetPrice != null ? Number(decision.targetPrice) : undefined,
-        stopLoss: decision.stopLoss != null ? Number(decision.stopLoss) : undefined,
-        takeProfit: decision.takeProfit != null ? Number(decision.takeProfit) : undefined,
-        positionSizePercent: decision.positionSizePercent != null ? Number(decision.positionSizePercent) : undefined,
-        reasoning: decision.reasoning ? String(decision.reasoning) : undefined,
-        liquidityHuntAnalysis: decision.liquidityHuntAnalysis || undefined,
-        futuresAnalysis: decision.futuresAnalysis || undefined,
-        source: String(decision.source || "keel-institutional-quant"),
-        inferenceLatencyMs: decision.inferenceLatencyMs ? Number(decision.inferenceLatencyMs) : undefined,
-        promptSummary: `policy=${decision.source ?? "router"} symbol=${symbol} price=${market.currentPrice}`,
-      });
+      const useKeelLocal = !geminiActive;
+      if (!useKeelLocal) {
+        const candles = timeframe === "4h" ? market.candles4h : market.candles15m;
+        if (!candles || candles.length < 5) {
+          throw new Error(`Candle ${timeframe} belum tersedia (${candles?.length ?? 0}) — tunggu fetch / ganti TF.`);
+        }
+        const decision = await evaluateTradingDecision({
+          symbol,
+          currentPrice: market.currentPrice,
+          candles,
+          candles15m: market.candles15m,
+          candles4h: market.candles4h,
+          technicals: market.technicals,
+          mtfLiquidity: market.mtfLiquidity,
+          onChainMetrics,
+          macroCalendar: macroSummary,
+          activePositions: paper.positions,
+          portfolioEquity: paper.portfolio.equity,
+          riskConfig,
+          aiEnabled: true,
+          orderBook: market.orderBook,
+          recentTrades: keelContext.recentTrades,
+          futures: keelContext.futures,
+        });
+        setKeelResult({
+          action: String(decision.action ?? "HOLD"),
+          confidence: Number(decision.confidence ?? 0),
+          targetPrice: decision.targetPrice != null ? Number(decision.targetPrice) : undefined,
+          stopLoss: decision.stopLoss != null ? Number(decision.stopLoss) : undefined,
+          takeProfit: decision.takeProfit != null ? Number(decision.takeProfit) : undefined,
+          positionSizePercent: decision.positionSizePercent != null ? Number(decision.positionSizePercent) : undefined,
+          reasoning: decision.reasoning ? String(decision.reasoning) : undefined,
+          liquidityHuntAnalysis: decision.liquidityHuntAnalysis || undefined,
+          futuresAnalysis: decision.futuresAnalysis || undefined,
+          source: String(decision.source || "keel-institutional-quant"),
+          inferenceLatencyMs: decision.inferenceLatencyMs ? Number(decision.inferenceLatencyMs) : undefined,
+          promptSummary: `policy=${decision.source ?? "router"} symbol=${symbol} price=${market.currentPrice}`,
+        });
+      } else {
+        // Tanpa GEMINI_API_KEY: JANGAN panggil evaluateTradingDecision dengan
+        // aiEnabled=false — itu hanya membuang 1x POST /api/ai-decision yang
+        // pasti 503 + spam console. Langsung hitung keel lokal (sinkron).
+        const { runKeelQuantEngine } = await import("./logic/keelAdapter");
+        const t0 = Date.now();
+        const { decision } = runKeelQuantEngine({
+          symbol,
+          currentPrice: market.currentPrice,
+          candles15m: market.candles15m,
+          candles4h: market.candles4h,
+          technicals: market.technicals,
+          mtfLiquidity: market.mtfLiquidity,
+          orderBook: market.orderBook,
+          recentTrades: keelContext.recentTrades,
+          futures: keelContext.futures,
+        });
+        setKeelResult({
+          action: String(decision.action ?? "HOLD"),
+          confidence: Number(decision.confidence ?? 0),
+          targetPrice: decision.targetPrice != null ? Number(decision.targetPrice) : undefined,
+          stopLoss: decision.stopLoss != null ? Number(decision.stopLoss) : undefined,
+          takeProfit: decision.takeProfit != null ? Number(decision.takeProfit) : undefined,
+          positionSizePercent: decision.positionSizePercent != null ? Number(decision.positionSizePercent) : undefined,
+          reasoning: decision.reasoning ? String(decision.reasoning) : undefined,
+          liquidityHuntAnalysis: {
+            targetPool: decision.liquidityHuntAnalysis?.targetPool,
+            targetZonePrice: decision.liquidityHuntAnalysis?.targetZonePrice,
+            sweepTriggered: decision.liquidityHuntAnalysis?.sweepTriggered,
+            mtfBias: decision.liquidityHuntAnalysis?.mtfBias,
+            confluenceScore: decision.liquidityHuntAnalysis?.confluenceScore,
+            invalidationLevel: decision.liquidityHuntAnalysis?.invalidationLevel,
+          },
+          futuresAnalysis: decision.futuresAnalysis || undefined,
+          source: "keel-institutional-quant",
+          inferenceLatencyMs: Date.now() - t0,
+          promptSummary: `policy=keel-institutional-quant symbol=${symbol} price=${market.currentPrice}`,
+        });
+      }
     } catch (err) {
+      const msg = (err as Error)?.message || "Decision engine gagal.";
       console.error("Decision engine error:", err);
+      setKeelError(msg);
     } finally {
       setKeelLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol, market.currentPrice]);
+  }, [symbol, market.currentPrice, geminiActive]);
 
   // --- Health & Gemini status ---
   useEffect(() => {
@@ -335,7 +381,7 @@ export default function App() {
     const { microTicks, candles15m, candles4h, candlesByTimeframe } = market;
     if (timeframe === "1s") {
       if (microTicks.length >= 8) {
-        return microTicks.slice(-45).map((t) => ({
+        return microTicks.slice(-299).map((t) => ({
           timestamp: t.timestamp,
           open: t.open,
           high: t.high,
@@ -371,7 +417,7 @@ export default function App() {
   // Stabilkan referensi generateCandlesForTimeframe agar tidak unused-import:
   // (dipakai test/unit via logic/indicators, bukan App lagi)
 
-  const floatingPnl = paper.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+  const floatingPnl = paper.positions.reduce((sum, p) => sum + Number(p.unrealizedPnl || 0), 0);
   const openPositionsCount = paper.positions.length;
 
   // Server paper book is the single source of truth: whenever PositionsPanel
@@ -451,70 +497,36 @@ export default function App() {
       />
 
       {/* Main Content — each tab renders its panels exactly once */}
-      <main className="flex-1 p-3 sm:p-5 max-w-7xl w-full mx-auto space-y-4">
-        {/* 📊 DASHBOARD — High-level summary + trading interface */}
+      <main className="flex-1 p-3 sm:p-5 max-w-[1920px] w-full mx-auto space-y-4">
+        {/* 📊 DASHBOARD — layout exchange 3-kolom + bottom tabs */}
         {activeTab === "dashboard" && (
-          <>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
-                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Equity</div>
-                <div className="text-lg font-mono font-bold text-zinc-100">${paper.portfolio.equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-              </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
-                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Open P&L</div>
-                <div className={`text-lg font-mono font-bold ${floatingPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{floatingPnl >= 0 ? "+" : ""}${floatingPnl.toFixed(2)}</div>
-              </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
-                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Positions</div>
-                {/* Server book hanya mengirim posisi OPEN — count = length (status tidak dimapping di reader hook) */}
-                <div className="text-lg font-mono font-bold text-zinc-100">{paper.positions.length}</div>
-              </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
-                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">Win Rate</div>
-                <div className="text-lg font-mono font-bold text-zinc-100">
-                  {paper.portfolio.totalTrades > 0
-                    ? ((paper.portfolio.winCount / paper.portfolio.totalTrades) * 100).toFixed(1)
-                    : "0.0"}
-                  %
-                </div>
-              </div>
-            </div>
-
-            {pipeline.latestDecision && (
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mb-2">Latest AI Signal</div>
-                <div className="flex items-center gap-4">
-                  <span className={`px-2 py-1 rounded text-xs font-mono font-bold ${pipeline.latestDecision.action === "BUY" ? "bg-emerald-500/20 text-emerald-300" : pipeline.latestDecision.action === "SELL" ? "bg-rose-500/20 text-rose-300" : "bg-zinc-800 text-zinc-400"}`}>
-                    {pipeline.latestDecision.action}
-                  </span>
-                  <span className="text-xs font-mono text-zinc-400">{pipeline.latestDecision.reasoning?.slice(0, 120)}...</span>
-                </div>
-              </div>
-            )}
-
-            <ExecutionConsole />
-            <PositionsPanel onServerPositions={handleServerPositions} />
-
-            <PaperTradingPanel
-              portfolio={paper.portfolio}
-              positions={paper.positions}
-              currentPrice={market.currentPrice}
-              symbol={symbol}
-              brokerMode={live.mode}
-              entryTimeframe={timeframe}
-              marketType={marketType}
-              activeCandles={activeDisplayCandles}
-              mtfLiquidity={market.mtfLiquidity}
-              latestDecision={pipeline.latestDecision}
-              onClosePosition={paper.closePosition}
-              onMoveToBreakEven={paper.moveToBreakEven}
-              onResetPaperAccount={paper.resetPaperAccount}
-              onSimulateTradeEntry={paper.simulateTradeEntry}
-              actionableRunKeel={runKeelSignal}
-            />
-
-            <TradeJournalPanel />
-          </>
+          <DashboardExchange
+            symbol={symbol}
+            marketType={marketType}
+            timeframe={timeframe}
+            currentPrice={market.currentPrice}
+            activeCandles={activeDisplayCandles}
+            technicals={market.technicals}
+            orderBook={market.orderBook}
+            mtfLiquidity={market.mtfLiquidity}
+            latestDecision={pipeline.latestDecision}
+            paper={paper}
+            brokerMode={live.mode}
+            onServerPositions={handleServerPositions}
+            actionableRunKeel={runKeelSignal}
+            keelLoading={keelLoading}
+            keelError={keelError}
+            ticks={market.microTicks}
+            feedMode={market.feedMode}
+            messageRate={market.messageRate}
+            exchangeStatus={market.exchangeStatus}
+            onChainMetrics={onChainMetrics}
+            macroSummary={macroSummary}
+            geminiActive={geminiActive}
+            onSelectTimeframe={handleSelectTimeframe}
+            candlesByTimeframe={market.candlesByTimeframe}
+            technicalsByTimeframe={market.technicalsByTimeframe}
+          />
         )}
 
         {/* 📈 ANALYTICS — Full chart + indicators + confluence + order book */}
@@ -560,6 +572,7 @@ export default function App() {
               />
               <ProbabilityBadge
                 currentPrice={market.currentPrice}
+                timeframe={timeframe}
                 probInput={{
                   confluenceScore: market.mtfLiquidity.confluenceScore / 100,
                   absorptionScore: 50,
@@ -621,29 +634,6 @@ export default function App() {
 
             <ReconciliationPanel />
           </>
-        )}
-
-        {/* ⚡ 1s FEED */}
-        {activeTab === "feed" && (
-          <Realtime1sMLFeed
-            ticks={market.microTicks}
-            currentPrice={market.currentPrice}
-            symbol={symbol}
-            exchangeStatus={market.exchangeStatus}
-            feedMode={market.feedMode}
-            messageRate={market.messageRate}
-          />
-        )}
-
-        {/* 🧭 AI ADVISOR — insight naratif (keel+MTF+on-chain+macro); eksekusi tetap manual oleh user */}
-        {activeTab === "advisor" && (
-          <AiAdvisorPanel
-            symbol={symbol}
-            currentPrice={market.currentPrice}
-            onChainMetrics={onChainMetrics}
-            macroSummary={macroSummary}
-            geminiActive={geminiActive}
-          />
         )}
 
         {/* 📡 PUMP RADAR — scanner microcap Gate.io SPOT (alert only, tanpa eksekusi) */}

@@ -395,7 +395,12 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
                             {normalizeSide(pos.side)}
                           </span>
                         </td>
-                        <td className="py-2.5 text-right text-zinc-300">{fmtNum(pos.qty)}</td>
+                        <td className="py-2.5 text-right">
+                          <span className="text-zinc-300">{fmtNum(pos.qty)}</span>
+                          <span className="block text-[10px] text-zinc-500">
+                            ≈ ${fmtMoney(pos.notionalUSD || Number(pos.qty) * Number(pos.entryPrice))}
+                          </span>
+                        </td>
                         <td className="py-2.5 text-right text-zinc-300">${fmtMoney(pos.entryPrice)}</td>
                         <td className="py-2.5 text-right text-zinc-100 font-semibold">
                           ${fmtMoney(pos.lastMark ?? pos.entryPrice)}

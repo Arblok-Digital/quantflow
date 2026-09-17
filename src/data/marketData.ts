@@ -154,7 +154,7 @@ export async function fetchKlinesForTimeframe(
   symbol: string,
   timeframe: Timeframe,
   basePrice: number = 64250,
-  limit: number = 45
+  limit: number = 300
 ): Promise<KlinesResult> {
   const rawSymbol = symbol.replace("/", "").toUpperCase();
 

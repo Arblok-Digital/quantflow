@@ -250,6 +250,12 @@ export const PositionCard: React.FC<PositionCardProps> = ({
           <span className="font-bold text-zinc-300">
             {pos.qty} {pos.symbol.split("/")[0]}
           </span>
+          <span className="block text-[10px] text-zinc-500">
+            ≈ $
+            {(
+              pos.notionalUSD || pos.qty * pos.entryPrice
+            ).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </span>
         </div>
         <div className="p-2 rounded-lg bg-zinc-900/60 border border-zinc-800">
           <span className="text-[10px] text-zinc-500 block uppercase">
@@ -305,10 +311,14 @@ export const PositionCard: React.FC<PositionCardProps> = ({
               </strong>{" "}
               ({distToTPPercent}%)
             </span>
-            {/* EST TP: berapa candle + berapa lama (ATR TF entry). */}
-            <span className="text-[10px] font-mono block mt-0.5" title={eta.atr != null ? `ATR ${pos.timeframe || "15m"} $${eta.atr}/candle × drift 0.5 — ESTIMASI, bukan prediksi` : "Candle TF entry belum tersedia — estimasi tidak bisa dihitung"}>
+            {/* EST TP: berapa candle + berapa lama (ATR + interval dari series yang sama). */}
+            <span className="text-[10px] font-mono block mt-0.5" title={eta.atr != null ? `ATR $${eta.atr}/candle × drift 0.5 (interval aktual ${eta.intervalMs != null ? `${Math.round(eta.intervalMs / 1000)}s` : "?"}) — ESTIMASI, bukan prediksi` : "Candle belum tersedia — estimasi tidak bisa dihitung"}>
               {eta.tpCandles != null ? (
-                <>EST TP: <strong className="text-emerald-300">~{eta.tpCandles} 🕯 {eta.tpDurasi}</strong>{eta.nearer ? <span className="text-zinc-500"> • {eta.nearer} dulu</span> : null}</>
+                eta.tpBeyondHorizon ? (
+                  <><span className="text-amber-300 font-bold">EST TP: di luar horizon TF</span><span className="text-zinc-500"> • setup stale, pertimbangkan BE/close</span></>
+                ) : (
+                  <>EST TP: <strong className="text-emerald-300">~{eta.tpCandles} 🕯 {eta.tpDurasi}</strong>{eta.nearer ? <span className="text-zinc-500"> • {eta.nearer} dulu</span> : null}</>
+                )
               ) : (
                 <span className="text-zinc-600">EST TP: — (no candle)</span>
               )}
