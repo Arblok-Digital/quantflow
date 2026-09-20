@@ -58,7 +58,13 @@ function renderSummary() {
 
 function renderCrawlNote() {
   const note = state.report.crawlInfo;
-  $('crawlNote').innerHTML = `<strong>Metode:</strong> ${note.detecting}<br><strong>Gap:</strong> ${note.gapNote}`;
+  const feeds = state.report.meta.feeds || {};
+  let rpcLine = '';
+  if (feeds.rpc) {
+    const s = feeds.rpcStats && feeds.rpcStats[feeds.rpc];
+    rpcLine = `<br><strong>RPC:</strong> feed ${feeds.rpc}${s ? ` · ok ${s.ok}${s.fail ? ` · <span style="color:var(--avoid)">${s.fail} fail</span>` : ''}` : ''}`;
+  }
+  $('crawlNote').innerHTML = `<strong>Metode:</strong> ${note.detecting}<br><strong>Gap:</strong> ${note.gapNote}${rpcLine}`;
 }
 
 function renderTierFilters() {

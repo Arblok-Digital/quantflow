@@ -7,7 +7,7 @@ import { anomaly } from './anomaly.js';
 import { fetchRugCheck } from './fundamentals.js';
 import { sentimentGap } from './sentiment.js';
 import { scoreCandidates } from './signal.js';
-import { resolveMintMeta, lastFeed } from './lib/rpc.js';
+import { resolveMintMeta, lastFeed, getFeedStats, formatFeedStats } from './lib/rpc.js';
 import { discoverBoosted, IGNORE_MINTS } from './lib/dexscreener.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -84,13 +84,14 @@ async function live({ limit, maxWallets }) {
   }
 
   const scored = scoreCandidates(candidates, fundamentalsMap);
+  console.log(`RPC stats: ${formatFeedStats()}`);
   const header = {
     mode: 'live',
     generatedAt: new Date(),
     engine: 'kol-first v0.1',
     limit,
     maxWallets,
-    feeds: { rpc: lastFeed(), rugcheck: 'api.rugcheck.xyz' },
+    feeds: { rpc: lastFeed(), rpcStats: getFeedStats(), rugcheck: 'api.rugcheck.xyz' },
   };
   return buildReportFromScored(scored, header);
 }

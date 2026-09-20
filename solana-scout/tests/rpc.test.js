@@ -1,6 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRpcEndpoints, feedFromUrl } from '../scripts/lib/rpc.js';
+import { buildRpcEndpoints, feedFromUrl, getFeedStats, formatFeedStats } from '../scripts/lib/rpc.js';
 
 const ORIG_HELIUS = process.env.HELIUS_API_KEY;
 const ORIG_ZAN = process.env.ZAN_API_KEY;
@@ -46,4 +46,10 @@ test('feedFromUrl: helius / zan / public', () => {
   assert.equal(feedFromUrl('https://api.zan.top/node/v1/solana/mainnet/x'), 'zan');
   assert.equal(feedFromUrl('https://api.mainnet-beta.solana.com'), 'public-rpc');
   assert.equal(feedFromUrl(null), 'public-rpc');
+});
+
+test('getFeedStats/formatFeedStats: nol saat belum ada panggilan RPC', () => {
+  const s = getFeedStats();
+  assert.deepEqual(s, { helius: { ok: 0, fail: 0 }, zan: { ok: 0, fail: 0 }, 'public-rpc': { ok: 0, fail: 0 } });
+  assert.equal(formatFeedStats(s), 'helius: ok 0/0 · zan: ok 0/0 · public-rpc: ok 0/0');
 });

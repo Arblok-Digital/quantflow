@@ -35,6 +35,26 @@ export function feedFromUrl(url) {
 export function lastFeed() {
   return feedFromUrl(lastOkUrl);
 }
+
+const feedStats = {
+  helius: { ok: 0, fail: 0 },
+  zan: { ok: 0, fail: 0 },
+  'public-rpc': { ok: 0, fail: 0 },
+};
+
+export function getFeedStats() {
+  return {
+    helius: { ...feedStats.helius },
+    zan: { ...feedStats.zan },
+    'public-rpc': { ...feedStats['public-rpc'] },
+  };
+}
+
+export function formatFeedStats(stats = getFeedStats()) {
+  return Object.entries(stats)
+    .map(([k, v]) => `${k}: ok ${v.ok}/${v.ok + v.fail}`)
+    .join(' · ');
+}
 // Endpoint publik tanpa key — diverifikasi hidup 2026-09-19.
 export const PUBLIC_RPCS = [
   'https://api.mainnet-beta.solana.com',
@@ -100,10 +120,12 @@ export async function rpcCall(method, params, opts = {}) {
         const resp = await rpcRequest(url, method, params, timeoutMs);
         if (resp.error) throw new Error(resp.error.message);
         lastOkUrl = url;
+        feedStats[feedFromUrl(url)].ok++;
         return resp.result;
       } catch (e) {
         lastErr = e;
-        // 429 di public RPC biasanya per-IP; tunggu sejenak sebelum ganti endpoint.
+        feedStats[feedFromUrl(url)].fail++;
+        if (process.env.RPC_TRACE) console.error(`[rpc] ${feedFromUrl(url)} ${method} FAIL: ${e.message}`);
         if (e?.statusCode === 429) await sleep(400 * (attempt + 1));
       }
     }
