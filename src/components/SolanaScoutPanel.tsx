@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Radar, RefreshCw, AlertTriangle } from "lucide-react";
+import { Radar, RefreshCw, AlertTriangle, Copy, Check } from "lucide-react";
 import { authFetch, useAuth } from "../hooks/useAuth";
 
 // ---------------------------------------------------------------------------
@@ -121,6 +121,35 @@ function TokenCard({ t, expanded, onToggle }: { key?: React.Key; t: ScoutToken; 
   const creditCount = v.checks.filter((c) => c.kind === "credit" && c.applied).length;
   const holders = t.kol.holders || [];
   const pct = Math.round((v.score / v.scale) * 100);
+  const [copiedMint, setCopiedMint] = useState(false);
+
+  const copyMint = async () => {
+    const ca = t.mint;
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(ca);
+      ok = true;
+    } catch {
+      /* non-secure context (http non-localhost) — fallback textarea */
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = ca;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        ok = true;
+      } catch {
+        ok = false;
+      }
+    }
+    if (ok) {
+      setCopiedMint(true);
+      setTimeout(() => setCopiedMint(false), 1500);
+    }
+  };
 
   return (
     <div className={`rounded-xl border ${v.hardFailed ? "border-rose-900/60 bg-rose-950/10" : "border-zinc-800 bg-zinc-900/60"}`}>
@@ -151,6 +180,22 @@ function TokenCard({ t, expanded, onToggle }: { key?: React.Key; t: ScoutToken; 
         </div>
         <RefreshCw className={`h-3.5 w-3.5 text-zinc-600 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
       </button>
+
+      <div className="flex items-center gap-1.5 px-3 pb-2">
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-500">{t.mint}</span>
+        <button
+          onClick={(e) => { e.stopPropagation(); copyMint(); }}
+          title="Salin contract address"
+          className={`shrink-0 flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[10px] transition disabled:opacity-50 ${
+            copiedMint
+              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+              : "border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:border-amber-500/50 hover:text-amber-300"
+          }`}
+        >
+          {copiedMint ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          {copiedMint ? "Tersalin" : "Copy CA"}
+        </button>
+      </div>
 
       {expanded && (
         <div className="border-t border-zinc-800 p-3 pt-0">
