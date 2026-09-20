@@ -72,14 +72,14 @@ function renderTierFilters() {
   wrap.innerHTML = '';
   const allBtn = document.createElement('button');
   allBtn.textContent = 'Semua';
-  allBtn.classList.add(state.tier === null ? 'active' : '');
+  allBtn.classList.toggle('active', state.tier === null);
   allBtn.onclick = () => { state.tier = null; renderTierFilters(); renderList(); };
   wrap.appendChild(allBtn);
   for (const t of ['ALPHA', 'BUY', 'WATCH', 'SKIP']) {
     const b = document.createElement('button');
     b.textContent = t;
     b.dataset.tier = t;
-    b.classList.add(state.tier === t ? 'active' : '');
+    b.classList.toggle('active', state.tier === t);
     b.onclick = () => { state.tier = t; renderTierFilters(); renderList(); };
     wrap.appendChild(b);
   }
