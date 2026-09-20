@@ -8,6 +8,7 @@ import { LiquidityHuntPanel } from "./components/LiquidityHuntPanel";
 import { OnChainPanel } from "./components/OnChainPanel";
 import { MacroCalendarPanel } from "./components/MacroCalendarPanel";
 import { RiskManagementPanel } from "./components/RiskManagementPanel";
+import { DEFAULT_RISK_POLICY } from "./logic/riskConstants";
 import { ExecutionMetrics } from "./components/ExecutionMetrics";
 import { AuditLedgerModal } from "./components/AuditLedgerModal";
 import { ArchitectureModal } from "./components/ArchitectureModal";
@@ -15,6 +16,8 @@ import { KeyVaultModal } from "./components/KeyVaultModal";
 import { BrokerModal } from "./components/BrokerModal";
 import { KeelEnginePanel, KeelAnalysisResult } from "./components/KeelEnginePanel";
 import { PumpRadarPanel } from "./components/PumpRadarPanel";
+import { SolanaScoutPanel } from "./components/SolanaScoutPanel";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 import { DashboardExchange } from "./components/DashboardExchange";
 import { ReplayControlPanel } from "./components/ReplayControlPanel";
@@ -22,7 +25,7 @@ import { ReplayRunsPanel } from "./components/ReplayRunsPanel";
 import { ProbabilityBadge } from "./components/ProbabilityBadge";
 import { ReconciliationPanel } from "./components/ReconciliationPanel";
 
-import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig, ModuleTab, OrderBook } from "./types";
+import { Candle, MarketType, Timeframe, OnChainMetrics, MacroSummary, RiskConfig, ModuleTab, OrderBook, MODULE_TABS } from "./types";
 
 import { fetchOnChainMetrics } from "./data/onchainData";
 import { fetchMacroCalendar } from "./data/macroData";
@@ -41,6 +44,26 @@ import { ToastProvider } from "./components/ExecutionToasts";
 import { AgentDecisionsPanel } from "./components/AgentDecisionsPanel";
 import type { RecentTrade, FuturesMetrics } from "./data/marketFetcher";
 
+const ACTIVE_TAB_STORAGE_KEY = "qflow:activeTab";
+
+function readPersistedTab(): ModuleTab {
+  try {
+    const saved = sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY);
+    if (saved && (MODULE_TABS as readonly string[]).includes(saved)) return saved as ModuleTab;
+  } catch {
+    // sessionStorage unavailable — fall back to dashboard.
+  }
+  return "dashboard";
+}
+
+function persistTab(tab: ModuleTab): void {
+  try {
+    sessionStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab);
+  } catch {
+    // Non-fatal: tab persistence is progressive enhancement.
+  }
+}
+
 export default function App() {
   const auth = useAuth();
   const live = useLiveMode(auth.isAuthenticated);
@@ -48,7 +71,7 @@ export default function App() {
   const [symbol, setSymbol] = useState<string>("BTC/USDT");
   const [marketType, setMarketType] = useState<MarketType>("FUTURES");
   const [timeframe, setTimeframe] = useState<Timeframe>("15m");
-  const [activeTab, setActiveTab] = useState<ModuleTab>("dashboard");
+  const [activeTab, setActiveTab] = useState<ModuleTab>(readPersistedTab);
   const [geminiActive, setGeminiActive] = useState<boolean>(true);
   const [isArchitectureOpen, setIsArchitectureOpen] = useState<boolean>(false);
   const [isAuditLedgerOpen, setIsAuditLedgerOpen] = useState<boolean>(false);
@@ -130,12 +153,14 @@ export default function App() {
   }, [symbol, geminiActive, refreshKeelContext]);
 
   // --- Risk Config (cross-cutting, diedit via RiskManagementPanel) ---
+  // Default berasal dari DEFAULT_RISK_POLICY (logic/riskConstants.ts) — satu
+  // sumber dengan server gate supaya panel tidak longgar dari enforcement.
   const [riskConfig, setRiskConfig] = useState<RiskConfig>({
-    maxRiskPerTradePercent: 2,
+    maxRiskPerTradePercent: DEFAULT_RISK_POLICY.MAX_RISK_PER_TRADE_PCT,
     maxPositionPercent: 12,
     maxDrawdownLimit: 6,
     minConfidenceThreshold: 60,
-    minRiskRewardRatio: 1.8,
+    minRiskRewardRatio: DEFAULT_RISK_POLICY.MIN_RISK_REWARD_RATIO,
     isEmergencyStopActive: false,
   });
 
@@ -352,6 +377,14 @@ export default function App() {
   }, []);
 
   // --- Timeframe / MarketType handlers ---
+  const handleSelectTab = useCallback(
+    (tab: ModuleTab) => {
+      setActiveTab(tab);
+      persistTab(tab);
+    },
+    []
+  );
+
   const handleSelectTimeframe = useCallback(
     (newTf: Timeframe) => {
       if (newTf === "4h" || newTf === "1D" || newTf === "1W") {
@@ -466,7 +499,7 @@ export default function App() {
         priceDelta={market.priceDelta}
         exchangeStatus={market.exchangeStatus}
         activeTab={activeTab}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectTab}
         openPositionsCount={openPositionsCount}
         floatingPnl={floatingPnl}
         liveEquity={live.equity}
@@ -496,8 +529,11 @@ export default function App() {
         activeTab={activeTab}
       />
 
-      {/* Main Content — each tab renders its panels exactly once */}
+      {/* Main Content — each tab renders its panels exactly once.
+          Tab content wrapped in ErrorBoundary (keyed per tab so a crash in one
+          tab doesn't brick the rest; Header/nav stay outside and keep working). */}
       <main className="flex-1 p-3 sm:p-5 max-w-[1920px] w-full mx-auto space-y-4">
+        <ErrorBoundary key={activeTab}>
         {/* 📊 DASHBOARD — layout exchange 3-kolom + bottom tabs */}
         {activeTab === "dashboard" && (
           <DashboardExchange
@@ -648,6 +684,12 @@ export default function App() {
             <ReplayRunsPanel />
           </>
         )}
+
+        {/* 🛰️ SCOUT — vertical meme (Solana), mesin terpisah (baca report only) */}
+        {activeTab === "scout" && (
+          <SolanaScoutPanel />
+        )}
+        </ErrorBoundary>
       </main>
 
       {/* Footer */}

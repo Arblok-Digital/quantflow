@@ -57,7 +57,7 @@ export const ReplayPlaybackControls: React.FC<ReplayPlaybackControlsProps> = ({
       </div>
       <div className="flex flex-wrap items-center gap-2 mt-3">
         {session.status !== "running" && session.status !== "done" && (
-          <button
+          <button type="button"
             onClick={handleRun}
             className="flex items-center gap-1 rounded bg-emerald-500/15 border border-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-400 hover:bg-emerald-500/25 transition-colors"
           >
@@ -65,7 +65,7 @@ export const ReplayPlaybackControls: React.FC<ReplayPlaybackControlsProps> = ({
           </button>
         )}
         {session.status === "running" && (
-          <button
+          <button type="button"
             onClick={handlePause}
             className="flex items-center gap-1 rounded bg-amber-500/15 border border-amber-500/30 px-3 py-1.5 text-xs font-bold text-amber-400 hover:bg-amber-500/25 transition-colors"
           >
@@ -73,20 +73,20 @@ export const ReplayPlaybackControls: React.FC<ReplayPlaybackControlsProps> = ({
           </button>
         )}
         {session.status !== "done" && (
-          <button
+          <button type="button"
             onClick={handleStep}
             className="flex items-center gap-1 rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-xs font-bold text-zinc-300 hover:bg-zinc-700 transition-colors"
           >
             <StepForward className="h-3.5 w-3.5" /> Step
           </button>
         )}
-        <button
+        <button type="button"
           onClick={handleReset}
           className="flex items-center gap-1 rounded bg-rose-500/10 border border-rose-500/30 px-3 py-1.5 text-xs font-bold text-rose-400 hover:bg-rose-500/20 transition-colors"
         >
           <RotateCcw className="h-3.5 w-3.5" /> Reset
         </button>
-        <button
+        <button type="button"
           onClick={handleExport}
           disabled={exporting || currentIndex < 0}
           className="flex items-center gap-1 rounded bg-sky-500/15 border border-sky-500/30 px-3 py-1.5 text-xs font-bold text-sky-400 hover:bg-sky-500/25 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -95,7 +95,7 @@ export const ReplayPlaybackControls: React.FC<ReplayPlaybackControlsProps> = ({
           <Database className="h-3.5 w-3.5" /> {exporting ? "Saving..." : "Export"}
         </button>
         {exportedRunId && (
-          <button
+          <button type="button"
             onClick={() => handleDownloadCsv(exportedRunId)}
             className="flex items-center gap-1 rounded bg-emerald-500/15 border border-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-400 hover:bg-emerald-500/25 transition-colors"
             title={`Download training CSV untuk run ${exportedRunId}`}

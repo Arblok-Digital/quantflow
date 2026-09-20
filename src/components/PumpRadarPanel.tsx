@@ -120,7 +120,7 @@ export const PumpRadarPanel: React.FC<PumpRadarPanelProps> = ({ onNavigate }) =>
                 {new Date(scannedAt).toLocaleTimeString()}
               </span>
             )}
-            <button
+            <button type="button"
               onClick={runScan}
               disabled={scanning}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 font-bold font-mono text-xs shadow-md shadow-amber-400/20 border border-amber-500 transition"

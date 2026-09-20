@@ -131,8 +131,8 @@ export const DashboardPositionsTable: React.FC<DashboardPositionsTableProps> = (
       } else {
         pushToast(
           "success",
-          `Posisi ${pos.symbol} ditutup`,
-          "PnL direalisasi — detail di tab History."
+          res.partial ? `Posisi ${pos.symbol} ditutup SEBAGIAN` : `Posisi ${pos.symbol} ditutup`,
+          res.partial ? "Sisa qty masih OPEN — reload book server." : "PnL direalisasi — detail di tab History."
         );
       }
     } catch (err) {
@@ -261,7 +261,7 @@ export const DashboardPositionsTable: React.FC<DashboardPositionsTableProps> = (
           menguji sistem.
         </p>
         <div className="flex justify-center gap-2 flex-wrap">
-          <button
+          <button type="button"
             onClick={onSimulateLong}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition ${
               isLiveMode
@@ -271,7 +271,7 @@ export const DashboardPositionsTable: React.FC<DashboardPositionsTableProps> = (
           >
             {isLiveMode ? "⚠ EXECUTE LONG (live)" : "+ Simulasikan Entry LONG"}
           </button>
-          <button
+          <button type="button"
             onClick={onSimulateShort}
             disabled={isSpotMarket}
             className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold font-mono transition disabled:opacity-40 disabled:cursor-not-allowed"
@@ -367,7 +367,7 @@ export const DashboardPositionsTable: React.FC<DashboardPositionsTableProps> = (
                   <td className="py-2.5 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-1.5">
                       {canBreakEven && (
-                        <button
+                        <button type="button"
                           onClick={() => handleBreakEven(pos)}
                           disabled={busy}
                           className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[10px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -376,7 +376,7 @@ export const DashboardPositionsTable: React.FC<DashboardPositionsTableProps> = (
                           BE
                         </button>
                       )}
-                      <button
+                      <button type="button"
                         onClick={() => handleClose(pos)}
                         disabled={busy}
                         className="px-2 py-1 rounded bg-zinc-800 hover:bg-rose-600 hover:text-white text-slate-300 border border-zinc-700 hover:border-rose-500 text-[10px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -384,7 +384,7 @@ export const DashboardPositionsTable: React.FC<DashboardPositionsTableProps> = (
                       >
                         {busy && !expanded ? "…" : "Close"}
                       </button>
-                      <button
+                      <button type="button"
                         onClick={() => setExpandedId(expanded ? null : pid)}
                         className={`px-1.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[10px] transition-colors ${
                           expanded ? "border-amber-500/50 text-amber-300" : ""
@@ -403,7 +403,7 @@ export const DashboardPositionsTable: React.FC<DashboardPositionsTableProps> = (
                     <td colSpan={11} className="pb-1">
                       <p className="text-[11px] font-mono text-rose-400 bg-rose-950/30 border border-rose-500/30 rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2">
                         <span>Aksi gagal — {rowError.text}</span>
-                        <button
+                        <button type="button"
                           onClick={() => setRowError(null)}
                           className="text-rose-400 hover:text-rose-200 shrink-0"
                           title="Tutup"
@@ -729,7 +729,7 @@ const PositionExpandRow: React.FC<ExpandRowProps> = ({
           </label>
         )}
         {!editing ? (
-          <button
+          <button type="button"
             onClick={onStartEdit}
             className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-[11px] transition"
             title="Ubah SL & TP manual (validasi LONG: SL < harga < TP)"
@@ -744,15 +744,15 @@ const PositionExpandRow: React.FC<ExpandRowProps> = ({
             <label className="flex items-center gap-1 text-[11px] text-zinc-400">
               TP <input type="number" step="any" value={editTP} onChange={(e) => onEditTP(e.target.value)} className="w-24 px-1.5 py-1 rounded bg-zinc-950 border border-zinc-700 text-zinc-100 font-mono text-[11px] focus:outline-none focus:border-amber-500/60" />
             </label>
-            <button onClick={onSaveEdit} disabled={busy} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition disabled:opacity-50">
+            <button type="button" onClick={onSaveEdit} disabled={busy} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition disabled:opacity-50">
               {busy ? "…" : "Simpan"}
             </button>
-            <button onClick={onCancelEdit} className="px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 text-[11px] transition">
+            <button type="button" onClick={onCancelEdit} className="px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 text-[11px] transition">
               Batal
             </button>
           </span>
         )}
-        <button
+        <button type="button"
           onClick={onBreakEven}
           disabled={busy}
           className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-[11px] transition disabled:opacity-50"
@@ -760,7 +760,7 @@ const PositionExpandRow: React.FC<ExpandRowProps> = ({
         >
           Set Break-Even (Risk-Free)
         </button>
-        <button
+        <button type="button"
           onClick={onClose}
           disabled={busy}
           className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-300 hover:text-white font-mono text-[11px] font-bold border border-zinc-700 hover:border-rose-500 transition disabled:opacity-50 disabled:cursor-wait"

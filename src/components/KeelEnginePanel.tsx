@@ -71,7 +71,7 @@ export const KeelEnginePanel: React.FC<KeelEnginePanelProps> = ({ result, loadin
               <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono">Decision Engine Router — AI server atau Keel quant lokal</p>
             </div>
           </div>
-          <button
+          <button type="button"
             onClick={onAnalyze}
             disabled={loading}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 font-bold font-mono text-xs shadow-md shadow-amber-500/20 border border-amber-600 disabled:border-zinc-700 transition"

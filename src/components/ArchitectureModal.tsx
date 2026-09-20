@@ -51,7 +51,7 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({ isOpen, on
             </div>
           </div>
 
-          <button
+          <button type="button"
             onClick={onClose}
             className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
           >
@@ -61,7 +61,7 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({ isOpen, on
 
         {/* Tab Navigation */}
         <div className="my-4 flex border-b border-zinc-800 font-mono text-xs overflow-x-auto">
-          <button
+          <button type="button"
             onClick={() => setActiveTab("modular")}
             className={`px-4 py-2.5 font-bold transition-colors border-b-2 flex items-center gap-1.5 shrink-0 ${
               activeTab === "modular"
@@ -73,7 +73,7 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({ isOpen, on
             <span>Struktur Modular & MTF Liquidity</span>
           </button>
 
-          <button
+          <button type="button"
             onClick={() => setActiveTab("komponen")}
             className={`px-4 py-2.5 font-bold transition-colors border-b-2 flex items-center gap-1.5 shrink-0 ${
               activeTab === "komponen"
@@ -85,7 +85,7 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({ isOpen, on
             <span>4 Komponen Utama & Logic Dasar</span>
           </button>
 
-          <button
+          <button type="button"
             onClick={() => setActiveTab("latensi")}
             className={`px-4 py-2.5 font-bold transition-colors border-b-2 flex items-center gap-1.5 shrink-0 ${
               activeTab === "latensi"
@@ -97,7 +97,7 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({ isOpen, on
             <span>Skalabilitas & Timeframe Horizon</span>
           </button>
 
-          <button
+          <button type="button"
             onClick={() => setActiveTab("keamanan")}
             className={`px-4 py-2.5 font-bold transition-colors border-b-2 flex items-center gap-1.5 shrink-0 ${
               activeTab === "keamanan"
@@ -109,7 +109,7 @@ export const ArchitectureModal: React.FC<ArchitectureModalProps> = ({ isOpen, on
             <span>Enkripsi End-to-End (E2EE)</span>
           </button>
 
-          <button
+          <button type="button"
             onClick={() => setActiveTab("audit")}
             className={`px-4 py-2.5 font-bold transition-colors border-b-2 flex items-center gap-1.5 shrink-0 ${
               activeTab === "audit"

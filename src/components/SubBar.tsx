@@ -50,7 +50,7 @@ export const SubBar: React.FC<SubBarProps> = ({
         {/* Symbol seg — BTC / ETH / SOL */}
         <div className={segCls}>
           {PAIRS.map((pair) => (
-            <button
+            <button type="button"
               key={pair}
               onClick={() => onSelectSymbol(pair)}
               className={`px-2.5 py-1 rounded-md transition-all ${symbol === pair ? btnOn : btnOff}`}
@@ -63,13 +63,13 @@ export const SubBar: React.FC<SubBarProps> = ({
 
         {/* Market type seg — FUTURES / SPOT */}
         <div className={segCls}>
-          <button
+          <button type="button"
             onClick={() => onSelectMarketType("FUTURES")}
             className={`px-2.5 py-1 rounded-md transition-all flex items-center gap-1 ${marketType === "FUTURES" ? btnOn : btnOff}`}
           >
             <Zap className="w-3 h-3" /><span>FUTURES</span>
           </button>
-          <button
+          <button type="button"
             onClick={() => onSelectMarketType("SPOT")}
             className={`px-2.5 py-1 rounded-md transition-all ${marketType === "SPOT" ? btnOn : btnOff}`}
           >
@@ -80,7 +80,7 @@ export const SubBar: React.FC<SubBarProps> = ({
         {/* Timeframe seg — 1s 1m 5m 15m 1h 4h 1D 1W */}
         <div className={`${segCls} overflow-x-auto`}>
           {TIMEFRAMES.map((tf) => (
-            <button
+            <button type="button"
               key={tf}
               onClick={() => onSelectTimeframe(tf)}
               className={`px-1.5 py-1 rounded-md transition-all whitespace-nowrap ${timeframe === tf ? btnOn : btnOff}`}
@@ -93,7 +93,7 @@ export const SubBar: React.FC<SubBarProps> = ({
         <div className="flex-1 min-w-2" />
 
         <div className="flex flex-wrap items-center gap-2">
-          <button
+          <button type="button"
             onClick={onTriggerManualCycle}
             disabled={isAnalyzing || isEmergencyStop}
             className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-mono font-bold transition-all ${
@@ -106,7 +106,7 @@ export const SubBar: React.FC<SubBarProps> = ({
             <Zap className={`h-3.5 w-3.5 ${isAnalyzing ? "animate-spin text-amber-400" : ""}`} />
             <span>{isAnalyzing ? "SCANNING..." : "SCAN AGENT"}</span>
           </button>
-          <button
+          <button type="button"
             onClick={onToggleAutoPilot}
             disabled={isEmergencyStop}
             className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-mono font-bold transition-all ${
@@ -120,7 +120,7 @@ export const SubBar: React.FC<SubBarProps> = ({
             {isAutoPilot ? <Square className="h-3.5 w-3.5 fill-current" /> : <Play className="h-3.5 w-3.5 fill-current" />}
             <span>AUTO: {isAutoPilot ? "ON" : "OFF"}</span>
           </button>
-          <button
+          <button type="button"
             onClick={onToggleEmergencyStop}
             className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-mono font-black transition-all border-2 ${
               isEmergencyStop

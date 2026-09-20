@@ -1,0 +1,2360 @@
+{
+    "schema_version":  "2.0",
+    "last_updated":  "2026-07-17",
+    "description":  "KOL wallet database — compiled from KOL Explorer, cross-referenced with X/Twitter handles",
+    "total_count":  138,
+    "verified_count":  2,
+    "unverified_count":  136,
+    "kols":  [
+                 {
+                     "id":  1,
+                     "name":  "Mitch",
+                     "handle":  "Mitch",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "influencer",
+                     "followers_estimate":  200000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  2,
+                     "name":  "Jijo",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  3,
+                     "name":  "^1s1mple",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "AeLaMjzxErZt4drbWVWvcxpVyo8p94xu5vrg41eZPFe3",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  4,
+                     "name":  "Cented",
+                     "handle":  "Cented",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "influencer",
+                     "followers_estimate":  300000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  "Solana memecoin influencer."
+                 },
+                 {
+                     "id":  5,
+                     "name":  "Bandit",
+                     "handle":  "Bandit",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "5B79fMkcFeRTiwm7ehsZsFiKsC7m7n1Bgv9yLxPp9q2X",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "influencer",
+                     "followers_estimate":  150000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  6,
+                     "name":  "Solkrow",
+                     "handle":  "Solkrow",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "ApRnQN2HkbCn7W2WWiT2FEKvuKJp9LugRyAE1a9Hdz1",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  100000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  7,
+                     "name":  "Kay The Doc",
+                     "handle":  "KayTheDoc",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "DYAn4XpAkN5mhiXkRB7dGq4Jadnx6XYgu8L5b3WGhbrt",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  8,
+                     "name":  "No",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "Di75xbVUg3u1qcmZci3NcZ8rjFMj7tsnYEoFdEMjS4ow",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  9,
+                     "name":  "Dex",
+                     "handle":  "Dex",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "mW4PZB45isHmnjGkLpJvjKBzVS5NXzTJ8UDyug4gTsM",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  10,
+                     "name":  "Danny",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "9FNz4MjPUmnJqTf6yEDbL1D4SsHVh7uA8zRHhR5K138r",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  11,
+                     "name":  "Dv",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BCagckXeMChUKrHEd6fKFA1uiWDtcmCXMsqaheLiUPJd",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  12,
+                     "name":  "Clukz",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "G6fUXjMKPJzCY1rveAE6Qm7wy5U3vZgKDJmN1VPAdiZC",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  13,
+                     "name":  "Betman",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BoYHJoKntk3pjkaV8qFojEonSPWmWMfQocZTwDd1bcGG",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  16,
+                     "name":  "Loopierr",
+                     "handle":  "Loopify",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "9yYya3F5EJoLnBNKW6z4bZvyQytMXzDcpU5D6yYr4jqL",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  200000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  18,
+                     "name":  "Log",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "2pUUZYtokRgDV2YzL6M5pjb1jyoHE367yU1sdQ7ac3ea",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  19,
+                     "name":  "Jack Duval",
+                     "handle":  "JackDuval",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BAr5csYtpWoNpwhUjixX7ZPHXkUciFZzjBp9uNxZXJPh",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "content",
+                     "followers_estimate":  80000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  20,
+                     "name":  "QTDEGEN",
+                     "handle":  "QTDEGEN",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "7tiRXPM4wwBMRMYzmywRAE6jveS3gDbNyxgRrEoU6RLA",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  21,
+                     "name":  "Til",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "EHg5YkU2SZBTvuT87rUsvxArGp3HLeye1fXaSDfuMyaf",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  22,
+                     "name":  "Ethan Prosper",
+                     "handle":  "EthanProsper",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "sAdNbe1cKNMDqDsa4npB3TfL62T14uAo2MsUQfLvzLT",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "analyst",
+                     "followers_estimate":  100000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  23,
+                     "name":  "Oura",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4WPTQA7BB4iRdrPhgNpJihGcxKh8T43gLjMn5PbEVfQw",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  24,
+                     "name":  "Mr. Frog",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4DdrfiDHpmx55i4SPssxVzS9ZaKLb8qr45NKY9Er9nNh",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  26,
+                     "name":  "Ansem",
+                     "handle":  "blknoiz06",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm",
+                     "verified":  true,
+                     "source":  "kolexplorer.com",
+                     "type":  "influencer",
+                     "followers_estimate":  1100000,
+                     "notable_calls":  [
+                                           "WIF",
+                                           "BONK",
+                                           "ANSEM"
+                                       ],
+                     "notes":  "KOL paling terkenal di Solana."
+                 },
+                 {
+                     "id":  27,
+                     "name":  "Publix",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "86AEJExyjeNNgcp7GrAvCXTDicf5aGWgoERbXFiG1EdD",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  32,
+                     "name":  "Latuche",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "GJA1HEbxGnqBhBifH9uQauzXSB53to5rhDrzmKxhSU65",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  33,
+                     "name":  "Radiance",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "FAicXNV5FVqtfbpn4Zccs71XcfGeyxBSGbqLDyDJZjke",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  34,
+                     "name":  "LJC",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "6HJetMbdHBuk3mLUainxAPpBpWzDgYbHGTS2TqDAUSX2",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  37,
+                     "name":  "Smokez",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "5t9xBNuDdGTGpjaPTx6hKd7sdRJbvtKS8Mhq6qVbo8Qz",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  38,
+                     "name":  "Trey",
+                     "handle":  "Trey",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "831yhv67QpKqLBJjbmw2xoDUeeFHGUx8RnuRj9imeoEs",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  39,
+                     "name":  "Xelf",
+                     "handle":  "Xelf",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "9Vk7pkBZ9KFJmzaPzNYjGedyz8qoKMQtnYyYi2AehNMT",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  40,
+                     "name":  "Sebastian",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "3BLjRcxWGtR7WRshJ3hL25U3RjWr5Ud98wMcczQqk4Ei",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  43,
+                     "name":  "IdontPayTaxes",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "2T5NgDDidkvhJQg8AHDi74uCFwgp25pYFMRZXBaCUNBH",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  46,
+                     "name":  "Spuno",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "GfXQesPe3Zuwg8JhAt6Cg8euJDTVx751enp9EQQmhzPH",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  48,
+                     "name":  "Dan176",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "J2B5fnm2DAAUAGa4EaegwQFoYaN6B5FerGA5sjtQoaGM",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  49,
+                     "name":  "Ozark",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "DZAa55HwXgv5hStwaTEJGXZz1DhHejvpb7Yr762urXam",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  50,
+                     "name":  "Beaver",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "GM7Hrz2bDq33ezMtL6KGidSWZXMWgZ6qBuugkb5H8NvN",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  55,
+                     "name":  "Henn100x",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "FRbUNvGxYNC1eFngpn7AD3f14aKKTJVC6zSMtvj2dyCS",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  57,
+                     "name":  "Meechie",
+                     "handle":  "Meechie",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "9iaawVBEsFG35PSwd4PahwT8fYNQe9XYuRdWm872dUqY",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  50000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  58,
+                     "name":  "Daumen",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "8MaVa9kdt3NW4Q5HyNAm1X5LbR8PQRVDc1W8NMVK88D5",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  59,
+                     "name":  "Gake",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  60,
+                     "name":  "Earl",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "F2SuErm4MviWJ2HzKXk2nuzBC6xe883CFWUDCPz6cyWm",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  62,
+                     "name":  "Orange",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  69,
+                     "name":  "Yenni",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "5B52w1ZW9tuwUduueP5J7HXz5AcGfruGoX6YoAudvyxG",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  70,
+                     "name":  "Letterbomb",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BtMBMPkoNbnLF9Xn552guQq528KKXcsNBNNBre3oaQtr",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  71,
+                     "name":  "Xander",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "B3wagQZiZU2hKa5pUCj6rrdhWsX3Q6WfTTnki9PjwzMh",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  72,
+                     "name":  "Cooker",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "8deJ9xeUvXSJwicYptA9mHsU2rN2pDx37KWzkDkEXhU6",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  73,
+                     "name":  "Aloh Quant",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "xXpRSpAe1ajq4tJP78tS3X1AqNwJVQ4Vvb1Swg4hHQh",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  74,
+                     "name":  "Unprofitable",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "DYmsQudNqJyyDvq86XmzAvrU9T7xwfQEwh6gPQw9TPNF",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  75,
+                     "name":  "West",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "JDd3hy3gQn2V982mi1zqhNqUw1GfV2UL6g76STojCJPN",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  76,
+                     "name":  "Dali",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "CvNiezB8hofusHCKqu8irJ6t2FKY7VjzpSckofMzk5mB",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  78,
+                     "name":  "Cupsey",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  79,
+                     "name":  "Pow",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  87,
+                     "name":  "Realist",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "G9VPG4XvHheUUbzPexNzx9Yyx97ii53WYb89PvdM2qQk",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  88,
+                     "name":  "Limfork",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BQVz7fQ1WsQmSTMY3umdPEPPTm1sdcBcX9sP7o6kPRmB",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  89,
+                     "name":  "Nyhrox",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "6S8GezkxYUfZy9JPtYnanbcZTMB87Wjt1qx3c6ELajKC",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  90,
+                     "name":  "Chester",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "PMJA8UQDyWTFw2Smhyp9jGA6aTaP7jKHR7BPudrgyYN",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  94,
+                     "name":  "Vein",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BtDaZUqHr2mKH5EYQCztuerHBuBEfQNYdquTDtEZp2Ym",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  95,
+                     "name":  "Leck",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "98T65wcMEjoNLDTJszBHGZEX75QRe8QaANXokv4yw3Mp",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  96,
+                     "name":  "Gh0stee",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "2kv8X2a9bxnBM8NKLc6BBTX2z13GFNRL4oRotMUJRva9",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  97,
+                     "name":  "Zuki",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "922VvmmYDHV9KMTJJ71Y5Yd3Vn7cfJuFasLNSsZPygrG",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  98,
+                     "name":  "Cap",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "CAPn1yH4oSywsxGU456jfgTrSSUidf9jgeAnHceNUJdw",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  99,
+                     "name":  "h14",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BJXjRq566xt66pcxCmCMLPSuNxyUpPNBdJGP56S7fMda",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  100,
+                     "name":  "Jason",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "ACTbvbNm5qTLuofNRPxFPMtHAAtdH1CtzhCZatYHy831",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  101,
+                     "name":  "Kev",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "BTf4A2exGK9BCVDNzy65b9dUzXgMqB4weVkvTMFQsadd",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  104,
+                     "name":  "Slingoor",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "6mWEJG9LoRdto8TwTdZxmnJpkXpTsEerizcGiCNZvzXd",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  105,
+                     "name":  "Giann",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "GNrmKZCxYyNiSUsjduwwPJzhed3LATjciiKVuSGrsHEC",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  107,
+                     "name":  "Narc",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "CxgPWvH2GoEDENELne2XKAR2z2Fr4shG2uaeyqZceGve",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  108,
+                     "name":  "Coler",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "99xnE2zEFi8YhmKDaikc1EvH6ELTQJppnqUwMzmpLXrs",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  109,
+                     "name":  "Qavec",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "gangJEP5geDHjPVRhDS5dTF5e6GtRvtNogMEEVs91RV",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  110,
+                     "name":  "Rilsio",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4fZFcK8ms3bFMpo1ACzEUz8bH741fQW4zhAMGd5yZMHu",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  111,
+                     "name":  "Tuults",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "5T229oePmJGE5Cefys8jE9Jq8C7qfGNNWy3RVA7SmwEP",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  112,
+                     "name":  "Kadenox",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "B32QbbdDAyhvUQzjcaM5j6ZVKwjCxAwGH5Xgvb9SJqnC",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  113,
+                     "name":  "Rambo",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "2net6etAtTe3Rbq2gKECmQwnzcKVXRaLcHy2Zy1iCiWz",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  114,
+                     "name":  "Scharo",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4sAUSQFdvWRBxR8UoLBYbw8CcXuwXWxnN8pXa4mtm5nU",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  115,
+                     "name":  "Dior",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "87rRdssFiTJKY4MGARa4G5vQ31hmR7MxSmhzeaJ5AAxJ",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  116,
+                     "name":  "Monki",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "53BnNc49Ajgstciq3CRoyxuBpkkW1r8pgPyvr7JGYnsh",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  117,
+                     "name":  "Brox",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "7VBTpiiEjkwRbRGHJFUz6o5fWuhPFtAmy8JGhNqwHNnn",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  118,
+                     "name":  "Milito",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "EeXvxkcGqMDZeTaVeawzxm9mbzZwqDUMmfG3bF7uzumH",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  119,
+                     "name":  "Heyitsyolo",
+                     "handle":  "heyitsyolo",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "Av3xWHJ5EsoLZag6pr7LKbrGgLRTaykXomDD5kBhL9YQ",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  120,
+                     "name":  "Solana degen",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "9tY7u1HgEt2RDcxym3RJ9sfvT3aZStiiUwXd44X9RUr8",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  121,
+                     "name":  "Chairman",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "Be24Gbf5KisDk1LcWWZsBn8dvB816By7YzYF5zWZnRR6",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  122,
+                     "name":  "Joji",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "525LueqAyZJueCoiisfWy6nyh4MTvmF4X9jSqi6efXJT",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  123,
+                     "name":  "Omar",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "Dgehc8YMv6dHsiPJVoumvq4pSBkMVvrTgTUg7wdcYJPJ",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  124,
+                     "name":  "Otta",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "As7HjL7dzzvbRbaD3WCun47robib2kmAKRXMvjHkSMB5",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  125,
+                     "name":  "Flames",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "6aXFYXbFob1ZKAEDCcqZnX2vooA3TgEqDoy5dAQbeWoV",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  126,
+                     "name":  "Ramset",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "71PCu3E4JP5RDBoY6wJteqzxkKNXLyE1byg5BTAL9UtQ",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  127,
+                     "name":  "Terp",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "HkFt55P3PhRWHXoTFeuvkKEE4ab26xZ1bk6UmXV88Pwz",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  128,
+                     "name":  "Jidn",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "3h65MmPZksoKKyEpEjnWU2Yk2iYT5oZDNitGy5cTaxoE",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  129,
+                     "name":  "Casino",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "8rvAsDKeAcEjEkiZMug9k8v1y8mW6gQQiMobd89Uy7qR",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  130,
+                     "name":  "FASHR",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "719sfKUjiMThumTt2u39VMGn612BZyCcwbM5Pe8SqFYz",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  133,
+                     "name":  "Waiter1x",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4cXnf2z85UiZ5cyKsPMEULq1yufAtpkatmX4j4DBZqj2",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  135,
+                     "name":  "Xanse",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "B9K2wTQcRDLRLhMKFyRh2hPqHrr6VKiCC9yNGpkMUXrh",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  136,
+                     "name":  "Pain",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "J6TDXvarvpBdPXTaTU8eJbtso1PUCYKGkVtMKUUY8iEa",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  137,
+                     "name":  "T9ndra",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "3UNPM7X6LbmxUms5ij6zm9P7J1Ev2Wd7TwwXmYrPX3n3",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  138,
+                     "name":  "Parsiiix",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "7cQjAvzJsmdePPMk8TiW8hYHHhCfdNtEaaNK3o46YP12",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  140,
+                     "name":  "Ram",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "57rXqaQsvgyBKwebP2StfqQeCBjBS4jsrZFJN5aU2V9b",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  141,
+                     "name":  "Rowdy",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "DKgvpfttzmJqZXdavDwTxwSVkajibjzJnN2FA99dyciK",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  142,
+                     "name":  "AlxCooks",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "89HbgWduLwoxcofWpmn1EiF9wEdpgkNDEyPjzZ72mkDi",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  143,
+                     "name":  "Trenchman",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "Hw5UKBU5k3YudnGwaykj5E8cYUidNMPuEewRRar5Xoc7",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  145,
+                     "name":  "Donut",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "3wjyaSegfV7SZzjv9Ut1p6AcY5ZdoZjmu6i6QPCVvnmz",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  146,
+                     "name":  "Theo",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "Bi4rd5FH5bYEN8scZ7wevxNZyNmKHdaBcvewdPFxYdLt",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  147,
+                     "name":  "Johnson",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "J9TYAsWWidbrcZybmLSfrLzryANf4CgJBLdvwdGuC8MB",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  148,
+                     "name":  "Cryptovillain26",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "5sNnKuWKUtZkdC1eFNyqz3XHpNoCRQ1D1DfHcNHMV7gn",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  150,
+                     "name":  "Marker",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "CQervCdE3WAUGRmaTj9NHdbNrNGVsxJb68t3QggcntM2",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  151,
+                     "name":  "Lucas",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "FkzekjMLgbXC8NuSQQ2u53rmdh3jhfAZr2psDouDYvfR",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  152,
+                     "name":  "Boogie",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "kai5bkDZS9jvapW5bWopzKDHJVagamTxZbAn4u4r5Ya",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  153,
+                     "name":  "Tdmilky",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "CEUA7zVoDRqRYoeHTP58UHU6TR8yvtVbeLrX1dppqoXJ",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  154,
+                     "name":  "Decu",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  155,
+                     "name":  "Iceman",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "DVMkhiQe1D8yenuEgsW44NjRn9LfVQjGEpZcez5x7Mff",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  156,
+                     "name":  "Numero",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "A3W8psibkTUvjxs4LRscbnjux6TFDXdvD4m4GsGpQ2KJ",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  157,
+                     "name":  "Cowboy",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "6EDaVsS6enYgJ81tmhEkiKFcb4HuzPUVFZeom6PHUqN3",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  158,
+                     "name":  "Fz7",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "G2mgnzpr59vYjKpwU9q5zVfS9yQ9HezMwjuqF7LACvR4",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  159,
+                     "name":  "Shah",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "7xwDKXNG9dxMsBSCmiAThp7PyDaUXbm23irLr7iPeh7w",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  160,
+                     "name":  "Dani",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "AuPp4YTMTyqxYXQnHc5KUc6pUuCSsHQpBJhgnD45yqrf",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  161,
+                     "name":  "Tech",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "5d3jQcuUvsuHyZkhdp78FFqc7WogrzZpTtec1X9VNkuE",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  163,
+                     "name":  "Fawi",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "6NGN6KyYdzptusgeg3fWSC1CKMDz3b9nSGDrxYAjzUWa",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  164,
+                     "name":  "Stigman",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "8fsKLLtvKNanL4ginCaiRS6UfeemY11rSf8U8fN1dJw4",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  165,
+                     "name":  "Frank degods",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  166,
+                     "name":  "Teddy",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "teddyYXw7aiNpDuQCeLb2YiBJhqthBid4C54BuWcPxm",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  167,
+                     "name":  "demonology",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "A2MwjTFz4jzT1mY4xrqkwm1vAbZDrqnA6QJoyTAU8Djw",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  168,
+                     "name":  "Esee",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4uCT4g7YHH4xxfmfNfKUDenwGrRNGoZ9Ay1XFxfUGhQG",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  169,
+                     "name":  "Nikita Bier",
+                     "handle":  "nikitabier",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "E4Ruedde4i3tAfXu3sSojAanaHW1b6epsfdXRLbadv5S",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "founder",
+                     "followers_estimate":  200000,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  "Tech founder, not primarily crypto"
+                 },
+                 {
+                     "id":  170,
+                     "name":  "Samsrep",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "CUHBzSPSaNS3tArEtM3maSV6pNdJhHJFYZpurPPK9P7H",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  171,
+                     "name":  "Red",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "7ABz8qEFZTHPkovMDsmQkm64DZWN5wRtU7LEtD2ShkQ6",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  172,
+                     "name":  "Exey",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "84vGsG7BHQWKXvYxtHCKBeCG18dwm7DsCZoco4Ez4oDi",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  173,
+                     "name":  "Frost",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4nwfXw7n98jEQn93VWY7Cuf1jnn1scHXuXCPGVYS9k6T",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  174,
+                     "name":  "Ceo",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "5ghUXGD9VHqtHR1HCUNDdqxGnVGs7DWkX8Zz9X11G36N",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  175,
+                     "name":  "Cottage",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "4UwK5AE6Djdf3MfwtPGE8pFYD47MhU9fiStDVmSHJVMB",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  176,
+                     "name":  "Crayohla",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "GDoG4tdbx8qkpECQKF5MebbEDpFJn6H739psqgoTG3aN",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  177,
+                     "name":  "Emroonz",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "H84Wda2aSgKV1daCVV9ozWrSurjVnoSLY5GAymYArGPg",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  178,
+                     "name":  "Trunoest",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  179,
+                     "name":  "Ducky",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "ADC1QV9raLnGGDbnWdnsxazeZ4Tsiho4vrWadYswA2ph",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  180,
+                     "name":  "Korean",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "6KR7SorsUQtNH6CB6JpAnWCAKeTysa95iyXeWihdNeGT",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  181,
+                     "name":  "Blu",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "8Ltv5royXzxVG3tAhVhRnfXrzapS5Dwqt1ocxprgu6YP",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  182,
+                     "name":  "Clown",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "EDXHdSFdadFbYFFjxPXBqMe1kCEDFqpPu552uvp48HR8",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  183,
+                     "name":  "Ghost",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "HdxkiXqeN6qpK2YbG51W23QSWj3Yygc1eEk2zwmKJExp",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  184,
+                     "name":  "Ansem Pumpfun",
+                     "handle":  "blknoiz06",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "GV6UUmNxz2RpKxmNAPadYKb7uQpszwqQAu3qLJxVdC52",
+                     "verified":  true,
+                     "source":  "kolexplorer.com",
+                     "type":  "influencer",
+                     "followers_estimate":  1100000,
+                     "notable_calls":  [
+                                           "WIF",
+                                           "BONK",
+                                           "ANSEM"
+                                       ],
+                     "notes":  "KOL paling terkenal di Solana."
+                 },
+                 {
+                     "id":  185,
+                     "name":  "Dov",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "8nqtxpFpuXwfXG4pBLsDkkuMMPK9FjSkBMCn542HiM3v",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 },
+                 {
+                     "id":  186,
+                     "name":  "Jadawgs",
+                     "handle":  "",
+                     "aliases":  [
+
+                                 ],
+                     "wallet":  "3H9LVHarjBoZ2YPEsgFbVD1zuERCGwfp4AeyHoHsFSEC",
+                     "verified":  false,
+                     "source":  "kolexplorer.com",
+                     "type":  "trader",
+                     "followers_estimate":  0,
+                     "notable_calls":  [
+
+                                       ],
+                     "notes":  ""
+                 }
+             ]
+}

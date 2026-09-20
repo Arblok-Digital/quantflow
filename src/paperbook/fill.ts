@@ -8,9 +8,7 @@ import {
   getPaperAccount,
   dbSavePosition,
   dbSaveOrder,
-  dbSaveOrderTolerant,
   persistSnapshot,
-  persistSnapshotTolerant,
   normalizeSymbol,
 } from "./store";
 
@@ -41,16 +39,10 @@ import {
   describeOrderRiskRejection,
   isOrderRiskGateEnabled,
 } from "../logic/orderRiskGate";
+import { roundTo, r2, r3, r4, r6, r8 } from "../lib/round";
 
-function roundTo(n: number, digits: number): number {
-  const f = Math.pow(10, digits);
-  return Math.round((n + Number.EPSILON) * f) / f;
-}
-const r2 = (n: number) => roundTo(Number(n), 2);
-const r3 = (n: number) => roundTo(Number(n), 3);
-const r4 = (n: number) => roundTo(Number(n), 4);
-const r6 = (n: number) => roundTo(Number(n), 6);
-const r8 = (n: number) => roundTo(Number(n), 8);
+// Satu implementasi pembulatan sadar-tanda (WARN-6): lihat src/lib/round.ts.
+export { roundTo };
 
 let warnedDefaultSecret = false;
 
@@ -92,9 +84,17 @@ async function marketFill(
     const book = await exchange.fetchOrderBook(symbol, ORDERBOOK_LEVELS);
     const asks: number[][] = book.asks || [];
     const bids: number[][] = book.bids || [];
-    if (asks.length > 0 && bids.length > 0) {
+    if (asks.length === 0 || bids.length === 0) {
+      // P0-02: orderbook kosong/invalid = depth tidak ada. JANGAN jatuh ke
+      // fallback ticker (fake full fill) — fail-closed NO_DEPTH di sini.
+      throw new PaperOrderError("NO_DEPTH", `Orderbook kosong untuk ${symbol} ${side}. Depth top-20 tidak tersedia.`);
+    }
+    {
       const bestAsk = Number(asks[0][0]);
       const bestBid = Number(bids[0][0]);
+      if (!isFinite(bestAsk) || !isFinite(bestBid) || bestAsk <= 0 || bestBid <= 0) {
+        throw new PaperOrderError("NO_DEPTH", `Level orderbook tidak valid untuk ${symbol} ${side}.`);
+      }
       const mid = (bestAsk + bestBid) / 2;
       const ladder = side === "buy" ? asks : bids;
       let remaining = qty;
@@ -103,6 +103,11 @@ async function marketFill(
         if (remaining <= 0) break;
         const price = Number(level[0]);
         const size = Number(level[1]);
+        if (!isFinite(price) || !isFinite(size) || price <= 0 || size <= 0) {
+          // P0-02: level rusak (0/NaN/negatif) bukan likuiditas — lewati,
+          // bukan menganggapnya sebagai ukuran.
+          continue;
+        }
         const take = Math.min(remaining, size);
         weightedSum += price * take;
         remaining -= take;
@@ -148,7 +153,12 @@ async function marketFill(
         unfilledQty: 0,
       };
     }
-  } catch {}
+  } catch (err) {
+    // P0-02: hanya error jaringan/exchange orderbook yang boleh turun ke
+    // fallback ticker; PaperOrderError (NO_DEPTH dst) WAJIB dipropagasi
+    // (fail-closed) — bukan dipakai sebagai alasan fake full fill.
+    if (err instanceof PaperOrderError) throw err;
+  }
 
   // F-03/P1: slippage DIUKUR dari mid-price pre-trade (bukan touch level).
   // Rasional: taker market menanggung ~setengah spread intrinsik BAHKAN pada
@@ -478,9 +488,8 @@ async function openPaperPositionLocked(input: OpenPaperPositionInput): Promise<O
 
   if (orderType !== "market") {
     // Limit order: reserve margin, store pending; filled later via bracket monitor.
-    // Persist NEW ke SQLite + snapshot + audit agar survive restart dan
-    // terlihat di FE (orders NEW, ledger kind=order). Margin sudah dipotong
-    // di memori SEBELUM persist agar cash konsisten dengan snapshot.
+    // P0-04: atomic tx — DB gagal → rollback cash + orders.length, throw
+    // DB_TX_FAILED fail-closed (memory == DB, retry aman, event tidak hantu).
     // SPOT: margin = notional penuh (leverage sudah dipaksa 1x di atas).
     // F1/P0: risk gate matematis pada harga limit (harga eksekusi terencana).
     enforceOrderRiskGate(initialOrder.id, {
@@ -497,11 +506,15 @@ async function openPaperPositionLocked(input: OpenPaperPositionInput): Promise<O
     if (estimatedMargin > state.cash) {
       throw new PaperOrderError("INSUFFICIENT_CASH", `Estimated margin ${roundTo(estimatedMargin, 2)} melebihi cash paper ${roundTo(state.cash, 2)}.`);
     }
+    // Snapshot for rollback
+    const cashBefore = state.cash;
+    const ordersLenBefore = state.orders.length;
     state.cash = roundTo(state.cash - estimatedMargin, 2);
     state.orders.push(initialOrder);
-    dbSaveOrderTolerant(initialOrder);
-    persistSnapshotTolerant();
     try {
+      beginTx();
+      dbSaveOrder(initialOrder);
+      persistSnapshot();
       appendAudit("order", {
         id: initialOrder.id,
         symbol,
@@ -516,9 +529,28 @@ async function openPaperPositionLocked(input: OpenPaperPositionInput): Promise<O
         reason: "PAPER_LIMIT_NEW",
         timestamp: now,
       });
+      commitTx();
     } catch (err) {
-      console.error("[audit] GAGAL tulis audit limit NEW: ", (err as Error)?.message);
+      // P0-04: rollback in-memory — memori dan DB harus sama setelah gagal.
+      state.cash = cashBefore;
+      state.orders.length = ordersLenBefore;
+      rollbackTx();
+      throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis limit order ke DB: ${(err as Error).message}`);
     }
+    // P0-04: lifecycle event SESUDAH commit (limit accepted = DB persisted).
+    appendEvent("ORDER_NEW", {
+      orderId,
+      positionId,
+      symbol,
+      side: direction,
+      type: orderType,
+      amount: qty,
+      limitPrice,
+      leverage,
+      stopLoss,
+      takeProfit,
+      submittedAt,
+    });
     const limitResult: OpenPaperPositionResult = {
       position: null as unknown as PaperPosition,
       order: initialOrder,
@@ -632,6 +664,8 @@ async function handleMarketOpenFill(
     lastMark: entryPrice,
     lastMarkUpdatedAt: now,
     feesPaidUSD: feeUSD,
+    openQty: filledQty,
+    feesTotalUSD: feeUSD,
   };
 
 
@@ -785,9 +819,12 @@ async function closePaperPositionLocked(
   // Depth-aware close: book PnL only for qty that actually filled. A partial
   // execution reduces the position by filledQty (with its realized PnL) and
   // leaves the remainder OPEN — never close qty that never filled.
+  // P0-02: partial dari full-close WAJIB memakai FillResult ini (satu hasil
+  // fill per eksekusi) — jangan fetch orderbook kedua yang bisa berubah tajam
+  // sehingga harga/fee snapshot tidak konsisten.
   const filledQty = fill.filledQty != null && fill.filledQty > 0 ? fill.filledQty : pos.qty;
   if (filledQty < pos.qty - 1e-9) {
-    return closePaperPositionPartialLocked(pos, exitReason, filledQty);
+    return closePaperPositionPartialLocked(pos, exitReason, filledQty, fill);
   }
 
   const exitPrice = fill.fillPrice;
@@ -867,6 +904,7 @@ async function closePaperPositionLocked(
     exitReason: pos.exitReason,
     realizedPnlUSD: pos.realizedPnlUSD,
     feesPaidUSD: pos.feesPaidUSD,
+    feesTotalUSD: pos.feesTotalUSD,
     lastMark: pos.lastMark,
     lastMarkUpdatedAt: pos.lastMarkUpdatedAt,
   };
@@ -882,26 +920,15 @@ async function closePaperPositionLocked(
   pos.exitReason = effectiveExitReason;
   // Position total is cumulative; receipt/account increment is this execution only.
   pos.realizedPnlUSD = roundTo((pos.realizedPnlUSD ?? 0) + roundTo(realizedPnl, 2), 2);
+  // P0-05: fee kumulatif hidup posisi — jangan double-count fee entry (sudah
+  // dicatat saat open), tambahkan fee EXIT fill ini saja → ≡ Σ fills.fee_usd.
+  // Harus dieksekusi SEBELUM feesPaidUSD ditimpa di bawah (fallback butuh nilai lama).
+  pos.feesTotalUSD = roundTo((pos.feesTotalUSD ?? pos.feesPaidUSD) + fill.feeUSD, 4);
   pos.feesPaidUSD = roundTo(totalFees, 4);
   pos.lastMark = effectiveExitPrice;
   pos.lastMarkUpdatedAt = now;
 
   state.orders.push(result.order);
-  appendEvent("POSITION_CLOSED", {
-    orderId,
-    positionId: pos.id,
-    symbol: pos.symbol,
-    side: pos.side,
-    qty: pos.qty,
-    entryPrice: pos.entryPrice,
-    exitPrice: roundTo(effectiveExitPrice, 6),
-    exitReason: effectiveExitReason,
-    realizedPnlUSD: roundTo(realizedPnl, 2),
-    feesPaidUSD: roundTo(totalFees, 4),
-    slippageBps: fill.slippageBps,
-    fillMethod: fill.method,
-    cashAfter: result.cashAfter,
-  });
 
   // P1: atomic close — posisi + order + snapshot + audit dalam satu transaksi.
   try {
@@ -935,12 +962,31 @@ async function closePaperPositionLocked(
     pos.exitReason = closeSnap.exitReason;
     pos.realizedPnlUSD = closeSnap.realizedPnlUSD;
     pos.feesPaidUSD = closeSnap.feesPaidUSD;
+    pos.feesTotalUSD = closeSnap.feesTotalUSD;
     pos.lastMark = closeSnap.lastMark;
     pos.lastMarkUpdatedAt = closeSnap.lastMarkUpdatedAt;
     rollbackTx();
     console.error(`[paperBook] Gagal menulis close ke DB: ${(err as Error).message}`);
     throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis close ke DB: ${(err as Error).message}`);
   }
+
+  // P0-04: success event SESUDAH commit — DB gagal TIDAK memancarkan
+  // POSITION_CLOSED palsu (gagal close tetap posisi OPEN + retry aman).
+  appendEvent("POSITION_CLOSED", {
+    orderId,
+    positionId: pos.id,
+    symbol: pos.symbol,
+    side: pos.side,
+    qty: pos.qty,
+    entryPrice: pos.entryPrice,
+    exitPrice: roundTo(effectiveExitPrice, 6),
+    exitReason: effectiveExitReason,
+    realizedPnlUSD: roundTo(realizedPnl, 2),
+    feesPaidUSD: roundTo(totalFees, 4),
+    slippageBps: fill.slippageBps,
+    fillMethod: fill.method,
+    cashAfter: result.cashAfter,
+  });
 
   result.position = { ...pos };
   return result;
@@ -957,11 +1003,15 @@ async function closePaperPositionLocked(
 async function closePaperPositionPartialLocked(
   pos: PaperPosition,
   exitReason: ExitReason,
-  closeQtyIn: number
+  closeQtyIn: number,
+  // P0-02: FillResult yang sudah dieksekusi pada pemanggilan ini. Diteruskan
+  // saat full-close ternyata partial — TIDAK fetch orderbook kedua. Kalau
+  // undefined (partial murni baru), jalankan marketFill sendiri (satu fetch).
+  existingFill?: FillResult
 ): Promise<ClosePaperPositionResult> {
   const closeQty = Math.min(roundTo(closeQtyIn, 8), pos.qty);
   const closingSide = pos.side === "LONG" ? "sell" : "buy";
-  const fill = await marketFill(pos.symbol, closingSide, closeQty, undefined, "none");
+  const fill = existingFill ?? (await marketFill(pos.symbol, closingSide, closeQty, undefined, "none"));
   const exitPrice = fill.fillPrice;
   const filledQty = fill.filledQty > 0 ? fill.filledQty : closeQty;
   const fraction = Math.min(1, filledQty / pos.qty);
@@ -1030,6 +1080,7 @@ async function closePaperPositionPartialLocked(
     marginUSD: pos.marginUSD,
     notionalUSD: pos.notionalUSD,
     feesPaidUSD: pos.feesPaidUSD,
+    feesTotalUSD: pos.feesTotalUSD,
     realizedPnlUSD: pos.realizedPnlUSD,
     lastMark: pos.lastMark,
     lastMarkUpdatedAt: pos.lastMarkUpdatedAt,
@@ -1041,23 +1092,12 @@ async function closePaperPositionPartialLocked(
   pos.marginUSD = roundTo(pos.marginUSD - marginRelease, 6);
   pos.notionalUSD = roundTo(pos.notionalUSD * (1 - fraction), 2);
   pos.feesPaidUSD = roundTo(pos.feesPaidUSD - entryFeePortion, 4);
+  // P0-05: fee kumulatif = exit fill ini saja (entry fee total sudah tercatat
+  // saat open; jangan tambahkan entryFeePortion lagi → ≡ Σ fills.fee_usd).
+  pos.feesTotalUSD = roundTo((pos.feesTotalUSD ?? pos.feesPaidUSD) + fill.feeUSD, 4);
   pos.realizedPnlUSD = roundTo((pos.realizedPnlUSD ?? 0) + roundTo(realizedPnl, 2), 2);
   pos.lastMark = exitPrice;
   pos.lastMarkUpdatedAt = now;
-
-  appendEvent("POSITION_PARTIAL_CLOSED", {
-    orderId,
-    positionId: pos.id,
-    symbol: pos.symbol,
-    side: pos.side,
-    closeQty: filledQty,
-    remainingQty: pos.qty,
-    exitPrice: roundTo(exitPrice, 6),
-    exitReason,
-    realizedPnlUSD: roundTo(realizedPnl, 2),
-    feesUSD: roundTo(entryFeePortion + fill.feeUSD, 4),
-    cashAfter: result.cashAfter,
-  });
 
   try {
     beginTx();
@@ -1084,12 +1124,29 @@ async function closePaperPositionPartialLocked(
     pos.marginUSD = snap.marginUSD;
     pos.notionalUSD = snap.notionalUSD;
     pos.feesPaidUSD = snap.feesPaidUSD;
+    pos.feesTotalUSD = snap.feesTotalUSD;
     pos.realizedPnlUSD = snap.realizedPnlUSD;
     pos.lastMark = snap.lastMark;
     pos.lastMarkUpdatedAt = snap.lastMarkUpdatedAt;
     rollbackTx();
     throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis partial close ke DB: ${(err as Error).message}`);
   }
+
+  // P0-04: success event SESUDAH commit — gagal partial TIDAK memancarkan
+  // POSITION_PARTIAL_CLOSED palsu (posisi tetap OPEN + qty lama, retry aman).
+  appendEvent("POSITION_PARTIAL_CLOSED", {
+    orderId,
+    positionId: pos.id,
+    symbol: pos.symbol,
+    side: pos.side,
+    closeQty: filledQty,
+    remainingQty: pos.qty,
+    exitPrice: roundTo(exitPrice, 6),
+    exitReason,
+    realizedPnlUSD: roundTo(realizedPnl, 2),
+    feesUSD: roundTo(entryFeePortion + fill.feeUSD, 4),
+    cashAfter: result.cashAfter,
+  });
 
   result.position = { ...pos };
   return result;

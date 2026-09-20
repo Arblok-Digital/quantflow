@@ -205,13 +205,13 @@ export const ReplayRunsPanel: React.FC = () => {
                     </td>
                     <td className="py-2.5 text-right whitespace-nowrap">
                       <div className="flex items-center justify-end gap-1.5">
-                        <button
+                        <button type="button"
                           onClick={() => toggleDetail(r.id)}
                           className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[10px] transition-colors"
                         >
                           {expandedId === r.id ? "Tutup" : "Detail"}
                         </button>
-                        <button
+                        <button type="button"
                           onClick={() => downloadCsv(r.id)}
                           className="px-2 py-1 rounded bg-zinc-800 hover:bg-cyan-600 hover:text-white text-zinc-300 border border-zinc-700 text-[10px] transition-colors flex items-center gap-1"
                           title="Unduh CSV trades"

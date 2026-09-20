@@ -9,6 +9,7 @@ import { httpLogger, logger } from "./src/log/logger";
 import { getBrokerStatus } from "./broker";
 import { getBookFilePath, initPaperBook, startBracketMonitor } from "./paperBook";
 import { initGuardrails } from "./guardrails";
+import { loadKillSwitchEventsFromDisk } from "./src/logic/keel/risk/kill-switch";
 import { warnIfDefaultAuditSecret } from "./src/db/core";
 import { acquireWriterLease, heartbeatWriterLease } from "./db";
 import { getBootId } from "./src/paperbook/bootId";
@@ -19,6 +20,7 @@ import { registerLedgerRoutes } from "./src/server/routes/ledger";
 import { registerAiRoutes } from "./src/server/routes/ai";
 import { registerPipelineRoutes } from "./src/server/routes/pipeline";
 import { registerReplayRoutes } from "./src/server/routes/replay";
+import { registerScoutRoutes } from "./src/server/routes/scout";
 import { registerWsProxy } from "./src/server/routes/wsProxy";
 
 dotenv.config();
@@ -119,6 +121,7 @@ registerLedgerRoutes(app);
 registerAiRoutes(app);
 registerPipelineRoutes(app);
 registerReplayRoutes(app);
+registerScoutRoutes(app);
 registerWsProxy(app, heartbeatState);
 
 // --- Server & Vite Startup ---
@@ -170,6 +173,26 @@ if (isMain || isMainESM) {
     console.error("[paperBook] " + ((err as Error)?.message || err));
     process.exit(1);
   }
-  initGuardrails();
+initGuardrails();
+  // Auditor CRIT-2 wiring gap: keel gate baca store in-memory (keelAdapter.ts:496
+  // `lastKillSwitchEvent()`) — TANPA load ini, restart proses membuat
+  // .keel-kill-switch.json diabaikan dan gate melihat killSwitchActive=false
+  // walau file masih aktif. Load state hemat ke file pada boot, setelah
+  // guardrails (keduanya independen; file tidak ada = no-op).
+  loadKillSwitchEventsFromDisk();
+  // Auditor WARN-7: merge kalender makro real ke keel (seed 2026 bisa habis).
+  // Fetch di sisi SERVER (marketFetcher → broker/ccxt & db hanya untuk Node);
+  // keelAdapter MENOLAK data, bukan mengambil sendiri — mencegah src/db masuk
+  // bundle browser (vite build gagal di node:sqlite bila edge ini statis).
+  import("./src/data/marketFetcher").then((mf) =>
+    mf
+      .fetchMacroReal(false)
+      .then((data) =>
+        import("./src/logic/keelAdapter").then(({ bootstrapKeelMacro }) =>
+          bootstrapKeelMacro(Date.now(), { ok: data.ok, source: data.source, highImpactUpcoming: data.highImpactUpcoming }),
+        ),
+      )
+      .catch((err: unknown) => console.warn(`[bootstrap] keel macro: ${err instanceof Error ? err.message : err}`)),
+  );
   startServer();
 }

@@ -199,7 +199,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
               <p className="text-xs text-zinc-400">Sumber: <span className="text-zinc-300">GET /api/ledger</span> • persist di SQLite • pagination via cursor</p>
             </div>
           </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors relative z-10">
+          <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors relative z-10">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -207,7 +207,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
         {/* Action Bar */}
         <div className="my-4 flex flex-wrap items-center justify-between gap-3 bg-zinc-900/60 p-3 rounded-lg border border-zinc-800/80 relative z-10">
           <div className="flex flex-wrap items-center gap-2">
-            <button
+            <button type="button"
               onClick={handleVerifyChain}
               disabled={isVerifying}
               className="flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-mono font-bold text-zinc-950 hover:bg-emerald-400 disabled:opacity-50 transition-colors shadow-lg shadow-emerald-500/10"
@@ -215,7 +215,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
               <ShieldCheck className="h-4 w-4" />
               <span>{isVerifying ? "MEMVERIFIKASI..." : "VERIFY CHAIN"}</span>
             </button>
-            <button
+            <button type="button"
               onClick={() => fetchLedger(null, false)}
               disabled={loading}
               className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-mono text-zinc-300 hover:bg-zinc-700 disabled:opacity-50 transition-colors border border-zinc-700"
@@ -229,7 +229,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
               <Filter className="w-3.5 h-3.5 text-zinc-500" />
               <div className="flex rounded-lg overflow-hidden border border-zinc-700">
                 {(["all", "decision", "order", "exit", "replay_export"] as KindFilter[]).map((k) => (
-                  <button
+                  <button type="button"
                     key={k}
                     onClick={() => setFilterKind(k)}
                     className={`px-2.5 py-1 text-[11px] font-mono font-bold uppercase transition ${filterKind === k ? "bg-zinc-100 text-zinc-900" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"}`}
@@ -241,7 +241,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
             </div>
           </div>
 
-          <button
+          <button type="button"
             onClick={handleExportJSON}
             disabled={entries.length === 0}
             className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-mono text-zinc-300 hover:bg-zinc-700 disabled:opacity-50 transition-colors border border-zinc-700"
@@ -333,7 +333,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
                       <div className="text-zinc-300 break-all leading-relaxed text-[11px]">{isExpanded ? e.payload : payloadPreview}</div>
                       <div className="flex items-center gap-2 mt-1">
                         {e.payload.length > 140 && (
-                          <button onClick={() => toggleExpand(e.seq)} className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1">
+                          <button type="button" onClick={() => toggleExpand(e.seq)} className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1">
                             {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                             {isExpanded ? "Tutup" : "Expand"}
                           </button>
@@ -353,7 +353,7 @@ export const AuditLedgerModal: React.FC<AuditLedgerModalProps> = ({ isOpen, onCl
         {/* Load More */}
         {nextCursor != null && (
           <div className="pt-3 flex justify-center relative z-10">
-            <button
+            <button type="button"
               onClick={handleLoadMore}
               disabled={loadingMore}
               className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-mono border border-zinc-700 disabled:opacity-50 flex items-center gap-2"

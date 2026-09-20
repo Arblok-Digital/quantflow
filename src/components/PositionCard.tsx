@@ -206,7 +206,7 @@ export const PositionCard: React.FC<PositionCardProps> = ({
             </span>
           </div>
 
-          <button
+          <button type="button"
             onClick={handleClose}
             disabled={busy}
             className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-300 hover:text-white font-mono text-xs font-bold border border-zinc-700 hover:border-rose-500 transition disabled:opacity-50 disabled:cursor-wait"
@@ -376,7 +376,7 @@ export const PositionCard: React.FC<PositionCardProps> = ({
       {/* Quick Defensive Controls */}
       <div className="flex items-center justify-end gap-2 pt-1 font-mono text-xs flex-wrap">
         {!editingBracket ? (
-          <button
+          <button type="button"
             onClick={() => { setEditingBracket(true); setEditSL(String(pos.stopLoss)); setEditTP(String(pos.takeProfit)); setEditErr(null); }}
             className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-[11px] transition"
             title="Ubah SL & TP manual (validasi LONG: SL < harga < TP)"
@@ -391,15 +391,15 @@ export const PositionCard: React.FC<PositionCardProps> = ({
             <label className="flex items-center gap-1 text-[11px] text-zinc-400">
               TP <input type="number" step="any" value={editTP} onChange={(e) => setEditTP(e.target.value)} className="w-24 px-1.5 py-1 rounded bg-zinc-950 border border-zinc-700 text-zinc-100 font-mono text-[11px] focus:outline-none focus:border-amber-500/60" />
             </label>
-            <button onClick={handleSaveBracket} disabled={busy} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition disabled:opacity-50">
+            <button type="button" onClick={handleSaveBracket} disabled={busy} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition disabled:opacity-50">
               {busy ? "…" : "Simpan"}
             </button>
-            <button onClick={() => setEditingBracket(false)} className="px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 text-[11px] transition">
+            <button type="button" onClick={() => setEditingBracket(false)} className="px-2 py-1 rounded text-zinc-500 hover:text-zinc-300 text-[11px] transition">
               Batal
             </button>
           </span>
         )}
-        <button
+        <button type="button"
           onClick={handleBreakEven}
           disabled={busy}
           className="px-2.5 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 text-[11px] transition disabled:opacity-50"

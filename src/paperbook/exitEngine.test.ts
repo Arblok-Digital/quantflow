@@ -4,6 +4,7 @@ import {
   normalizeExitConfig,
   slTightens,
   slOnSaneSide,
+  feeAwareBreakEvenStop,
 } from "./exitEngine";
 import { TAKER_FEE_RATE } from "./config";
 import type { PaperPosition } from "./types";
@@ -271,5 +272,76 @@ describe("helper ratchet", () => {
     expect(slOnSaneSide(long, 100_500, 100_000)).toBe(false);
     expect(slOnSaneSide(short, 101_000, 100_000)).toBe(true);
     expect(slOnSaneSide(short, 99_500, 100_000)).toBe(false);
+  });
+});
+
+describe("P0-03 — BE sadar-fee AKSIUAL (fee entry menempel di sisa posisi + estimasi exit)", () => {
+  it("entry taker penuh → setara rumus lama E*(1+f)/(1-f) / E*(1-f)/(1+f)", () => {
+    // feesPaidUSD = E*q*TAKER = 100_000*0.01*0.0004 = 0.4 (fixture mkPos).
+    const long = mkPos();
+    const short = mkPos({ side: "SHORT", stopLoss: 102_000, takeProfit: 96_000, feesPaidUSD: 0.4 });
+    expect(feeAwareBreakEvenStop(long)).toBeCloseTo(BE_LONG, 6);
+    expect(feeAwareBreakEvenStop(short)).toBeCloseTo(BE_SHORT, 6);
+  });
+
+  it("entry MAKER (fee lebih murah) → BE lebih DEKAT ke entry daripada versi taker penuh", () => {
+    // feesPaidUSD = E*q*MAKER = 100_000*0.01*0.0002 = 0.2.
+    const longMaker = mkPos({ feesPaidUSD: 0.2 });
+    const shortMaker = mkPos({ side: "SHORT", stopLoss: 102_000, takeProfit: 96_000, feesPaidUSD: 0.2 });
+    const longTakerBE = feeAwareBreakEvenStop(mkPos({ feesPaidUSD: 0.4 }));
+    const shortTakerBE = feeAwareBreakEvenStop(mkPos({ side: "SHORT", stopLoss: 102_000, takeProfit: 96_000, feesPaidUSD: 0.4 }));
+    // LONG: BE maker < BE taker (lebih dekat entry 100.000); SHORT: BE maker > BE taker.
+    expect(feeAwareBreakEvenStop(longMaker)).toBeLessThan(longTakerBE);
+    expect(feeAwareBreakEvenStop(longMaker)).toBeGreaterThan(100_000);
+    expect(feeAwareBreakEvenStop(shortMaker)).toBeGreaterThan(shortTakerBE);
+    expect(feeAwareBreakEvenStop(shortMaker)).toBeLessThan(100_000);
+  });
+
+  it("setelah partial (fee entry tersisa tinggal di sisa qty) → BE dikalkulasi dari fee tersisa, konsisten net=0", () => {
+    // Partial 20% ditutup: qty 0.01→0.008, feesPaidUSD 0.4→0.32 (fill.ts:996,1068).
+    const afterPartial = mkPos({ qty: 0.008, feesPaidUSD: 0.32, stopLoss: 98_000 });
+    const be = feeAwareBreakEvenStop(afterPartial);
+    // (E*q + F)/(q*(1-f)) = (800 + 0.32)/(0.008*0.9996) ≈ 100_080.03.
+    expect(be).toBeCloseTo(BE_LONG, 6);
+    expect(be).toBeGreaterThan(100_000);
+  });
+
+  it("feesPaidUSD tanpa nilai (fallback) → estimasi jujur E*q*TAKER, bukan menganggap nol fee", () => {
+    const unknown = mkPos({ feesPaidUSD: undefined as unknown as number });
+    expect(feeAwareBreakEvenStop(unknown)).toBeCloseTo(BE_LONG, 6);
+  });
+});
+
+describe("P0-03 — BE otomatis: offset konfigurasi dipakai; arm hanya saat proteksi valid", () => {
+  it("breakEvenOffsetPct 0.2% → SL lebih jauh dari entry (honor offset), bukan diam-diam diabaikan", () => {
+    const pos = withPlan(mkPos(), { breakEvenTriggerR: 1, breakEvenOffsetPct: 0.002 });
+    const r = evaluatePositionExits(pos, W(102_000, 102_300, 101_800));
+    // offsetBe = 100_000*1.002 = 100_200 > feeBe (±100_080.03) → dipakai.
+    expect(r.statePatch?.breakevenArmed).toBe(true);
+    expect(r.newStopLoss).toBeCloseTo(100_200, 6);
+  });
+
+  it("trigger tercapai tapi mark CRASH di bawah BE (salah sisi) → TIDAK armed, SL tidak dipancarkan; pass berikutnya boleh coba lagi", () => {
+    // high 1m = 102_300 (trigger 1R tercapai), tapi mark sekarang 100_000 = BELUM profit.
+    const pos = withPlan(mkPos(), { breakEvenTriggerR: 1 });
+    const r1 = evaluatePositionExits(pos, W(100_000, 102_300, 100_000));
+    expect(r1.statePatch?.breakevenArmed ?? false).toBe(false);
+    expect(r1.newStopLoss).toBeUndefined();
+
+    // Pass berikutnya mark naik di atas BE → BE baru valid → armed.
+    const after = { ...pos.exitPlan!.state, ...r1.statePatch };
+    const r2 = evaluatePositionExits(withPlan(mkPos(), pos.exitPlan!.config, after), W(101_000, 102_400, 101_000));
+    expect(r2.statePatch?.breakevenArmed).toBe(true);
+    expect(r2.newStopLoss).toBeCloseTo(BE_LONG, 6);
+  });
+
+  it("SHORT: arm hanya bila mark di atas BE (LONG tinggi); mark di bawah → tidak armed", () => {
+    const pos = withPlan(
+      mkPos({ side: "SHORT", stopLoss: 102_000, takeProfit: 96_000, feesPaidUSD: 0.4 }),
+      { breakEvenTriggerR: 1 }
+    );
+    // Trigger SHORT 1R = 98_000 tercapai (low 97_400), tapi mark rebounce ke atas BE 99_920.
+    const r = evaluatePositionExits(pos, W(100_500, 100_900, 97_400));
+    expect(r.statePatch?.breakevenArmed ?? false).toBe(false);
   });
 });

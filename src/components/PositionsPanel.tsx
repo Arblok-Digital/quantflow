@@ -169,10 +169,11 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
         return;
       }
       const realized = Number(payload?.realizedPnlUSD ?? 0);
+      const partial = Boolean(payload?.partial);
       pushToast(
         realized >= 0 ? "success" : "warning",
-        `Posisi ${pos.symbol} ditutup`,
-        `${realized >= 0 ? "Profit" : "Loss"} $${Math.abs(realized).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        partial ? `Posisi ${pos.symbol} ditutup SEBAGIAN` : `Posisi ${pos.symbol} ditutup`,
+        `${realized >= 0 ? "Profit" : "Loss"} $${Math.abs(realized).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${partial ? ` — sisa ${payload?.remainingQty} masih OPEN` : ""}`
       );
       await load();
     } catch (err) {
@@ -199,6 +200,13 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
           message: String(payload?.message || "Update posisi gagal."),
         });
         pushToast("error", `Break-even ${pos.symbol} gagal`, String(payload?.reason || `HTTP ${res.status}`));
+        return;
+      }
+      const be = payload?.position?.breakEven as { applied?: boolean; reason?: string; note?: string } | undefined;
+      if (be && be.applied === false) {
+        const skipText = `${be.reason || "BE_SKIPPED"}: ${be.note || "Break-even tidak diterapkan."}`;
+        setActionError({ reason: String(be.reason || "BE_SKIPPED"), message: skipText });
+        pushToast("error", `Break-even ${pos.symbol} di-skip`, skipText);
         return;
       }
       pushToast("success", `SL ${pos.symbol} → Break-even`, "Stop loss digeser ke harga entry (+buffer fee).");
@@ -301,7 +309,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
               </span>
               <div className="flex items-center gap-1.5 shrink-0">
                 {actionError.duplicatePositionId && (
-                  <button
+                  <button type="button"
                     onClick={async () => {
                       if (!window.confirm(`Tutup posisi yang sudah ada (${actionError.duplicatePositionId})?`)) return;
                       setBusyId(actionError.duplicatePositionId!);
@@ -332,7 +340,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
                     Close existing
                   </button>
                 )}
-                <button
+                <button type="button"
                   onClick={() => setActionError(null)}
                   className="text-rose-400 hover:text-rose-200 transition-colors shrink-0"
                   title="Tutup"
@@ -419,7 +427,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
                         <td className="py-2.5 text-right whitespace-nowrap">
                           <div className="flex items-center justify-end gap-1.5">
                             {canBreakEven && (
-                              <button
+                              <button type="button"
                                 onClick={() => handleBreakEven(pos)}
                                 disabled={busy}
                                 className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 text-[10px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -428,7 +436,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({ onServerPosition
                                 Move to BE
                               </button>
                             )}
-                            <button
+                            <button type="button"
                               onClick={() => handleClose(pos)}
                               disabled={busy}
                               className="px-2 py-1 rounded bg-zinc-800 hover:bg-rose-600 hover:text-white text-slate-300 border border-zinc-700 hover:border-rose-500 text-[10px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"

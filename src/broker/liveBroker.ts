@@ -10,7 +10,7 @@ import {
   getExchange,
   ensureMarketsLoaded,
   fetchCcxtTicker,
-  fetchBrokerBalance,
+  fetchBrokerEquityUsd,
 } from "../../broker";
 import { evaluateGuardrails, GuardrailRejectedError, recordOrderPlaced } from "../../guardrails";
 import { guardReject } from "./routerUtils";
@@ -58,9 +58,7 @@ async function evaluateLiveRiskGate(body: any): Promise<OrderRiskEvaluation | nu
 
   let equity: number | undefined;
   try {
-    const balances = await fetchBrokerBalance();
-    const usdt = balances.find((b) => b.currency === "USDT") ?? balances[0];
-    equity = usdt ? Number(usdt.total) : undefined;
+    equity = await fetchBrokerEquityUsd();
   } catch {
     equity = undefined;
   }

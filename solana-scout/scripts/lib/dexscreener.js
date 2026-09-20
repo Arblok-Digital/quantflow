@@ -87,6 +87,13 @@ export function pairToMeta(pair, now = Date.now()) {
     pairAddress: pair?.pairAddress || null,
     pairCreatedAt: created,
     chainId: pair?.chainId || null,
+    // Data harga/volume — dipakai gate MID_PUMP_EXIT (exit-liquidity guard).
+    priceUsd: Number(pair?.priceUsd) || null,
+    priceChangeH24: pair?.priceChange?.h24 != null ? Number(pair.priceChange.h24) : null,
+    volumeH1: pair?.volume?.h1 != null ? Number(pair.volume.h1) : null,
+    volumeH24: Number(pair?.volume?.h24) || null,
+    txnsH1: pair?.txns?.h1?.buys ?? null,
+    txnsH24: pair?.txns?.h24?.buys ?? null,
   };
 }
 
@@ -129,6 +136,9 @@ export function candidatesFromDiscovery(
 
 // Orkestrasi lengkap: boosts -> batch pair data -> kandidat.
 export async function discoverBoosted({ limit = 50, maxMcap = 5_000_000, minLiq = 0, now = Date.now() } = {}) {
+  limit = Number.isFinite(limit) ? limit : 50;
+  maxMcap = Number.isFinite(maxMcap) ? maxMcap : 5_000_000;
+  minLiq = Number.isFinite(minLiq) ? minLiq : 0;
   const boosts = await dexscreenerGet('/token-boosts/latest/v1');
   const mints = filterBoosted(boosts);
   const pairsByMint = new Map();

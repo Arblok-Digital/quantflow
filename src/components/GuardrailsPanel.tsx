@@ -428,7 +428,7 @@ export const GuardrailsPanel: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <button
+            <button type="button"
               onClick={handleGuardsToggle}
               disabled={guardBusy}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-xs border transition ${
@@ -441,7 +441,7 @@ export const GuardrailsPanel: React.FC = () => {
               {guardBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
               {guardsOn ? "Matikan Guard (Training)" : "Aktifkan Guard"}
             </button>
-            <button
+            <button type="button"
               onClick={handleKillToggle}
               disabled={killBusy}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-xs border transition ${
@@ -455,7 +455,7 @@ export const GuardrailsPanel: React.FC = () => {
             </button>
 
             {isArmed ? (
-              <button
+              <button type="button"
                 onClick={() => handleArm(false)}
                 disabled={armBusy}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 font-bold text-xs disabled:opacity-50 transition"
@@ -464,7 +464,7 @@ export const GuardrailsPanel: React.FC = () => {
                 DISARM Live
               </button>
             ) : (
-              <button
+              <button type="button"
                 onClick={() => handleArm(true)}
                 disabled={armBusy}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 border border-amber-600 font-bold text-xs disabled:opacity-50 transition"

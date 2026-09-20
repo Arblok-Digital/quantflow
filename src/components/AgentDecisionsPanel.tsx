@@ -177,7 +177,7 @@ export const AgentDecisionsPanel: React.FC = () => {
                   <span className="text-zinc-600 text-[11px] ml-auto">
                     {new Date(d.createdAt).toLocaleString("id-ID")}
                   </span>
-                  <button
+                  <button type="button"
                     onClick={() => toggleExpand(d.id)}
                     className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-violet-400 border border-zinc-800 text-[10px] transition-colors"
                   >
@@ -206,7 +206,7 @@ export const AgentDecisionsPanel: React.FC = () => {
 
       {nextCursor != null && (
         <div className="pt-3 flex justify-center">
-          <button
+          <button type="button"
             onClick={() => {
               setLoadingMore(true);
               load(nextCursor, true);

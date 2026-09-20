@@ -251,7 +251,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
             </div>
           </div>
 
-          <button
+          <button type="button"
             onClick={onClose}
             className="relative rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
           >
@@ -329,7 +329,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
                   {status?.mode === "live" ? "LIVE" : "PAPER"}
                 </span>
               </div>
-              <button
+              <button type="button"
                 onClick={loadBalance}
                 disabled={isLoadingBalance}
                 className="text-[10px] text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
@@ -389,7 +389,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-[11px] text-zinc-400">API Secret</label>
-                <button
+                <button type="button"
                   onClick={() => setShowSecret(!showSecret)}
                   className="text-[10px] text-zinc-400 hover:text-zinc-200 flex items-center gap-1"
                 >
@@ -417,7 +417,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
             </label>
 
             <div className="flex flex-wrap items-center gap-2 pt-1">
-              <button
+              <button type="button"
                 onClick={handleSave}
                 disabled={!apiKey.trim() || !apiSecret.trim() || isSaving}
                 className="flex items-center gap-1 rounded bg-emerald-500 px-3 py-1.5 text-xs font-bold text-zinc-950 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -426,7 +426,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
                 Simpan Key
               </button>
 
-              <button
+              <button type="button"
                 onClick={handleTest}
                 disabled={!status?.credentialsConfigured || isTesting}
                 className="flex items-center gap-1 rounded bg-cyan-500/15 px-3 py-1.5 text-xs font-bold text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/25 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -435,7 +435,7 @@ export const BrokerModal: React.FC<BrokerModalProps> = ({ isOpen, onClose }) => 
                 Tes Koneksi
               </button>
 
-              <button
+              <button type="button"
                 onClick={handleClear}
                 disabled={!status?.credentialsConfigured || isClearing}
                 className="flex items-center gap-1 rounded bg-rose-500/10 px-3 py-1.5 text-xs font-bold text-rose-400 border border-rose-500/30 hover:bg-rose-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"

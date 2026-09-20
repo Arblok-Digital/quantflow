@@ -335,7 +335,10 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
           return { ok: false as const, reason, message: String(payload?.message || "Close ditolak server.") };
         }
         await load();
-        return { ok: true as const, realizedPnlUSD: Number((payload as any)?.realizedPnlUSD ?? 0) };
+        // P0-02: bawa status partial ke UI agar tidak menyebut posisi
+        // "ditutup" penuh ketika tersisa qty masih OPEN.
+        const partial = Boolean((payload as any)?.partial);
+        return { ok: true as const, realizedPnlUSD: Number((payload as any)?.realizedPnlUSD ?? 0), partial };
       } catch (err) {
         return { ok: false as const, reason: "NETWORK", message: (err as Error).message };
       }
@@ -363,6 +366,16 @@ export function usePaperTrading(options: UsePaperTradingOptions) {
             setPositions((prev) => prev.map((p) => (p.id === positionId ? { ...p, stopLoss: p.entryPrice, potentialLossUSD: 0 } : p)));
           }
           return { ok: false as const, reason: String(payload?.reason || `HTTP_${res.status}`), message: String(payload?.message || "Update posisi gagal.") };
+        }
+        // P0-03: BE bisa di-SKIP (mark basi / sisi salah / SL sudah lebih ketat).
+        // FE tidak boleh bilang "digeser" padahal tidak. payload.position.breakEven.
+        const be = payload?.position?.breakEven as { applied?: boolean; reason?: string; note?: string } | undefined;
+        if (be && be.applied === false) {
+          return {
+            ok: false as const,
+            reason: String(be.reason || "BE_SKIPPED"),
+            message: String(be.note || "Break-even tidak diterapkan (mark/SL belum menunjang)."),
+          };
         }
         await load();
         return { ok: true as const };

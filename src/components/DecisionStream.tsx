@@ -120,7 +120,7 @@ export const DecisionStream: React.FC<DecisionStreamProps> = ({
             <span className="px-2 py-0.5 bg-zinc-800 text-zinc-400 text-[10px] rounded border border-zinc-700/50 font-mono">
               {decision?.source || "AI-DECISION-SERVER"}
             </span>
-            <button
+            <button type="button"
               onClick={() => setShowPromptInspector(!showPromptInspector)}
               className="px-2 py-0.5 text-[10px] font-mono rounded bg-zinc-950 hover:bg-zinc-800 text-zinc-400 hover:text-cyan-400 border border-zinc-800 transition-colors flex items-center gap-1"
             >

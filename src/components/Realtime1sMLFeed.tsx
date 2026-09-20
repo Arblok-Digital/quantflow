@@ -101,7 +101,7 @@ export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <button
+            <button type="button"
               onClick={() => exportMLDataCSV(ticks, symbol)}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-zinc-950 font-bold font-mono text-xs shadow-md shadow-cyan-600/20 transition"
               title="Download 1-second dataset as CSV"
@@ -109,7 +109,7 @@ export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
               <Download className="w-3.5 h-3.5" />
               <span>Export CSV</span>
             </button>
-            <button
+            <button type="button"
               onClick={() => exportMLDataJSON(ticks, symbol)}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 font-mono text-xs transition"
               title="Download ML Feature Vector Tensors as JSON"
@@ -302,7 +302,7 @@ export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 sm:p-5">
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3 mb-4 flex-wrap gap-2">
           <div className="flex items-center gap-1.5 bg-zinc-950 p-1 rounded-xl border border-zinc-800 font-mono text-xs">
-            <button
+            <button type="button"
               onClick={() => setActiveSubTab("ticks")}
               className={`px-3 py-1 rounded-lg transition font-semibold flex items-center gap-1.5 ${
                 activeSubTab === "ticks"
@@ -313,7 +313,7 @@ export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
               <Activity className="w-3.5 h-3.5" />
               <span>Live Tick Stream ({ticks.length})</span>
             </button>
-            <button
+            <button type="button"
               onClick={() => setActiveSubTab("tensors")}
               className={`px-3 py-1 rounded-lg transition font-semibold flex items-center gap-1.5 ${
                 activeSubTab === "tensors"
@@ -324,7 +324,7 @@ export const Realtime1sMLFeed: React.FC<Realtime1sMLFeedProps> = ({
               <Cpu className="w-3.5 h-3.5" />
               <span>ML Feature Vector (7D Tensor)</span>
             </button>
-            <button
+            <button type="button"
               onClick={() => setActiveSubTab("docs")}
               className={`px-3 py-1 rounded-lg transition font-semibold flex items-center gap-1.5 ${
                 activeSubTab === "docs"

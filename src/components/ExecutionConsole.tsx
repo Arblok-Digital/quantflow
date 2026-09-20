@@ -197,7 +197,7 @@ const EventRow: React.FC<{ event: PaperEvent }> = ({ event }) => {
         <span className="text-zinc-300 min-w-0 flex-1 truncate" title={desc.title || desc.text}>
           {desc.text}
         </span>
-        <button
+        <button type="button"
           onClick={() => setExpanded((v) => !v)}
           className="flex items-center gap-1 px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-cyan-400 border border-zinc-800 text-[10px] transition-colors shrink-0"
           title="Tampilkan payload JSON mentah dari server"

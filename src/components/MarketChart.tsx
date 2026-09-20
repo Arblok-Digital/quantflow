@@ -436,7 +436,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           <span className="hidden sm:inline font-mono text-[9px] text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5">
             {visibleFirst ? `${formatTimeLabel(visibleFirst, timeframe)} — ${formatTimeLabel(visibleLast ?? visibleFirst, timeframe)}` : "—"}
           </span>
-          <button
+          <button type="button"
             onClick={() => applyZoom(1 / 1.4)}
             title="Zoom out (scroll wheel juga bisa)"
             className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
@@ -446,7 +446,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           <span className="font-mono text-[9px] font-bold text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5" title="Candle terlihat / total">
             {visibleCount}
           </span>
-          <button
+          <button type="button"
             onClick={() => applyZoom(1.4)}
             title="Zoom in (scroll wheel juga bisa)"
             className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
@@ -512,7 +512,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         </div>
 
         {/* Toggle panel indikator — pill RSI/MACD/Flow pindah ke overlay dalam chart */}
-        <button
+        <button type="button"
           onClick={() => setIndicatorsOpen((v) => !v)}
           className="flex items-center gap-1.5 rounded-xl bg-zinc-950 px-2.5 py-1.5 border border-zinc-800 text-[11px] font-mono text-zinc-300 hover:border-zinc-600 transition"
           title="Tampilkan/sembunyikan panel indikator RSI • EMA • MACD • Order Flow"
@@ -612,7 +612,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
               {ALL_TIMEFRAMES.map((tf) => {
                 const isActive = timeframe === tf.id;
                 return (
-                  <button
+                  <button type="button"
                     key={tf.id}
                     onClick={() => onSelectTimeframe?.(tf.id)}
                     className={`relative px-2.5 py-1 rounded-lg text-xs font-mono transition-all flex items-center gap-1 ${
@@ -980,7 +980,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
               <span className="hidden sm:inline font-mono text-[9px] text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5">
                 {visibleFirst ? `${formatTimeLabel(visibleFirst, timeframe)} — ${formatTimeLabel(visibleLast ?? visibleFirst, timeframe)}` : "—"}
               </span>
-              <button
+              <button type="button"
                 onClick={() => applyZoom(1 / 1.4)}
                 title="Zoom out (scroll wheel juga bisa)"
                 className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
@@ -990,7 +990,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
               <span className="font-mono text-[9px] font-bold text-zinc-500 bg-zinc-950/85 border border-zinc-800 rounded px-1.5 py-0.5" title="Candle terlihat / total">
                 {visibleCount}
               </span>
-              <button
+              <button type="button"
                 onClick={() => applyZoom(1.4)}
                 title="Zoom in (scroll wheel juga bisa)"
                 className="w-6 h-6 grid place-items-center rounded bg-zinc-950/85 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 font-mono text-[13px] font-black"
@@ -1003,7 +1003,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           {/* MULTI-TIMEFRAME (MTF) CONFLUENCE MATRIX RIBBON ("INDIKATOR TF") */}
           {/* Default collapsed → 1 baris ringkas; expand untuk 8 tile detail. */}
           <div className="mt-2.5 pt-2 border-t border-zinc-800/90 bg-zinc-900/60 rounded-xl p-2">
-            <button
+            <button type="button"
               onClick={() => setMatrixOpen((v) => !v)}
               className="w-full flex items-center justify-between px-1 mb-1.5"
               title="Tampilkan/sembunyikan matrix confluence multi-timeframe"
@@ -1047,7 +1047,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                 const isBear = item.bias === "BEARISH";
 
                 return (
-                  <button
+                  <button type="button"
                     key={item.tf}
                     onClick={() => onSelectTimeframe?.(item.tf)}
                     className={`flex flex-col p-1.5 rounded-lg border text-left transition-all ${

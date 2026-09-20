@@ -90,7 +90,7 @@ export const OnChainPanel: React.FC<OnChainPanelProps> = ({ metrics, onRefresh }
           </div>
 
           {onRefresh && (
-            <button
+            <button type="button"
               id="refresh-onchain-btn"
               onClick={onRefresh}
               className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition border border-slate-700"

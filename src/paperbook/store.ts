@@ -1,5 +1,5 @@
 import { getDb, initDb, loadAllOrdersDb, loadOpenPositionsDb, getLatestSnapshotDb, savePositionDb, saveOrderDb, saveFillDb, saveSnapshotDb, beginTx, commitTx, rollbackTx, appendAudit } from "../../db";
-import { INITIAL_PAPER_CASH, MAINTENANCE_MARGIN_RATE, EVENT_RING_SIZE, TAKER_FEE_RATE } from "./config";
+import { INITIAL_PAPER_CASH, MAINTENANCE_MARGIN_RATE, EVENT_RING_SIZE, MARK_TTL_MS, TAKER_FEE_RATE } from "./config";
 import { getBootId } from "./bootId";
 import { withPaperMutationLock } from "./mutex";
 import {
@@ -15,7 +15,10 @@ import {
   UpdatePaperPositionInput,
 } from "./types";
 import { PaperOrderError } from "./errors";
-import { normalizeExitConfig } from "./exitEngine";
+import { normalizeExitConfig, slTightens, slOnSaneSide, feeAwareBreakEvenStop } from "./exitEngine";
+import { r2, r3, r4, r6, r8 } from "../lib/round";
+
+export { r2, r3, r4, r6, r8 };
 
 export interface PaperBookState {
   positions: PaperPosition[];
@@ -26,16 +29,6 @@ export interface PaperBookState {
   cash: number;
   realizedPnl: number;
 }
-
-function roundTo(n: number, digits: number): number {
-  const f = Math.pow(10, digits);
-  return Math.round((n + Number.EPSILON) * f) / f;
-}
-export const r2 = (n: number) => roundTo(Number(n), 2);
-export const r3 = (n: number) => roundTo(Number(n), 3);
-export const r4 = (n: number) => roundTo(Number(n), 4);
-export const r6 = (n: number) => roundTo(Number(n), 6);
-export const r8 = (n: number) => roundTo(Number(n), 8);
 
 export let state: PaperBookState = {
   positions: [],
@@ -66,15 +59,32 @@ export function freshState(): PaperBookState {
 // F-01 (P1): writer DB helpers bersifat fail-closed — error menulis DILONTAR
 // (tidak diswallow), sehingga pemanggil dalam beginTx() bisa rollbackTx()
 // seluruh transaksi. Pemanggil luar transaksi wajib menangkapnya secara toleran.
-export function persistSnapshot(): void {
+/**
+ * P0-01: SATU hitungan account — dipakai bersama oleh snapshot, account dan
+ * balance. Equity = free cash + seluruh margin (posisi OPEN + cadangan limit
+ * NEW) + uPnL. Margin limit NEW adalah cadangan (bagian equity), bukan loss:
+ * cash sudah dipotong saat NEW (fill.ts), jadi reserved dikembalikan ke equity
+ * agar pasang limit tidak menurunkan equity semu (F9). Snapshot sebelumnya
+ * mengabaikan reservedMargin → equity curve/maxDrawdown menampilkan drawdown
+ * semu; margin_used snapshots juga under-report.
+ */
+function computeAccountMetrics() {
   const open = state.positions.filter((p) => p.status === "OPEN");
   const marginLocked = open.reduce((sum, p) => sum + p.marginUSD, 0);
+  const reservedMargin = state.orders
+    .filter((o) => o.status === "NEW" && o.type === "limit" && o.limitPrice && o.limitPrice > 0)
+    .reduce((sum, o) => sum + (o.limitPrice! * o.amount) / (o.leverage || 1), 0);
   const unrealized = open.reduce((sum, p) => sum + unrealizedPnlFor(p), 0);
-  const equity = state.cash + marginLocked + unrealized;
+  const equity = state.cash + marginLocked + reservedMargin + unrealized;
+  return { marginLocked, reservedMargin, unrealized, equity };
+}
+
+export function persistSnapshot(): void {
+  const { marginLocked, reservedMargin, unrealized, equity } = computeAccountMetrics();
   saveSnapshotDb({
     ts: Date.now(),
     cash: r2(state.cash),
-    margin_used: r2(marginLocked),
+    margin_used: r2(marginLocked + reservedMargin),
     equity: r2(equity),
     unrealized_pnl: r2(unrealized),
     // F5: tandai penulis — kalau dua proses menulis DB yang sama, lineage
@@ -100,6 +110,9 @@ export function dbSavePosition(pos: PaperPosition): void {
     close_price: pos.exitPrice ?? null,
     realized_pnl_usd: pos.realizedPnlUSD ?? null,
     fees_usd: pos.feesPaidUSD ?? null,
+    // P0-05: qty asal (ukuran trade) + fee kumulatif hidup posisi (rekonsiliasi vs fills).
+    open_qty: pos.openQty ?? pos.qty,
+    fees_total_usd: pos.feesTotalUSD ?? pos.feesPaidUSD ?? null,
     entry_source: pos.entrySource || "MANUAL",
     decision_id: pos.decisionId ?? null,
     // F3: exit plan (BE/trailing/partial/time-stop) — JSON atau NULL.
@@ -136,6 +149,7 @@ export function dbSaveOrder(order: PaperOrderReceipt): void {
     closed_at: null,
     realized_pnl_usd: null,
     decision_id: order.meta?.decisionId ?? null,
+    position_id: order.positionId ?? null,
   });
   // also save fills row (amount = filledQty terukur; sisa unfilled TIDAK pernah jadi fill)
   if (order.fillPrice != null) {
@@ -279,6 +293,10 @@ export function initPaperBook(): void {
         lastMark: entryPrice,
         lastMarkUpdatedAt: Date.now(),
         feesPaidUSD: r.fees_usd != null ? Number(r.fees_usd) : r4(entryPrice * qty * TAKER_FEE_RATE),
+        // P0-05: openQty = qty asal; feesTotalUSD = fee kumulatif hidup posisi
+        // (fallback jujur untuk baris lama: qty/fees saat ini, bukan backfill asal).
+        openQty: r.open_qty != null ? Number(r.open_qty) : qty,
+        feesTotalUSD: r.fees_total_usd != null ? Number(r.fees_total_usd) : r.fees_usd != null ? Number(r.fees_usd) : r4(entryPrice * qty * TAKER_FEE_RATE),
         realizedPnlUSD: r.realized_pnl_usd != null ? Number(r.realized_pnl_usd) : 0,
       };
     });
@@ -368,22 +386,13 @@ export function unrealizedPnlFor(pos: PaperPosition): number {
 }
 
 export function getPaperAccount(): PaperAccountSnapshot {
-  const open = state.positions.filter((p) => p.status === "OPEN");
-  const marginLocked = open.reduce((sum, p) => sum + p.marginUSD, 0);
-  // F9 (2026-09-17): margin order limit NEW adalah CADANGAN — bagian equity,
-  // bukan uang hilang. Tanpa ini, pasang limit menurunkan equity semu
-  // (terverifikasi E2E: 10000 → 9991 tanpa loss apa pun).
-  const reservedMargin = state.orders
-    .filter((o) => o.status === "NEW" && o.type === "limit" && o.limitPrice && o.limitPrice > 0)
-    .reduce((sum, o) => sum + (o.limitPrice! * o.amount) / (o.leverage || 1), 0);
-  const unrealized = open.reduce((sum, p) => sum + unrealizedPnlFor(p), 0);
-  const equity = state.cash + marginLocked + reservedMargin + unrealized;
+  const { marginLocked, reservedMargin, unrealized, equity } = computeAccountMetrics();
   return {
     cash: r2(state.cash),
     equity: r2(equity),
     unrealizedPnl: r2(unrealized),
     realizedPnl: r2(state.realizedPnl),
-    openCount: open.length,
+    openCount: state.positions.filter((p) => p.status === "OPEN").length,
     marginLocked: r2(marginLocked),
     reservedMargin: r2(reservedMargin),
   };
@@ -391,12 +400,16 @@ export function getPaperAccount(): PaperAccountSnapshot {
 
 export function getPaperBalance(): PaperBalanceEntry[] {
   const account = getPaperAccount();
+  // P0-01: used = margin posisi OPEN + cadangan limit NEW; free = cash (sudah
+  // dipotong cadangan saat limit NEW). total = free + used, konsisten dengan
+  // equity minus uPnL — bukan cash + marginLocked saja.
+  const used = account.marginLocked + account.reservedMargin;
   return [
     {
       currency: "USDT",
       free: account.cash,
-      used: account.marginLocked,
-      total: r2(account.cash + account.marginLocked),
+      used: r2(used),
+      total: r2(account.cash + used),
     },
   ];
 }
@@ -428,18 +441,83 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
     throw new PaperOrderError("POSITION_ALREADY_CLOSED", `Posisi ${positionId} sudah ${pos.status}; update tidak berlaku.`);
   }
 
+  // Hasil break-even yang DITERAPKAN/diSKIP — untuk respons HTTP yang jujur
+  // (FE tidak boleh menampilkan "SL digeser" bila sebenarnya di-skip).
+  let breakEven: { applied: boolean; reason?: string; note?: string } | undefined;
+
+  // P0-04: snapshot in-memory SEBELUM mutasi apa pun agar DB gagal → rollback
+  // paritas MENYELURUH (memori dan DB harus sama setelah gagal, exit-plan / SL
+  // / TP turut dikembalikan ke nilai SEMULA — bukan nilai hasil mutasi).
+  const posSnap = {
+    stopLoss: pos.stopLoss,
+    takeProfit: pos.takeProfit,
+    exitPlan: pos.exitPlan,
+  };
+
+  // P0-04: kumpulkan event sukses untuk dipancarkan SESUDAH commit (DB gagal →
+  // mutasi in-memory di-rollback + tidak ada event hantu POSITION_UPDATED dkk).
+  const deferredEvents: Array<{ type: PaperEventType; payload: Record<string, unknown> }> = [];
+  const emit = (type: PaperEventType, payload: Record<string, unknown>) => deferredEvents.push({ type, payload });
+
   if (input.breakEven === true) {
-    // F9 (2026-09-17): break-even sadar-fee. SL LONG harus DI ATAS entry, SHORT
-    // DI BAWAH entry, agar fill stop menutup fee entry+exit:
-    //   gross = (X - E) * qty ; fees = (E + X) * qty * fee ; net = 0
-    //   → X = E * (1 + fee) / (1 - fee)   (LONG; SHORT kebalikannya)
-    // Offset lama E * (1 - 2*fee) menaruh stop di sisi RUGI → net ≈ -2*fee*E*qty
-    // (terverifikasi E2E: -0.16 pada E=100, qty=1).
-    const feeRate = TAKER_FEE_RATE;
-    pos.stopLoss =
-      pos.side === "LONG"
-        ? pos.entryPrice * ((1 + feeRate) / (1 - feeRate))
-        : pos.entryPrice * ((1 - feeRate) / (1 + feeRate));
+    // P0-03: BE manual sadar-fee memakai fee ENTRY aktual pada sisa posisi +
+    // estimasi exit taker — maker vs taker membedakan titik BE.
+    // Dua guard penting:
+    //  1. RATCHET: jangan MELONGGARKAN SL (kalau SL sekarang sudah lebih ketat
+    //     dari titik BE, biarkan — proteksi existing dipakai).
+    //  2. SIDE + FRESHNESS: jangan menaruh stop di sisi salah terhadap mark,
+    //     dan jangan menerapkan BE dengan mark basi/tidak ada (mark < BE pada
+    //     LONG justru langsung mentriger stop). Mark basi → skip + event.
+    const beSl = feeAwareBreakEvenStop(pos);
+    const now = Date.now();
+    const markFresh =
+      pos.lastMark != null &&
+      Number.isFinite(pos.lastMark) &&
+      pos.lastMark > 0 &&
+      pos.lastMarkUpdatedAt != null &&
+      now - pos.lastMarkUpdatedAt <= MARK_TTL_MS;
+    if (slTightens(pos, beSl)) {
+      if (markFresh && slOnSaneSide(pos, beSl, pos.lastMark!)) {
+        pos.stopLoss = beSl;
+        breakEven = { applied: true, note: "sadar-fee entry aktual + exit taker" };
+        emit("EXIT_ENGINE_ACTION", {
+          positionId: pos.id,
+          symbol: pos.symbol,
+          action: "MANUAL_BE_APPLIED",
+          newSl: pos.stopLoss,
+          note: "sadar-fee entry aktual + exit taker",
+        });
+      } else {
+        breakEven = {
+          applied: false,
+          reason: markFresh ? "WRONG_SIDE_VS_MARK" : "MARK_STALE",
+          note: markFresh
+            ? `BE ${beSl} di sisi salah terhadap mark ${pos.lastMark} — tidak diterapkan`
+            : `Mark basi/tidak tersedia (lastMark ${pos.lastMark ?? "-"}) — BE tidak diterapkan`,
+        };
+        emit("EXIT_ENGINE_ACTION", {
+          positionId: pos.id,
+          symbol: pos.symbol,
+          action: "MANUAL_BE_SKIPPED",
+          reason: breakEven.reason,
+          note: breakEven.note,
+        });
+      }
+    } else {
+      // RATCHET: SL sekarang sudah lebih ketat daripada BE → tidak longgarkan.
+      breakEven = {
+        applied: false,
+        reason: "ALREADY_TIGHTER",
+        note: `SL ${pos.stopLoss} sudah lebih ketat dari BE ${beSl} — tidak melonggarkan`,
+      };
+      emit("EXIT_ENGINE_ACTION", {
+        positionId: pos.id,
+        symbol: pos.symbol,
+        action: "MANUAL_BE_SKIPPED",
+        reason: breakEven.reason,
+        note: breakEven.note,
+      });
+    }
   }
   // F3: exit plan opt-in (BE otomatis/trailing/partial/time-stop).
   // undefined = tidak mengubah; null = hapus; objek = pasang/update.
@@ -448,7 +526,7 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
     if (input.exitConfig === null) {
       if (pos.exitPlan) {
         delete pos.exitPlan;
-        appendEvent("EXIT_ENGINE_ACTION", { positionId: pos.id, symbol: pos.symbol, action: "PLAN_REMOVED" });
+        emit("EXIT_ENGINE_ACTION", { positionId: pos.id, symbol: pos.symbol, action: "PLAN_REMOVED" });
       }
     } else {
       const cfg = normalizeExitConfig(input.exitConfig);
@@ -470,7 +548,7 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
             }
           : { ...pos.exitPlan.state },
       };
-      appendEvent("EXIT_ENGINE_ACTION", {
+      emit("EXIT_ENGINE_ACTION", {
         positionId: pos.id,
         symbol: pos.symbol,
         action: fresh ? "PLAN_SET" : "PLAN_UPDATED",
@@ -489,18 +567,34 @@ export function updatePaperPosition(positionId: string, input: UpdatePaperPositi
     pos.takeProfit = tp;
   }
 
-  appendEvent("POSITION_UPDATED", {
+  emit("POSITION_UPDATED", {
     positionId: pos.id,
     symbol: pos.symbol,
     stopLoss: pos.stopLoss,
     takeProfit: pos.takeProfit,
     breakEven: input.breakEven === true,
   });
-  // F-01: di luar transaksi — pakai varian toleran (update SL/TP di memori tetap
-  // berlaku walau persist ke SQLite gagal; log warning, bukan crash).
-  dbSavePositionTolerant(pos);
-  persistSnapshotTolerant();
-  return { ...pos };
+
+  try {
+    beginTx();
+    dbSavePosition(pos);
+    persistSnapshot();
+    commitTx();
+  } catch (err) {
+    // Rollback in-memory MENYELURUH — memori dan DB harus sama setelah gagal.
+    pos.stopLoss = posSnap.stopLoss;
+    pos.takeProfit = posSnap.takeProfit;
+    pos.exitPlan = posSnap.exitPlan;
+    rollbackTx();
+    console.error(`[paperBook] Gagal persist update ${positionId}: ${(err as Error).message}`);
+    throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis update ke DB: ${(err as Error).message}`);
+  }
+  // P0-04: success events SESUDAH commit — DB gagal tidak memancarkan
+  // POSITION_UPDATED / EXIT_ENGINE_ACTION palsu (mutasi di-rollback).
+  for (const { type, payload } of deferredEvents) appendEvent(type, payload);
+  const snap = { ...pos } as PaperPosition & { breakEven?: typeof breakEven };
+  if (breakEven) snap.breakEven = breakEven;
+  return snap;
 }
 
 export async function cancelPaperOrder(orderId: string): Promise<PaperOrderReceipt> {
@@ -511,6 +605,15 @@ export async function cancelPaperOrder(orderId: string): Promise<PaperOrderRecei
       throw new PaperOrderError("ORDER_NOT_CANCELLABLE", `Order ${orderId} berstatus ${order.status}; hanya NEW yang bisa dibatalkan.`);
     }
     const now = Date.now();
+    // P0-04 snapshot in-memory SEBELUM mutasi agar DB gagal → rollback paritas
+    // (cash tidak ter-refund, order tetap NEW, retry aman, event tidak hantu).
+    const cancelSnap = {
+      cash: state.cash,
+      status: order.status,
+      cancelledAt: order.cancelledAt,
+      reason: order.reason,
+    };
+
     order.status = "CANCELLED";
     order.cancelledAt = now;
     order.reason = "MANUAL_CANCEL";
@@ -518,16 +621,24 @@ export async function cancelPaperOrder(orderId: string): Promise<PaperOrderRecei
       const margin = (order.limitPrice * order.amount) / (order.leverage || 1);
       state.cash = r2(state.cash + margin);
     }
-    appendEvent("ORDER_CANCELLED", { orderId: order.id, symbol: order.symbol, reason: "MANUAL_CANCEL", cancelledAt: now });
     try {
       beginTx();
       dbSaveOrder(order);
       persistSnapshot();
       commitTx();
     } catch (err) {
+      // P0-04: rollback in-memory MENYELURUH — memori dan DB harus sama setelah gagal.
+      state.cash = cancelSnap.cash;
+      order.status = cancelSnap.status;
+      order.cancelledAt = cancelSnap.cancelledAt;
+      order.reason = cancelSnap.reason;
       rollbackTx();
       console.error(`[paperBook] Gagal persist cancel ${orderId}: ${(err as Error).message}`);
+      throw new PaperOrderError("DB_TX_FAILED", `Gagal menulis cancel ke DB: ${(err as Error).message}`);
     }
+    // P0-04: success event SESUDAH commit — DB gagal TIDAK memancarkan
+    // ORDER_CANCELLED palsu (order tetap NEW, bisa dibatalkan lagi → retry aman).
+    appendEvent("ORDER_CANCELLED", { orderId: order.id, symbol: order.symbol, reason: "MANUAL_CANCEL", cancelledAt: now });
     return { ...order };
   });
 }

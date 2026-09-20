@@ -101,7 +101,7 @@ export const MacroCalendarPanel: React.FC<MacroCalendarPanelProps> = ({ macro, m
           </div>
 
           {onRefresh && (
-            <button
+            <button type="button"
               id="refresh-macro-btn"
               onClick={onRefresh}
               className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition border border-slate-700"

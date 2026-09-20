@@ -24,6 +24,8 @@
  * supaya terlihat berapa biaya yang harus ditutup harga.
  */
 
+import { DEFAULT_RISK_POLICY } from "./riskConstants";
+
 export interface OrderRiskPolicy {
   /** Risiko maksimum per trade (jarak SL × notional) sebagai % equity. */
   maxRiskPerTradePercent: number;
@@ -93,14 +95,15 @@ function envNum(raw: string | undefined, def: number): number {
 
 /**
  * Policy default server (env-overridable) — satu sumber untuk paper & live.
- * Nilai default dipilih konservatif tapi tidak memblokir alur panel normal
+ * Nilai default dirujuk ke DEFAULT_RISK_POLICY (riskConstants.ts) supaya seragam
+ * dengan panel FE; env hanya bisa menaikkan ambang lewat variabel tersendiri.
  * (panel 15m default SL 0.8% / TP 1.2% → RR 1.5, notional 12% equity).
  */
 export function defaultOrderRiskPolicy(): OrderRiskPolicy {
   return {
-    maxRiskPerTradePercent: envNum(process.env.RISK_MAX_PER_TRADE_PCT, 1.0),
-    maxNotionalPercent: envNum(process.env.RISK_MAX_NOTIONAL_PCT, 25),
-    minRiskRewardRatio: envNum(process.env.RISK_MIN_RR, 1.5),
+    maxRiskPerTradePercent: envNum(process.env.RISK_MAX_PER_TRADE_PCT, DEFAULT_RISK_POLICY.MAX_RISK_PER_TRADE_PCT),
+    maxNotionalPercent: envNum(process.env.RISK_MAX_NOTIONAL_PCT, DEFAULT_RISK_POLICY.MAX_NOTIONAL_PCT),
+    minRiskRewardRatio: envNum(process.env.RISK_MIN_RR, DEFAULT_RISK_POLICY.MIN_RISK_REWARD_RATIO),
     minStopDistancePercent: envNum(process.env.RISK_MIN_STOP_PCT, 0.35),
     takerFeeRate: envNum(process.env.PAPER_FEE_TAKER_BPS, 4) / 10000,
   };

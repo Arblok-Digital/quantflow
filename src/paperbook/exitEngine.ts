@@ -70,6 +70,28 @@ export function slOnSaneSide(pos: PaperPosition, candidate: number, mark: number
 }
 
 /**
+ * P0-03: SL break-even sadar-fee yang menetapkan net = 0 untuk SISA posisi.
+ * Memakai fee ENTRY AKTUAL yang menempel pada sisa posisi (pos.feesPaidUSD —
+ * sudah dikurangi jatah entry fee saat partial close di fill.ts) + estimasi
+ * fee EXIT taker (close via stop = market/taker), sehingga maker vs taker
+ * membedakan titik BE:
+ *
+ *   LONG : (X - E)*q = F + X*q*T     → X = (E*q + F) / (q*(1 - T))
+ *   SHORT: (E - X)*q = F + X*q*T     → X = (E*q - F) / (q*(1 + T))
+ *
+ * dengan F = pos.feesPaidUSD (>0) atau fallback jujur E*q*T. Jika F mencerminkan
+ * entry maker, X lebih dekat ke entry daripada versi taker penuh.
+ */
+export function feeAwareBreakEvenStop(pos: PaperPosition): number {
+  const q = pos.qty;
+  const E = pos.entryPrice;
+  const F = Number.isFinite(pos.feesPaidUSD) && pos.feesPaidUSD > 0 ? pos.feesPaidUSD : E * q * TAKER_FEE_RATE;
+  return pos.side === "LONG"
+    ? (E * q + F) / (q * (1 - TAKER_FEE_RATE))
+    : (E * q - F) / (q * (1 + TAKER_FEE_RATE));
+}
+
+/**
  * Validasi + clamp konfigurasi exit dari input eksternal (API/panel).
  * Return null bila tidak ada komponen valid (caller: tolak / no-op).
  */
@@ -186,20 +208,31 @@ export function evaluatePositionExits(pos: PaperPosition, w: MarketWindow): Exit
       : pos.entryPrice - cfg.breakEvenTriggerR * risk;
     const hit = isLong ? favorable >= trigger : favorable <= trigger;
     if (hit) {
-      result.statePatch.breakevenArmed = true;
-      // F9 (2026-09-17): SL BE sadar-fee — LONG DI ATAS entry, SHORT DI BAWAH,
-      // sehingga fill stop menutup fee entry+exit (net ≈ 0):
-      //   X = E * (1 + f) / (1 - f)  (LONG) ; X = E * (1 - f) / (1 + f)  (SHORT)
-      // Rumus lama E*(1∓0.08%) menaruh SL di sisi rugi → net ≈ -2*f*E*qty.
-      const f = TAKER_FEE_RATE;
-      const beSl = isLong
-        ? pos.entryPrice * ((1 + f) / (1 - f))
-        : pos.entryPrice * ((1 - f) / (1 + f));
+      // P0-03: BE sadar-fee memakai fee ENTRY aktual pada sisa posisi +
+      // estimasi exit taker (bukan asumsi entry taker penuh). Jika
+      // breakEvenOffsetPct dikonfigurasi, dipakai SEBAGAI buffer tambahan di
+      // sisi profit di atas/sekitar titik fee — bukan diam-diam diabaikan.
+      let beSl = feeAwareBreakEvenStop(pos);
+      const off = cfg.breakEvenOffsetPct;
+      if (off != null && off > 0) {
+        const offsetBe = isLong ? pos.entryPrice * (1 + off) : pos.entryPrice * (1 - off);
+        beSl = isLong ? Math.max(beSl, offsetBe) : Math.min(beSl, offsetBe);
+      }
       if (slTightens(pos, beSl) && slOnSaneSide(pos, beSl, w.mark)) {
         result.newStopLoss = beSl;
-        notes.push(`BE armed @${cfg.breakEvenTriggerR}R → SL ${Number(beSl.toFixed(6))}`);
-      } else {
+        result.statePatch.breakevenArmed = true;
+        const note = off != null && off > 0 ? ` (offset ${off})` : "";
+        notes.push(`BE armed @${cfg.breakEvenTriggerR}R → SL ${Number(beSl.toFixed(6))}${note}`);
+      } else if (!slTightens(pos, beSl)) {
+        // SL sekarang sudah lebih ketat daripada BE → proteksi yang ada cukup
+        // kuat, armed TETAP ditandai (jangan longgarkan SL).
+        result.statePatch.breakevenArmed = true;
         notes.push(`BE armed @${cfg.breakEvenTriggerR}R (SL sekarang sudah lebih ketat dari BE)`);
+      } else {
+        // P0-03: BE tercapai tapi kandidat tidak bersisi-sane terhadap mark (mark
+        // crash menembus BE) → JANGAN arm (optimis) maupun pacarkan SL: biarkan
+        // bracket statis yang menutup; pass berikutnya bisa mencoba lagi.
+        notes.push(`BE @${cfg.breakEvenTriggerR}R tercapai tapi mark ${w.mark} tidak menunjang BE ${Number(beSl.toFixed(6))}`);
       }
     }
   }

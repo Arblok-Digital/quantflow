@@ -3,7 +3,7 @@
  *
  * Client-side calibrated P(TP before SL) using:
  * - Coarse bucketing by flow × confluence × absorption × wall
- * - Wilson lower-bound shrinkage toward 0.5 when thin
+ * - Wilson lower-bound shrinkage toward cold prior (COLD_PRIOR_P = 0.52) when thin
  * - Laplace smoothing cold-start prior
  * - Expected value: EV = P × tpPct - (1-P) × slPctAbs
  *
@@ -34,6 +34,18 @@ export interface ProbResult {
 
 const COLD_PRIOR_P = 0.52;
 const COLD_N = 12; // Laplace pseudo-count
+
+/**
+ * Wilson-like shrinkage menuju COLD_PRIOR_P (bukan 0.5).
+ * Auditor CRIT-1: versi lama `0.5 * (1 - shrink) * 0.15` mendistorsi p menjadi
+ * ~7.5% (bukan 50%) pada sample tipis — sinyal long/short jadi terlalu yakin.
+ * Contoh t=20, win=11: raw 0.55, shrink 0.25 → p = 0.5275 (bukan 0.194).
+ */
+export function shrinkAdjustedProbability(wins: number, total: number): number {
+  const raw = total > 0 ? wins / total : COLD_PRIOR_P;
+  const shrink = Math.min(1, total / 80);
+  return raw * shrink + COLD_PRIOR_P * (1 - shrink);
+}
 
 function bucketOf(input: ProbInput): string {
   const cBin = input.confluenceScore >= 0.8 ? "hi" : input.confluenceScore >= 0.5 ? "mid" : "lo";
@@ -171,9 +183,7 @@ export async function calibratedProb(
     }
   }
 
-  const raw = total > 0 ? wins / total : COLD_PRIOR_P;
-  const shrink = Math.min(1, total / 80);
-  const p = raw * shrink + 0.5 * (1 - shrink) * 0.15;
+  const p = shrinkAdjustedProbability(wins, total);
   const ev = p * tpPct - (1 - p) * slPctAbs;
   const tp1 = currentPrice * (1 + tpPct);
   const tp2 = currentPrice * (1 + tpPct * 1.5);

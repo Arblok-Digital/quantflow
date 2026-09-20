@@ -114,7 +114,7 @@ export const ScannerPanel: React.FC<ScannerPanelProps> = ({ currentSymbol, onSel
           ) : (
             <span>{conn === "loading" ? "MEMUAT TICKERS..." : "OFFLINE"}</span>
           )}
-          <button
+          <button type="button"
             onClick={load}
             disabled={conn === "loading"}
             className="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-mono border border-zinc-700 disabled:opacity-50 transition flex items-center gap-1"

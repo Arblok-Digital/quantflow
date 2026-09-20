@@ -28,6 +28,10 @@ interface StatsClosedTrade {
   entryPrice: number;
   closePrice: number | null;
   amount: number;
+  /** P0-05: qty asal saat open (ukuran trade) — partial TIDAK menyusutkan ini. */
+  openQty?: number;
+  /** P0-05: fee kumulatif hidup trade (entry + seluruh exit fills). */
+  totalFeesUSD?: number | null;
   realizedPnlUsd: number | null;
   openedAt: number;
   closedAt: number | null;
@@ -388,8 +392,9 @@ export const TradeJournalPanel: React.FC = () => {
                       <th className="pb-2">Symbol</th>
                       <th className="pb-2">Side</th>
                       <th className="pb-2 text-right">Entry → Close</th>
-                      <th className="pb-2 text-right">Amount</th>
+                      <th className="pb-2 text-right">Qty (open)</th>
                       <th className="pb-2 text-right">PnL</th>
+                      <th className="pb-2 text-right">Fees</th>
                       <th className="pb-2">Status</th>
                       <th className="pb-2 text-right">Durasi</th>
                     </tr>
@@ -412,10 +417,11 @@ export const TradeJournalPanel: React.FC = () => {
                           <td className="py-2.5 text-right text-zinc-300 whitespace-nowrap">
                             ${fmtMoney(entry)} <span className="text-zinc-600">→</span> ${fmtMoney(exit)}
                           </td>
-                          <td className="py-2.5 text-right text-zinc-400">{Number(t.amount).toFixed(4)}</td>
+                          <td className="py-2.5 text-right text-zinc-400">{Number(t.openQty ?? t.amount).toFixed(4)}</td>
                           <td className={`py-2.5 text-right font-bold ${win ? "text-emerald-400" : loss ? "text-rose-400" : "text-zinc-400"}`}>
                             {win ? "+" : ""}${fmtMoney(pnl)}
                           </td>
+                          <td className="py-2.5 text-right text-zinc-500">{t.totalFeesUSD != null ? "$" + fmtMoney(t.totalFeesUSD) : "–"}</td>
                           <td className="py-2.5">
                             <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 text-[10px] border border-zinc-700">{t.status}</span>
                           </td>

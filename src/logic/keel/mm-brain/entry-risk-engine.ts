@@ -69,6 +69,10 @@ export const MIN_STOP_SPREAD_MULT = 8;
 export const DEFAULT_MIN_REWARD_RATIO = 1.5;
 
 export function estimateVolatilityPct(trades: NormalizedTrade[], windowMs: number): number | null {
+  // CATATAN (audit WARN-8, documented): ini HIGH-LOW range / mid — proxy
+  // intraday range, BUKAN standard deviation. Valid untuk sizing kasar, jangan
+  // dipakai sebagai sigma dalam probabilitas Gaussian. Keel asli memakai range
+  // serupa; sengaja dipertahankan biar deterministic di replay.
   const now = trades.length ? Math.max(...trades.map((t) => t.tsServerMs)) : 0;
   const window = trades.filter((t) => now - t.tsServerMs <= windowMs);
   if (window.length < 5) return null;

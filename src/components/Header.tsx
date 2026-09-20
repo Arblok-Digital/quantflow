@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Crosshair, MoreVertical, Layers, FileText, Lock, PlugZap, LogOut, Info, LayoutDashboard, BarChart3, Radar, History } from "lucide-react";
+import { Crosshair, MoreVertical, Layers, FileText, Lock, PlugZap, LogOut, Info, LayoutDashboard, BarChart3, Radar, History, Search } from "lucide-react";
 import { ModuleTab, MODULE_TABS, MODULE_TAB_LABELS, ExchangeFeedStatus } from "../types";
 import { useBrokerPositions } from "../hooks/useBrokerPositions";
 
@@ -75,6 +75,7 @@ export const Header: React.FC<HeaderProps> = ({
     analytics: <BarChart3 className="h-3.5 w-3.5" />,
     pump: <Radar className="h-3.5 w-3.5" />,
     replay: <History className="h-3.5 w-3.5" />,
+    scout: <Search className="h-3.5 w-3.5" />,
   };
 
   // Akun server (shared hook, dedup polling global 15s — tidak menambah request).
@@ -98,7 +99,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
             <span className="text-sm font-bold text-zinc-100 tracking-tight">NEURAL-SWING</span>
             <div className="relative" ref={infoRef}>
-              <button onClick={() => setInfoOpen((v) => !v)} className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition" title="System info">
+              <button type="button" onClick={() => setInfoOpen((v) => !v)} className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition" title="System info">
                 <Info className="w-3.5 h-3.5" />
               </button>
               {infoOpen && (
@@ -119,7 +120,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="w-px h-5 bg-zinc-700/50 shrink-0" />
           <nav className="flex items-center gap-0.5 overflow-x-auto flex-1 min-w-0 py-0.5">
             {MODULE_TABS.map((tab) => (
-              <button
+              <button type="button"
                 key={tab}
                 onClick={() => onSelectTab?.(tab)}
                 className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-mono font-semibold transition-all whitespace-nowrap ${
@@ -165,7 +166,7 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             </div>
             <div className="relative" ref={menuRef}>
-              <button onClick={() => setMenuOpen((v) => !v)} className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 border border-zinc-700 transition" title="Menu">
+              <button type="button" onClick={() => setMenuOpen((v) => !v)} className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 border border-zinc-700 transition" title="Menu">
                 <MoreVertical className="h-3.5 w-3.5" />
               </button>
               {menuOpen && (
@@ -175,14 +176,14 @@ export const Header: React.FC<HeaderProps> = ({
                       {gi > 0 && <div className="h-px bg-zinc-800 my-1 mx-1" />}
                       <div className="px-2.5 pt-1.5 pb-0.5 text-[9px] font-mono text-zinc-500 uppercase tracking-widest">{g}</div>
                       {modalItems.filter((i) => i.group === g).map((item) => (
-                        <button key={item.key} onClick={() => { item.onClick?.(); setMenuOpen(false); }} className="w-full flex items-center gap-2 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 rounded-lg text-left transition">
+                        <button type="button" key={item.key} onClick={() => { item.onClick?.(); setMenuOpen(false); }} className="w-full flex items-center gap-2 px-2.5 py-2 text-xs text-zinc-300 hover:bg-zinc-800 rounded-lg text-left transition">
                           <item.icon className="h-3.5 w-3.5 text-zinc-500" /><span>{item.label}</span>
                         </button>
                       ))}
                     </div>
                   ))}
                   {onLogout && (
-                    <button onClick={() => { onLogout(); setMenuOpen(false); }} className="w-full flex items-center gap-2 px-2.5 py-2 text-xs text-rose-300 hover:bg-rose-500/10 rounded-lg text-left transition border-t border-zinc-800 mt-1">
+                    <button type="button" onClick={() => { onLogout(); setMenuOpen(false); }} className="w-full flex items-center gap-2 px-2.5 py-2 text-xs text-rose-300 hover:bg-rose-500/10 rounded-lg text-left transition border-t border-zinc-800 mt-1">
                       <LogOut className="h-3.5 w-3.5" /><span>Logout</span>
                     </button>
                   )}

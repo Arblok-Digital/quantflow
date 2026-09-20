@@ -17,6 +17,18 @@ import type { NormalizedDepth, NormalizedTrade } from '../types.js';
 import { evaluate as evaluateMacro } from '../config.js';
 import { classifySession } from '../ingestion/session-filter.js';
 
+/**
+ * Auditor WARN-4: skor confluence bertanda sesuai arah. ConfluenceVerdict.score
+ * selalu |bullScore| (positive), padahal arah BEARISH berarti eksposur negatif.
+ * Thesis harus menampilkan "-72%" bukan "BEARISH weighted 72%" supaya arah tidak
+ * bisa dibaca sebagai long. NEUTRAL → 0.
+ */
+export function signedConfluencePercent(direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL', score: number): string {
+  if (direction === 'BEARISH') return `-${(score * 100).toFixed(0)}`;
+  if (direction === 'NEUTRAL') return '0';
+  return (score * 100).toFixed(0);
+}
+
 export interface SignalBuildInput {
   symbol: string;
   venue: MMValidatedSignal['venue'];
@@ -168,7 +180,7 @@ export function generateSignal(input: SignalBuildInput): SignalGenerationResult 
     venue: input.venue,
     action,
     mmThesis:
-      `MTF ${confluence.direction.toLowerCase()} weighted ${(confluence.score * 100).toFixed(0)}% ` +
+      `MTF ${confluence.direction.toLowerCase()} weighted ${signedConfluencePercent(confluence.direction, confluence.score)}% ` +
       `(D1 penalty ${(confluence.weightBreakdown?.d1 ?? 0) * 100}%); ` +
       `absorption ${absorption.score}/100 ${absorption.classification} ` +
       `(ΔP ${microDelta.priceChangePct.toFixed(2)}%, netBuy $${microDelta.netTakerBuyUsd.toFixed(0)}); ` +

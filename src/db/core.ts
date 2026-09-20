@@ -75,10 +75,12 @@ export function initDb(): DatabaseSync {
       take_profit REAL,
       leverage REAL,
       slippage_bps REAL,
-      mode TEXT,
+mode TEXT,
       created_at INTEGER NOT NULL,
       closed_at INTEGER,
-      realized_pnl_usd REAL
+      realized_pnl_usd REAL,
+      decision_id TEXT,
+      position_id TEXT
     );
   `);
 
@@ -119,8 +121,11 @@ export function initDb(): DatabaseSync {
       close_price REAL,
       realized_pnl_usd REAL,
       fees_usd REAL,
+      open_qty REAL,
+      fees_total_usd REAL,
       entry_source TEXT NOT NULL DEFAULT 'MANUAL',
-      decision_id TEXT
+      decision_id TEXT,
+      exit_config TEXT
     );
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);`);
@@ -158,6 +163,36 @@ export function initDb(): DatabaseSync {
       db.exec(`ALTER TABLE positions ADD COLUMN exit_config TEXT`);
     }
   } catch {}
+
+  // P0-05 — rekonsiliasi fee/PnL/journal. open_qty = ukuran trade asal (R &
+  // journal pakai ini, bukan qty sisa yang menyusut saat partial). Jangan
+  // backfill nilai "sejarah": baris lama → open_qty = amount (yang ada), dan
+  // fees_total_usd = fees_usd (yang ada). Identitas "≡ Σ fills" hanya terjamin
+  // untuk posisi yang dibuka SETELAH kolom ini (backfill adalah estimasi jujur).
+  try {
+    const hasOpenQty = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('positions') WHERE name='open_qty'`).get() as any;
+    if (!hasOpenQty || Number(hasOpenQty.n) === 0) {
+      db.exec(`ALTER TABLE positions ADD COLUMN open_qty REAL`);
+      db.exec(`UPDATE positions SET open_qty = amount WHERE open_qty IS NULL`);
+    }
+  } catch {}
+  try {
+    const hasFeesTotal = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('positions') WHERE name='fees_total_usd'`).get() as any;
+    if (!hasFeesTotal || Number(hasFeesTotal.n) === 0) {
+      db.exec(`ALTER TABLE positions ADD COLUMN fees_total_usd REAL`);
+      db.exec(`UPDATE positions SET fees_total_usd = fees_usd WHERE fees_total_usd IS NULL`);
+    }
+  } catch {}
+  // P0-05 — link order → posisi agar "total fee posisi vs fills" bisa dihitung
+  // per posisi (entry + seluruh exit orders). Baris lama tetap NULL (tanpa
+  // backfill asal-URL).
+  try {
+    const hasPosId = db.prepare(`SELECT COUNT(*) as n FROM pragma_table_info('orders') WHERE name='position_id'`).get() as any;
+    if (!hasPosId || Number(hasPosId.n) === 0) {
+      db.exec(`ALTER TABLE orders ADD COLUMN position_id TEXT`);
+    }
+  } catch {}
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_position ON orders(position_id);`);
 
   // Portfolio snapshots
   db.exec(`
@@ -453,10 +488,15 @@ export interface LedgerStats {
     entryPrice: number;
     closePrice: number | null;
     amount: number;
+    /** Ukuran trade asal (qty saat open) — basis R yang benar untuk partial close. */
+    openQty?: number;
+    /** Total fee kumulatif posisi (Σ fills), beda dari amount-attached fee. */
+    totalFeesUSD?: number | null;
     realizedPnlUsd: number | null;
     openedAt: number;
     closedAt: number | null;
     status: string;
+    entrySource?: string;
   }>;
   equityCurve: Array<{ ts: number; equity: number }>;
 }
@@ -516,11 +556,32 @@ export function getLedgerStats(): LedgerStats {
 
   const closedRows = _db
     .prepare(
-      "SELECT id, symbol, side, entry_price as entryPrice, close_price as closePrice, amount, realized_pnl_usd as realizedPnlUsd, stop_loss as stopLoss, opened_at as openedAt, closed_at as closedAt, status, COALESCE(entry_source, 'MANUAL') as entrySource FROM positions WHERE status='CLOSED' ORDER BY closed_at DESC"
+      "SELECT id, symbol, side, entry_price as entryPrice, close_price as closePrice, amount, COALESCE(open_qty, amount) as openQty, realized_pnl_usd as realizedPnlUsd, COALESCE(fees_total_usd, fees_usd) as totalFees, stop_loss as stopLoss, opened_at as openedAt, closed_at as closedAt, status, COALESCE(entry_source, 'MANUAL') as entrySource FROM positions WHERE status='CLOSED' ORDER BY closed_at DESC"
     )
     .all() as any[];
 
   const totalTrades = closedRows.length;
+
+  // P0-05: VWAP harga exit per posisi dari fills (SISI berlawanan entry).
+  // fill side: LONG = sell, SHORT = buy. Fills tersimpan per order (dbSaveOrder).
+  const vwapByPos = new Map<string, { sell: number | null; buy: number | null }>();
+  try {
+    const vwapRows = _db
+      .prepare(
+        "SELECT o.position_id as pid, f.side as side, SUM(f.price*f.amount) as notional, SUM(f.amount) as qty FROM fills f JOIN orders o ON f.order_id = o.id WHERE o.position_id IS NOT NULL GROUP BY o.position_id, f.side"
+      )
+      .all() as any[];
+    for (const v of vwapRows) {
+      const pid = String(v.pid);
+      const bucket = vwapByPos.get(pid) ?? { sell: null, buy: null };
+      const qty = Number(v.qty);
+      if (Number.isFinite(qty) && qty > 0) {
+        const price = Number(v.notional) / qty;
+        bucket[v.side as "sell" | "buy"] = Number.isFinite(price) ? price : null;
+      }
+      vwapByPos.set(pid, bucket);
+    }
+  } catch {}
 
   let realizedPnlUSD = 0;
   let wins = 0;
@@ -541,13 +602,14 @@ export function getLedgerStats(): LedgerStats {
     } else if (pnl < 0) {
       grossLoss += Math.abs(pnl);
     }
-    // R = realized / riskAmt ; riskAmt = |entry - SL| * amount ; SL 0 -> skip
+    // R = realized / riskAmt ; riskAmt = |entry - SL| * openQty (qty asal,
+    // bukan qty sisa partial — R satu trade dihitung penuh); SL 0 -> skip
     const stopLoss = Number(r.stopLoss ?? 0);
     const entryPrice = Number(r.entryPrice ?? 0);
-    const amount = Number(r.amount ?? 0);
+    const openQty = Number(r.openQty ?? r.amount ?? 0);
     let rVal: number | null = null;
-    if (isFinite(stopLoss) && stopLoss > 0 && isFinite(entryPrice) && entryPrice > 0 && isFinite(amount) && amount > 0) {
-      const riskAmt = Math.abs(entryPrice - stopLoss) * amount;
+    if (isFinite(stopLoss) && stopLoss > 0 && isFinite(entryPrice) && entryPrice > 0 && isFinite(openQty) && openQty > 0) {
+      const riskAmt = Math.abs(entryPrice - stopLoss) * openQty;
       if (riskAmt > 1e-9) {
         rVal = pnl / riskAmt;
         rValues.push(rVal);
@@ -600,19 +662,28 @@ export function getLedgerStats(): LedgerStats {
   }
   maxDrawdownPct = Number(maxDrawdownPct.toFixed(2));
 
-  const closedTrades = closedRows.map((r: any) => ({
-    id: String(r.id),
-    symbol: String(r.symbol),
-    side: String(r.side),
-    entryPrice: Number(r.entryPrice),
-    closePrice: r.closePrice != null ? Number(r.closePrice) : null,
-    amount: Number(r.amount),
-    realizedPnlUsd: r.realizedPnlUsd != null ? Number(Number(r.realizedPnlUsd).toFixed(2)) : null,
-    openedAt: Number(r.openedAt),
-    closedAt: r.closedAt != null ? Number(r.closedAt) : null,
-    status: String(r.status),
-    entrySource: String(r.entrySource || "MANUAL"),
-  }));
+  const closedTrades = closedRows.map((r: any) => {
+    // P0-05: closePrice = VWAP exit fills (partial → rata-rata terbobot);
+    // fallback ke close_price tersimpan bila tidak ada fills terhubung.
+    const exitSide = r.side === "SHORT" ? "buy" : "sell";
+    const vwap = r.id != null ? vwapByPos.get(String(r.id))?.[exitSide] : undefined;
+    const closePrice = Number.isFinite(vwap) ? Number(vwap) : r.closePrice != null ? Number(r.closePrice) : null;
+    return {
+      id: String(r.id),
+      symbol: String(r.symbol),
+      side: String(r.side),
+      entryPrice: Number(r.entryPrice),
+      closePrice,
+      amount: Number(r.amount),
+      openQty: r.openQty != null ? Number(r.openQty) : Number(r.amount),
+      totalFeesUSD: r.totalFees != null ? Number(Number(r.totalFees).toFixed(4)) : null,
+      realizedPnlUsd: r.realizedPnlUsd != null ? Number(Number(r.realizedPnlUsd).toFixed(2)) : null,
+      openedAt: Number(r.openedAt),
+      closedAt: r.closedAt != null ? Number(r.closedAt) : null,
+      status: String(r.status),
+      entrySource: String(r.entrySource || "MANUAL"),
+    };
+  });
 
   if (totalTrades === 0) {
     return {

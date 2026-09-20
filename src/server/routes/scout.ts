@@ -3,7 +3,8 @@
 // Routes: GET /api/scout/report   -> baca output/report.json (read-only, tidak
 //                                    menyentuh paperbook/HMAC ledger engine)
 //         POST /api/scout/scan    -> jalankan ulang scan via child process
-//                                    node (mock default; live perlu HELIUS_API_KEY)
+//                                    node (real: live atau discovery; mock
+//                                    dilarang — 400 MOCK_DISABLED)
 // Prinsip: mesin scout TIDAK pernah dicampur ke akuntansi engine futures.
 // Verdict hanya bacaan informasi untuk keputusan alokasi venture kecil.
 // ---------------------------------------------------------------------------
@@ -83,15 +84,17 @@ export function registerScoutRoutes(app: Express): void {
       res.status(409).json({ success: false, reason: "SCAN_IN_PROGRESS", message: "Scan sedang berjalan, tunggu selesai." });
       return;
     }
-    scanLock = true;
     const body = req.body || {};
-    const mode = body?.mode === "live" ? "live" : body?.mode === "discovery" ? "discovery" : "mock";
+    if (body?.mode === "mock") {
+      res.status(400).json({ success: false, reason: "MOCK_DISABLED", message: "Mock mode dihapus — scan hanya real (live/discovery)." });
+      return;
+    }
+    scanLock = true;
+    const mode = body?.mode === "live" ? "live" : "discovery";
     const args =
       mode === "live"
         ? ["scripts/scan.js", "--wallets", "20", "--limit", "30"]
-        : mode === "discovery"
-          ? ["scripts/scan.js", "--discovery", "--limit", "50", "--max-mcap", "5000000", "--min-liq", "0"]
-          : ["scripts/scan.js", "--mock"];
+        : ["scripts/scan.js", "--discovery", "--limit", "50", "--max-mcap", "5000000", "--min-liq", "0"];
     const child = spawn(process.execPath, args, {
       cwd: getScoutDir(),
       env: { ...process.env },

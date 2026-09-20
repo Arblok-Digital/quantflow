@@ -98,12 +98,21 @@ export async function executeBrokerOrder(
 ): Promise<ExecutionResult> {
   const startTime = Date.now();
 
+  const leverage = Number(params.leverage);
+  const safeLeverage = Number.isFinite(leverage) && leverage > 0 ? leverage : 1;
+  if (!Number.isFinite(leverage) || leverage <= 0) {
+    // Auditor WARN-2: fallback lama `params.leverage || 10` menyembunyikan
+    // missing leverage jadi 10x diam-diam. Sekarang fallback = 1x (spot-safe)
+    // dan selalu dicatat — pipeline yang mau 10x wajib kirim eksplisit.
+    console.warn(`[brokerService] leverage tidak valid/missing (${String(params.leverage)}) untuk ${params.symbol} ${params.action} — pakai 1x default.`);
+  }
+
   const body = {
     symbol: params.symbol,
     side: params.action === "BUY" ? "buy" : "sell",
     type: "market",
     amount: params.qty,
-    leverage: params.leverage || 10,
+    leverage: safeLeverage,
     stopLoss: params.stopLoss,
     takeProfit: params.takeProfit,
     decisionId: params.decisionId,

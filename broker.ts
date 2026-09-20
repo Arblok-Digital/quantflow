@@ -585,6 +585,38 @@ export async function fetchBrokerBalance(): Promise<NormalizedBalance[]> {
     .sort((a, b) => b.total - a.total);
 }
 
+export function composeEquityFromPositions(cashTotalUsd: number, positions: Array<{ unrealizedPnl?: number | null }>): number {
+  const unrealized = positions.reduce((s, p) => s + (Number(p?.unrealizedPnl) || 0), 0);
+  return Number((cashTotalUsd + unrealized).toFixed(2));
+}
+
+/**
+ * Equity efektif akun (USD, USDT bila ada).
+ * Live: saldo kas (fetchBalance.total) + Σ unrealizedPnl dari SEMUA posisi open.
+ * Auditor CRIT-3: sebelumnya evaluasi live hanya memakai `usdt.total` (kas) —
+ * posisi open yang profit/loss tidak masuk, jadi besar risiko per-trade bisa
+ * salah (notional vs equity). Double-counting dicegah karena posisi yang SUDAH
+ * direalisasikan tidak lagi punya unrealizedPnl, dan total kas yang sudah TERBLOKIR
+ * margin tetap dihitung sebagai bagian equity (bukan dikurangi). Bila fetch
+ * posisi gagal → fallback kas-only + warning (tidak fail the order).
+ */
+export async function fetchBrokerEquityUsd(): Promise<number | undefined> {
+  const balances = await fetchBrokerBalance();
+  const usdt = balances.find((b) => b.currency === "USDT") ?? balances[0];
+  let equity = usdt ? Number(usdt.total) : undefined;
+  if (process.env.TRADING_MODE === "live" && equity !== undefined) {
+    try {
+      const exchange = getExchange();
+      await ensureMarketsLoaded(exchange);
+      const positions: any[] = await exchange.fetchPositions();
+      equity = composeEquityFromPositions(equity, positions);
+    } catch (err) {
+      console.warn(`[broker] fetch unrealized PnL gagal — equity hanya saldo kas: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  return equity !== undefined ? Number(equity.toFixed(2)) : undefined;
+}
+
 // --- 3. Order Execution (paper simulation di atas harga CCXT real) ---
 // F-08: source of truth tunggal — TAKER_FEE_RATE dipakai paperBook.ts (0.04% spot).
 // Jangan definisikan ulang tarif fee di sini.

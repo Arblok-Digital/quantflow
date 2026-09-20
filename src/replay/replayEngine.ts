@@ -12,6 +12,7 @@
  */
 
 import { calculateRSI, calculateEMA, calculateMACD, calculateATR } from "../logic/indicators";
+import { roundTo } from "../lib/round";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -223,14 +224,14 @@ function newId(prefix: string): string {
   return `${prefix}-replay-${Date.now().toString(36)}-${n}`;
 }
 
-function r2(v: number): number {
-  return Math.round((v + Number.EPSILON) * 100) / 100;
+export function r2(v: number): number {
+  return roundTo(v, 2);
 }
-function r4(v: number): number {
-  return Math.round((v + Number.EPSILON) * 10000) / 10000;
+export function r4(v: number): number {
+  return roundTo(v, 4);
 }
-function r6(v: number): number {
-  return Math.round((v + Number.EPSILON) * 1000000) / 1000000;
+export function r6(v: number): number {
+  return roundTo(v, 6);
 }
 
 function clampLeverage(leverage: number): number {
@@ -468,6 +469,9 @@ function processCandle(candle: ReplayCandle): void {
   }
 
   // 3. Bracket checks (SL/TP/liq) using candle range
+  // Auditor WARN-3 (documented, disengaja): dalam candle yang SAMA terjadi
+  // LIQ > STOP_LOSS > TAKE_PROFIT — urutan worst-case (conservative loss-first).
+  // Ini asumsi deterministik replay; di live harga intra-candle tidak diketahui.
   const open = session.positions.filter((p) => p.status === "OPEN");
   for (const pos of open) {
     if (pos.side === "LONG") {

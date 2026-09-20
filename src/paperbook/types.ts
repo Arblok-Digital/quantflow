@@ -53,6 +53,19 @@ export interface PaperPosition {
   exitReason?: ExitReason;
   realizedPnlUSD?: number;
   feesPaidUSD: number;
+  /**
+   * P0-05 — qty ASAL saat posisi dibuka (SEBELUM partial). Tidak pernah
+   * berubah. Statistik R dan journal memakai ini sebagai ukuran trade
+   * (risk = |entry−SL| × openQty), bukan qty sisa yang menyusut tiap partial.
+   */
+  openQty?: number;
+  /**
+   * P0-05 — fee KUMULATIF seumur hidup posisi (entry + seluruh exit fills).
+   * Identity: `feesTotalUSD ≡ Σ fills.fee_usd` posisi tsb (via orders.position_id).
+   * BEDA dari feesPaidUSD: yang itu fee entry yang masih menempel pada SISA
+   * qty (di-consume tiap partial, dipakai BE) — BUKAN seluruh fee historis.
+   */
+  feesTotalUSD?: number;
 }
 
 export interface PaperOrderReceipt {

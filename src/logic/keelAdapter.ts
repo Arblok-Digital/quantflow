@@ -2,6 +2,7 @@ import { generateSignal, SignalBuildInput, SignalGenerationResult } from "./keel
 import { evaluateRisk, RiskCandidate, RiskSnapshot } from "./keel/risk/gatekeeper";
 import { IntradayHighWaterMark } from "./keel/risk/drawdown-monitor";
 import { store, openPositions, ordersLastHour, lastKillSwitchEvent } from "./keel/store";
+import { RISK_CONSTANTS, setCalendar, getCalendar, nextEv, type MacroEvent, type EventType } from "./keel/config.js";
 import { NormalizedDepth, NormalizedTrade, MtfVector, DepthLevel } from "./keel/types";
 import { MTFEngine, type MTFTrendResult } from "./keel/mm-brain/mtf-engine";
 import type { Kline } from "./keel/ingestion/kline-aggregator";
@@ -393,6 +394,89 @@ export function _resetKeelHwmForTest(): void {
   keelHwm = null;
 }
 
+function toKeelEventType(title: string): EventType | null {
+  const t = title.toLowerCase();
+  if (t.includes('fomc')) return 'FOMC';
+  if (t.includes('non-farm') || t.includes('nonfarm') || t.includes('non farm') || t.includes('employment')) return 'NFP';
+  if (t.includes('cpi')) return 'CPI';
+  if (t.includes('ppi')) return 'PPI';
+  if (t.includes('ecb') || t.includes('european central')) return 'ECB';
+  if (t.includes('gdp')) return 'GDP';
+  return null;
+}
+
+let macroBootstrapped = false;
+let warnedKeelMacroExhausted = false;
+
+/**
+ * Auditor WARN-7: kalender makro keel hanya berisi SEED hardcoded s/d Des 2026;
+ * setelah itu gate makro diam-diam mati (nextEv null → tidak ada FLAT/SIZE_DOWN).
+ * Bootstrap ini meng-merge event HIGH impact USD dari feed real
+ * (fetchMacroReal di server — mirror FF calendar) ke kalender keel via
+ * setCalendar, idempotent per proses. Bila feed gagal/kosong, tetap warning
+ * bila kalender sudah habis (transparan, bukan senyap).
+ *
+ * Data makro DI-INJECT dari caller server (server.ts). KeelAdapter sengaja
+ * TIDAK meng-import marketFetcher secara statis: keelAdapter masuk graph
+ * klien melalui dynamic import App (KeelEnginePanel) && marketFetcher →
+ * broker.ts (ccxt/node:sqlite) — impor statis itu menarik src/db ke bundle
+ * browser dan menggagalkan `vite build`.
+ */
+export interface MacroMirrorEvent {
+  title?: string;
+  dateUtc?: string;
+  impact?: string;
+}
+export interface MacroMirrorData {
+  ok: boolean;
+  source?: string;
+  highImpactUpcoming: MacroMirrorEvent[];
+}
+
+export async function bootstrapKeelMacro(
+  now = Date.now(),
+  real?: MacroMirrorData,
+): Promise<{ merged: number; exhausted: boolean }> {
+  try {
+    if (!macroBootstrapped) {
+      macroBootstrapped = true;
+      const data: MacroMirrorData | undefined = real;
+      if (data && data.ok && data.highImpactUpcoming.length > 0) {
+        const mapped: MacroEvent[] = [];
+        for (const ev of data.highImpactUpcoming) {
+          const type = toKeelEventType(ev.title ?? '');
+          if (!type) continue;
+          const t = Date.parse(ev.dateUtc ?? '');
+          if (!isFinite(t)) continue;
+          mapped.push({
+            id: `real-${type}-${ev.dateUtc}`,
+            type,
+            scheduledAtMs: t,
+            impact: String(ev.impact ?? '').toLowerCase() === 'high' ? 'HIGH' : 'MEDIUM',
+            preMin: 90,
+            postMin: 60,
+            volPct: 2.5,
+            src: 'ff-mirror',
+          });
+        }
+        if (mapped.length > 0) {
+          const idSet = new Set(mapped.map((e) => e.id));
+          setCalendar([...getCalendar().filter((e) => !idSet.has(e.id)), ...mapped]);
+        }
+      }
+    }
+  } catch (err) {
+    if (!macroBootstrapped) macroBootstrapped = true;
+    console.warn(`[keel] bootstrap macro real gagal — fallback seed: ${err instanceof Error ? err.message : err}`);
+  }
+  const exhausted = nextEv(now) === null;
+  if (exhausted && !warnedKeelMacroExhausted) {
+    warnedKeelMacroExhausted = true;
+    console.warn('[keel] kalender makro HABIS (tidak ada event berikutnya) — gate FLAT/SIZE_DOWN tidak aktif. Feed real off?');
+  }
+  return { merged: macroBootstrapped ? getCalendar().filter((e) => e.src === 'ff-mirror').length : 0, exhausted };
+}
+
 /**
  * Keel Risk Gate Evaluation — evaluates trade candidate against Keel's institutional risk limits.
  */
@@ -401,12 +485,12 @@ export function evaluateKeelRisk(candidate: RiskCandidate, currentEquityUsd: num
   reasons: string[];
 } {
   const limitsView = {
-    maxOpenPositions: 5,
-    maxOrdersPerHour: 10,
-    maxDrawdownPct: 3.0,
-    minPositionSizePct: 2.0,
-    maxPositionSizePct: 5.0,
-    stopLossPct: 2.0,
+    maxOpenPositions: RISK_CONSTANTS.MAX_OPEN_POSITIONS,
+    maxOrdersPerHour: RISK_CONSTANTS.MAX_ORDERS_PER_HOUR,
+    maxDrawdownPct: RISK_CONSTANTS.MAX_DAILY_DRAWDOWN_PCT,
+    minPositionSizePct: RISK_CONSTANTS.MIN_POSITION_SIZE_PCT,
+    maxPositionSizePct: RISK_CONSTANTS.MAX_POSITION_SIZE_PCT,
+    stopLossPct: Math.abs(RISK_CONSTANTS.STOP_LOSS_PCT),
   };
 
   const killSwitch = lastKillSwitchEvent();

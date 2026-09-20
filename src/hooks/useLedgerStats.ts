@@ -13,6 +13,9 @@ export interface LedgerClosedTrade {
   entryPrice: number;
   closePrice: number;
   amount: number;
+  /** P0-05: qty asal (trade size) + fee kumulatif hidup posisi. */
+  openQty?: number;
+  totalFeesUSD?: number | null;
   realizedPnlUsd?: number;
   realized_pnl_usd?: number;
   stopLoss?: number;

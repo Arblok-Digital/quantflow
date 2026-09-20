@@ -112,7 +112,7 @@ export const ReplaySetupPanel: React.FC<ReplaySetupPanelProps> = ({
           />
         </label>
         <div className="flex items-end">
-          <button
+          <button type="button"
             onClick={handleStart}
             disabled={busy}
             className="flex items-center gap-1 rounded bg-cyan-500 px-3 py-1.5 text-xs font-bold text-zinc-950 hover:bg-cyan-400 disabled:opacity-40 transition-colors w-full justify-center"
@@ -131,7 +131,7 @@ export const ReplaySetupPanel: React.FC<ReplaySetupPanelProps> = ({
               <Activity className="w-3.5 h-3.5 text-cyan-400" /> Auto Strategy (Backtest Otomatis)
             </div>
             <div className="flex gap-1">
-              <button
+              <button type="button"
                 onClick={() => handleStrategy("manual")}
                 disabled={savingStrategy}
                 className={`rounded px-2.5 py-1.5 text-[11px] font-bold border transition-colors ${
@@ -143,7 +143,7 @@ export const ReplaySetupPanel: React.FC<ReplaySetupPanelProps> = ({
               >
                 MANUAL
               </button>
-              <button
+              <button type="button"
                 onClick={() => handleStrategy("auto")}
                 disabled={savingStrategy}
                 className={`rounded px-2.5 py-1.5 text-[11px] font-bold border transition-colors ${

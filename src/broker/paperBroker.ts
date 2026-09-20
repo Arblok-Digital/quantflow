@@ -43,7 +43,9 @@ export async function handlePaperOrder(req: Request, res: Response): Promise<Res
           // P3: audit failure TIDAK boleh silent — log selalu biar operator tau.
           console.error("[audit] GAGAL tulis audit close: ", (err as Error)?.message);
         }
-        return res.json({ success: true, mode: "paper", closed: true, ...result });
+// P0-02: `closed` = true HANYA bila hasil bukan partial — jangan
+        // menyebut posisi tertutup penuh ketika sisa qty masih OPEN.
+        return res.json({ success: true, mode: "paper", closed: !result.partial, ...result });
       } catch (err: any) {
         if (err instanceof PaperOrderError) {
           return res.status(400).json({ success: false, status: "REJECTED", reason: err.code, message: err.message });
@@ -170,7 +172,9 @@ export async function handlePaperClose(req: Request, res: Response): Promise<Res
     } catch (err) {
       console.error("[audit] GAGAL tulis audit close (manual): ", (err as Error)?.message);
     }
-    return res.json({ success: true, mode: "paper", closed: true, ...result });
+    // P0-02: `closed` = true HANYA bila hasil bukan partial — API tidak boleh
+    // menyebut seluruh posisi tertutup ketika sisa qty masih OPEN.
+    return res.json({ success: true, mode: "paper", closed: !result.partial, ...result });
   } catch (err: any) {
     if (err instanceof PaperOrderError) {
       const status = err.code === "POSITION_NOT_FOUND" ? 404 : 400;

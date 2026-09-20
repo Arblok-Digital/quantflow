@@ -28,8 +28,8 @@ export function classifySession(atMs: number = timeService.now(), weekendPolicy:
   const weekend = isWeekendUtc(d);
   if (weekend) {
     if (weekendPolicyEff === 'BLOCK_WEEKEND') return { kind: 'WEEKEND_THIN', isWeekend: true, trainAllowed: false, execMult: 0, reason: 'weekend flat — thin liquidity (FILTER_TRAINING=BLOCK)' };
-    if (weekendPolicyEff === 'SIZE_DOWN_ONLY') return { kind: 'WEEKEND_THIN', isWeekend: true, trainAllowed: true, execMult: 0.45, reason: 'weekend size-down 55% — thin orderbook' };
-    return { kind: 'WEEKEND_THIN', isWeekend: true, trainAllowed: false, execMult: 0.55, reason: 'weekend: snapshot not representative — training filtered, exec 45% size-down' };
+    if (weekendPolicyEff === 'SIZE_DOWN_ONLY') return { kind: 'WEEKEND_THIN', isWeekend: true, trainAllowed: true, execMult: 0.45, reason: 'weekend size-down: exec 45% (≈55% cut dari ukuran normal) — thin orderbook' };
+    return { kind: 'WEEKEND_THIN', isWeekend: true, trainAllowed: false, execMult: 0.55, reason: 'weekend FILTER_TRAINING: training difilter, exec 55% (≈45% cut) — data tidak representatif' };
   }
   if (hr >= 13 && hr < 21) return { kind: 'NY', isWeekend: false, trainAllowed: true, execMult: 1, reason: 'NY session (high liquidity)' };
   if (hr >= 7 && hr < 16) return { kind: 'LONDON', isWeekend: false, trainAllowed: true, execMult: 1, reason: 'London session' };

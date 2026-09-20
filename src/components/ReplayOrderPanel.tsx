@@ -105,7 +105,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
       {/* Order type + arah */}
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <div className="flex gap-1">
-          <button
+          <button type="button"
             onClick={() => setOrderType("market")}
             className={`rounded px-2.5 py-1.5 text-xs font-bold border transition-colors ${
               orderType === "market"
@@ -116,7 +116,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
           >
             MARKET
           </button>
-          <button
+          <button type="button"
             onClick={() => setOrderType("limit")}
             className={`rounded px-2.5 py-1.5 text-xs font-bold border transition-colors ${
               orderType === "limit"
@@ -129,7 +129,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
           </button>
         </div>
         <div className="flex gap-1">
-          <button
+          <button type="button"
             onClick={() => setOrderSide("buy")}
             className={`flex-1 rounded px-2.5 py-1.5 text-xs font-bold border transition-colors ${
               orderSide === "buy"
@@ -139,7 +139,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
           >
             <TrendingUp className="w-3 h-3 inline mr-1" />LONG
           </button>
-          <button
+          <button type="button"
             onClick={() => setOrderSide("sell")}
             className={`flex-1 rounded px-2.5 py-1.5 text-xs font-bold border transition-colors ${
               orderSide === "sell"
@@ -220,7 +220,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
               Stop Loss
             </span>
             <div className="flex gap-1">
-              <button
+              <button type="button"
                 onClick={() => setSlMode("pct")}
                 className={`rounded px-1.5 py-0.5 text-[10px] font-bold border transition-colors ${
                   slMode === "pct"
@@ -231,7 +231,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
               >
                 AUTO %
               </button>
-              <button
+              <button type="button"
                 onClick={() => setSlMode("manual")}
                 className={`rounded px-1.5 py-0.5 text-[10px] font-bold border transition-colors ${
                   slMode === "manual"
@@ -275,7 +275,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
               Take Profit
             </span>
             <div className="flex gap-1">
-              <button
+              <button type="button"
                 onClick={() => setTpMode("pct")}
                 className={`rounded px-1.5 py-0.5 text-[10px] font-bold border transition-colors ${
                   tpMode === "pct"
@@ -285,7 +285,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
               >
                 AUTO %
               </button>
-              <button
+              <button type="button"
                 onClick={() => setTpMode("manual")}
                 className={`rounded px-1.5 py-0.5 text-[10px] font-bold border transition-colors ${
                   tpMode === "manual"
@@ -338,7 +338,7 @@ export const ReplayOrderPanel: React.FC<ReplayOrderPanelProps> = ({
             className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5 text-xs text-zinc-200 font-mono placeholder:text-zinc-700"
           />
         </label>
-        <button
+        <button type="button"
           onClick={handleOrder}
           className="rounded bg-cyan-500/15 border border-cyan-500/30 px-4 py-1.5 text-xs font-bold text-cyan-400 hover:bg-cyan-500/25 transition-colors"
         >

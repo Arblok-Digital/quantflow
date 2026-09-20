@@ -9,6 +9,7 @@ coverage/
 .broker-secrets.json
 .broker-vault-key
 .guardrails.json
+.keel-kill-switch.json
 .paper-book.json
 *.db
 *.db-shm
@@ -30,4 +31,10 @@ trading.db
 opendesign/
 
 # audit opini auditor — status validasi mengikuti TODO.md
-LOGIC_AUDIT_2026-09-17.md
+LOGIC_AUDIT*.md
+LOGIC_REVIEW*.md
+
+# generated: hasil scan solana-scout (regenerated tiap scan) + log runtime
+solana-scout/output/
+solana-scout/logs/
+*.tsbuildinfo

@@ -16,6 +16,10 @@ export function savePositionDb(row: {
   close_price: number | null;
   realized_pnl_usd: number | null;
   fees_usd: number | null;
+  /** P0-05: qty asal saat open (ukuran trade, tidak menyusut saat partial). */
+  open_qty?: number | null;
+  /** P0-05: fee kumulatif hidup posisi — rekonsiliasi vs Σ fills.fee_usd. */
+  fees_total_usd?: number | null;
   entry_source?: string;
   decision_id?: string | null;
   /** F3: JSON { config, state } exit plan — NULL = statis murni (opt-in). */
@@ -24,8 +28,8 @@ export function savePositionDb(row: {
   const _db = getDb();
   _db.prepare(
     `INSERT OR REPLACE INTO positions
-     (id, symbol, side, entry_price, amount, leverage, stop_loss, take_profit, liq_price, status, opened_at, closed_at, close_price, realized_pnl_usd, fees_usd, entry_source, decision_id, exit_config)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, symbol, side, entry_price, amount, leverage, stop_loss, take_profit, liq_price, status, opened_at, closed_at, close_price, realized_pnl_usd, fees_usd, open_qty, fees_total_usd, entry_source, decision_id, exit_config)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.symbol,
@@ -42,6 +46,8 @@ export function savePositionDb(row: {
     row.close_price,
     row.realized_pnl_usd,
     row.fees_usd,
+    row.open_qty ?? null,
+    row.fees_total_usd ?? null,
     row.entry_source || "MANUAL",
     row.decision_id ?? null,
     row.exit_config ?? null
@@ -65,12 +71,14 @@ export function saveOrderDb(row: {
   closed_at: number | null;
   realized_pnl_usd: number | null;
   decision_id?: string | null;
+  /** P0-05: link order → posisi (entry & exit orders) untuk rekonsiliasi fee per posisi. */
+  position_id?: string | null;
 }): void {
   const _db = getDb();
   _db.prepare(
     `INSERT OR REPLACE INTO orders
-     (id, symbol, side, type, status, amount, price, stop_loss, take_profit, leverage, slippage_bps, mode, created_at, closed_at, realized_pnl_usd, decision_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, symbol, side, type, status, amount, price, stop_loss, take_profit, leverage, slippage_bps, mode, created_at, closed_at, realized_pnl_usd, decision_id, position_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.symbol,
@@ -87,7 +95,8 @@ export function saveOrderDb(row: {
     row.created_at,
     row.closed_at,
     row.realized_pnl_usd,
-    row.decision_id ?? null
+    row.decision_id ?? null,
+    row.position_id ?? null
   );
 }
 

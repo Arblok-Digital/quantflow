@@ -17,11 +17,7 @@ import { PaperSide, PaperPosition, ExitReason } from "./types";
 import { appendAudit, beginTx, commitTx, rollbackTx } from "../../db";
 import { closePaperPosition, liquidationPrice } from "./fill";
 import { evaluatePositionExits } from "./exitEngine";
-
-function roundTo(n: number, digits: number): number {
-  const f = Math.pow(10, digits);
-  return Math.round((n + Number.EPSILON) * f) / f;
-}
+import { roundTo } from "../lib/round";
 
 export async function fetchMarkTicker(symbol: string): Promise<{
   mark: number;
@@ -309,7 +305,13 @@ export async function fillPendingLimitOrders(
     // fail-closed di titik fill, bukan cuma di openPaperPosition.
     const limitMarketType = String(order.meta?.marketType || "FUTURES").toUpperCase();
     if (limitMarketType === "SPOT" && order.side === "sell") {
-      await cancelPaperOrder(order.id);
+      // P0-04: cancel could throw DB_TX_FAILED; catch + continue (order retried next pass).
+      try {
+        await cancelPaperOrder(order.id);
+      } catch (cancelErr) {
+        console.warn(`[paperBook] Gagal cancel SPOT SHORT limit ${order.id}: ${(cancelErr as Error).message}`);
+        continue;
+      }
       appendEvent("ORDER_REJECTED", {
         orderId: order.id,
         symbol: order.symbol,
@@ -332,7 +334,12 @@ export async function fillPendingLimitOrders(
     void TAKER_FEE_RATE;
 
     if (dup) {
-      await cancelPaperOrder(order.id);
+      // P0-04: cancel could throw DB_TX_FAILED; catch + continue (order retried next pass).
+      try {
+        await cancelPaperOrder(order.id);
+      } catch (cancelErr) {
+        console.warn(`[paperBook] Gagal cancel duplikat limit ${order.id}: ${(cancelErr as Error).message}`);
+      }
       changed = true;
       continue;
     }
@@ -368,8 +375,29 @@ export async function fillPendingLimitOrders(
       lastMark: entry.mark,
       lastMarkUpdatedAt: now,
       feesPaidUSD: feeUSD,
+      openQty: order.amount,
+      feesTotalUSD: feeUSD,
     };
 
+    // P0-04 snapshot SEBELUM mutasi agar DB gagal → rollback paritas.
+    const cashSnap = state.cash;
+    const ordersSnapLen = state.orders.length;
+    const positionsSnapLen = state.positions.length;
+    const orderSnap = {
+      status: order.status as string,
+      filledAt: order.filledAt,
+      fillPrice: order.fillPrice,
+      slippageBps: order.slippageBps,
+      feeUSD: order.feeUSD,
+      notional: order.notional,
+      marginRequired: order.marginRequired,
+      filledQty: order.filledQty,
+      remainingQty: order.remainingQty,
+      positionId: order.positionId,
+      executionLatencyMs: order.executionLatencyMs,
+    };
+
+    // Mutate in-memory (speculatively — rolled back on DB failure)
     order.status = "FILLED";
     order.filledAt = now;
     order.fillPrice = limit;
@@ -381,23 +409,8 @@ export async function fillPendingLimitOrders(
     order.remainingQty = 0;
     order.positionId = positionId;
     order.executionLatencyMs = now - (order.submittedAt || order.timestamp);
-
     state.positions.push(position);
     state.cash = r2(state.cash - feeUSD);
-
-    appendEvent("ORDER_FILLED", {
-      orderId: order.id,
-      positionId,
-      symbol: order.symbol,
-      side: order.side,
-      type: "limit",
-      fillPrice: limit,
-      qty: order.amount,
-      slippageBps: 0,
-      feeUSD,
-      latencyMs: order.executionLatencyMs,
-      method: "LIMIT_MAKER",
-    });
 
     try {
       beginTx();
@@ -416,9 +429,34 @@ export async function fillPendingLimitOrders(
       });
       commitTx();
     } catch (err) {
+      // P0-04: rollback in-memory MENYELURUH — memori dan DB harus sama setelah gagal
+      // (posisi tidak ada di memori, order tetap NEW, cash tidak berkurang → retry aman).
+      state.cash = cashSnap;
+      state.orders.length = ordersSnapLen;
+      state.positions.length = positionsSnapLen;
+      Object.assign(order, orderSnap);
       rollbackTx();
       console.error(`[paperBook] Gagal persist limit fill ${order.id}: ${(err as Error).message}`);
+      appendEvent("ERROR", { symbol: order.symbol, orderId: order.id, source: "limit-fill", message: (err as Error).message });
+      // Don't touch `changed` here — an earlier success in this pass still needs
+      // the end-of-pass snapshot persist; a fully-failed pass simply emits ERROR.
+      continue;
     }
+    // P0-04: success event SESUDAH commit — DB gagal tidak memancarkan
+    // ORDER_FILLED palsu (order tetap NEW, retry aman).
+    appendEvent("ORDER_FILLED", {
+      orderId: order.id,
+      positionId,
+      symbol: order.symbol,
+      side: order.side,
+      type: "limit",
+      fillPrice: limit,
+      qty: order.amount,
+      slippageBps: 0,
+      feeUSD,
+      latencyMs: order.executionLatencyMs,
+      method: "LIMIT_MAKER",
+    });
     changed = true;
   }
   if (changed) persistSnapshotTolerant();

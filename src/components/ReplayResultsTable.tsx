@@ -92,7 +92,7 @@ export const ReplayResultsTable: React.FC<ReplayResultsTableProps> = ({
                         ${fmtMoney(pos.liquidationPrice)}
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <button
+                        <button type="button"
                           onClick={() => handleClose(pos.id)}
                           className="px-2 py-1 rounded bg-zinc-800 hover:bg-rose-600 hover:text-white text-slate-300 border border-zinc-700 text-[10px] font-bold transition-colors"
                         >
@@ -151,7 +151,7 @@ export const ReplayResultsTable: React.FC<ReplayResultsTableProps> = ({
                     </td>
                     <td className="px-3 py-2 text-right text-zinc-400">{o.leverage}x</td>
                     <td className="px-3 py-2 text-right">
-                      <button
+                      <button type="button"
                         onClick={() => handleCancel(o.id)}
                         className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-slate-300 border border-zinc-700 text-[10px] font-bold transition-colors"
                       >

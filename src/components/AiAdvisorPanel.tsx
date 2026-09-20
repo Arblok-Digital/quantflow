@@ -346,7 +346,7 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
               </p>
             </div>
           </div>
-          <button
+          <button type="button"
             onClick={requestInsight}
             disabled={loading}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 font-bold font-mono text-xs shadow-md shadow-emerald-500/20 border border-emerald-600 disabled:border-zinc-700 transition"

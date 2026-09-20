@@ -490,7 +490,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
         <div className="p-3 space-y-2.5">
           {/* Arah (selector bracket) — ala mockup tk-side */}
           <div className="flex gap-2">
-            <button
+            <button type="button"
               onClick={() => handleBracketSide("LONG")}
               className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl font-mono font-extrabold text-[13px] tracking-wider transition-all ${
                 bracketSide === "LONG"
@@ -500,7 +500,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
             >
               ▲ LONG
             </button>
-            <button
+            <button type="button"
               onClick={() => handleBracketSide("SHORT")}
               disabled={isSpot}
               title={isSpot ? "SPOT hanya bisa BUY/LONG" : undefined}
@@ -516,7 +516,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
 
           {/* Tipe order segmented */}
           <div className="flex bg-zinc-950 border border-zinc-800 rounded-lg p-1">
-            <button
+            <button type="button"
               onClick={() => setOrderType("market")}
               className={`flex-1 py-1.5 rounded-md font-mono text-[11px] font-bold transition ${
                 orderType === "market" ? "bg-zinc-800 text-amber-300" : "text-zinc-500 hover:text-zinc-300"
@@ -524,7 +524,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
             >
               MARKET
             </button>
-            <button
+            <button type="button"
               onClick={() => setOrderType("limit")}
               className={`flex-1 py-1.5 rounded-md font-mono text-[11px] font-bold transition ${
                 orderType === "limit" ? "bg-zinc-800 text-amber-300" : "text-zinc-500 hover:text-zinc-300"
@@ -620,7 +620,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
           {bracketErr && <p className="text-[10px] font-mono text-rose-400">{bracketErr}</p>}
 
           {/* Place order */}
-          <button
+          <button type="button"
             onClick={() => handleOrderClick(bracketSide)}
             disabled={sending}
             className="w-full py-2.5 rounded-lg bg-amber-500 text-zinc-950 font-mono font-extrabold text-xs tracking-widest transition hover:brightness-110 disabled:opacity-50 disabled:cursor-wait"
@@ -630,7 +630,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
 
           {/* Footer */}
           <div className="flex justify-between mt-1 font-mono text-[10.5px] text-zinc-500">
-            <button
+            <button type="button"
               onClick={() => onResetPaperAccount(selectedCapital)}
               className="underline decoration-dotted hover:text-zinc-300 text-left"
               title="Reset saldo akun simulasi ke modal awal"
@@ -659,14 +659,14 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <button
+                <button type="button"
                   onClick={handleCancelLastPending}
                   disabled={cancellingPending}
                   className="flex-1 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-200 hover:text-white border border-zinc-700 hover:border-rose-500 font-mono text-[11px] font-bold transition disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {cancellingPending ? "Cancelling…" : "Cancel"}
                 </button>
-                <button
+                <button type="button"
                   onClick={() => setLastPendingOrder(null)}
                   className="px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-300 font-mono text-[11px] transition"
                 >
@@ -758,7 +758,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
 
           {/* Quick Simulation Trigger Buttons */}
           <div className="flex items-center gap-2 shrink-0 flex-wrap">
-            <button
+            <button type="button"
               onClick={() => handleOrderClick("LONG")}
               disabled={sending}
               className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold font-mono text-xs shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed ${
@@ -771,7 +771,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
               {isLiveMode ? <ShieldAlert className="w-3.5 h-3.5" /> : <TrendingUp className="w-3.5 h-3.5" />}
               <span>{sending ? "SENDING…" : isLiveMode ? "EXECUTE LONG (live)" : "Simulate LONG"}</span>
             </button>
-            <button
+            <button type="button"
               onClick={() => handleOrderClick("SHORT")}
               disabled={sending || isSpot}
               className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-zinc-100 font-bold font-mono text-xs shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed ${
@@ -784,7 +784,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
               {isLiveMode ? <ShieldAlert className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
               <span>{sending ? "SENDING…" : isLiveMode ? "EXECUTE SHORT (live)" : "Simulate SHORT"}</span>
             </button>
-            <button
+            <button type="button"
               onClick={() => onResetPaperAccount(selectedCapital)}
               className="flex items-center gap-1.5 px-2.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 border border-zinc-700 font-mono text-xs transition"
               title="Reset saldo akun simulasi ke modal awal"
@@ -798,7 +798,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
         {/* Order entry: Market / Limit toggle + limitPrice */}
         <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-zinc-800/80 relative z-10">
           <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 font-mono text-xs">
-            <button
+            <button type="button"
               onClick={() => setOrderType("market")}
               className={`px-3 py-1.5 rounded-lg transition font-semibold ${
                 orderType === "market"
@@ -809,7 +809,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
             >
               Market
             </button>
-            <button
+            <button type="button"
               onClick={() => setOrderType("limit")}
               className={`px-3 py-1.5 rounded-lg transition font-semibold ${
                 orderType === "limit"
@@ -927,7 +927,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <button
+            <button type="button"
               onClick={handleCancelLastPending}
               disabled={cancellingPending}
               className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-600 text-zinc-200 hover:text-white border border-zinc-700 hover:border-rose-500 font-mono text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed"
@@ -935,7 +935,7 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
             >
               {cancellingPending ? "Cancelling…" : "Cancel"}
             </button>
-            <button
+            <button type="button"
               onClick={() => setLastPendingOrder(null)}
               className="px-2 py-1.5 rounded-lg text-zinc-500 hover:text-zinc-300 font-mono text-xs transition"
               title="Sembunyikan banner (order tetap pending di book)"

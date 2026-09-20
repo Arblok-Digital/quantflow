@@ -398,19 +398,35 @@ export function registerBrokerRoutes(app: Express): void {
         const closeSide: "buy" | "sell" = side === "LONG" ? "sell" : "buy";
         const amount = Number(pos.contracts || 0);
 
-        // F9 (2026-09-17): break-even live sadar-fee — mirror paperBook (store.ts).
-        // SL LONG DI ATAS entry, SHORT DI BAWAH, agar fill stop menutup fee
-        // entry+exit (net ≈ 0): X = E*(1+f)/(1-f) LONG / X = E*(1-f)/(1+f) SHORT.
-        // Rumus lama E*(1∓0.08%) menaruh SL di sisi rugi → net ≈ -2*f*E*qty.
+        // P0-03: break-even live — mirror paperBook (store.ts). Live tidak tahu
+        // fee pintu aktual yang menempel pada posisi (tanpa ledger exchange),
+        // jadi pakai estimasi TAKER umtuk kedua kaki:
+        //   SL LONG DI ATAS entry : X = E*(1+f)/(1-f)
+        //   SL SHORT DI BAWAH entry: X = E*(1-f)/(1+f)
+        // Guard dishankan dengan paper: jangan menaruh stop di sisi salah
+        // terhadap mark yang basi/tidak ada.
         let sl = stopLoss;
         if (breakEven && (sl === undefined || !isFinite(sl) || sl <= 0)) {
           const entry = Number(pos.entryPrice || 0);
           if (!entry) {
             return res.status(400).json({ success: false, reason: "NO_ENTRY_PRICE", message: "Entry price tidak diketahui, break-even gagal." });
           }
-          sl = side === "LONG"
+          const mark = Number(pos.markPrice || 0);
+          if (!(mark > 0)) {
+            return res.status(400).json({ success: false, reason: "NO_MARK", message: "Mark price tidak tersedia — break-even tidak dapat diverifikasi sisi." });
+          }
+          const candidate = side === "LONG"
             ? entry * ((1 + TAKER_FEE_RATE) / (1 - TAKER_FEE_RATE))
             : entry * ((1 - TAKER_FEE_RATE) / (1 + TAKER_FEE_RATE));
+          const saneSide = side === "LONG" ? candidate < mark : candidate > mark;
+          if (!saneSide) {
+            return res.status(400).json({
+              success: false,
+              reason: "BE_WRONG_SIDE",
+              message: `Mark ${mark} belum menunjang BE ${candidate} (${side}) — break-even ditolak.`,
+            });
+          }
+          sl = candidate;
         }
 
         // Cancel SL/TP lama dulu (avoid stacking) — best-effort, log kalau gagal.

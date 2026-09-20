@@ -96,14 +96,14 @@ export const ConfirmOrderModal: React.FC<ConfirmOrderModalProps> = ({
 
         {/* Actions */}
         <div className="px-5 pb-5 pt-1 flex gap-2">
-          <button
+          <button type="button"
             onClick={onCancel}
             disabled={busy}
             className="flex-1 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 font-mono text-xs font-bold transition disabled:opacity-50"
           >
             Batal
           </button>
-          <button
+          <button type="button"
             onClick={onConfirm}
             disabled={!canConfirm || busy}
             className={`flex-1 px-4 py-2.5 rounded-xl font-mono text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed ${

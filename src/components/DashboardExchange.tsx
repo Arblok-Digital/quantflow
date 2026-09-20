@@ -290,7 +290,7 @@ export const DashboardExchange: React.FC<DashboardExchangeProps> = ({
                 const isActive = timeframe === row.tf;
                 const hasData = row.bsl || row.ssl;
                 return (
-                  <button
+                  <button type="button"
                     key={row.tf}
                     onClick={() => onSelectTimeframe?.(row.tf)}
                     className={`flex flex-col items-start p-1 rounded-lg border text-left transition-all ${
@@ -491,7 +491,7 @@ export const DashboardExchange: React.FC<DashboardExchangeProps> = ({
                   <span>
                     Margin maintained <b className="text-amber-400">${totalMargin.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</b>
                   </span>
-                  <button
+                  <button type="button"
                     onClick={() => setBottomTab("positions")}
                     className="text-cyan-400 hover:text-cyan-300 transition text-left"
                     title="Buka tabel posisi lengkap di bawah"
@@ -517,7 +517,7 @@ export const DashboardExchange: React.FC<DashboardExchangeProps> = ({
               { id: "advisor", label: "Advisor" },
             ] as const
           ).map((t) => (
-            <button
+            <button type="button"
               key={t.id}
               onClick={() => setBottomTab(t.id)}
               className={`px-3 py-1.5 rounded-lg transition font-semibold whitespace-nowrap ${
