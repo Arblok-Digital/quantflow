@@ -5,7 +5,7 @@ import { authFetch, useAuth } from "../hooks/useAuth";
 // ---------------------------------------------------------------------------
 // SolanaScoutPanel — vertical meme-coin (Solana), mesin TERPISAH.
 // GET /api/scout/report -> baca output/report.json milik solana-scout.
-// POST /api/scout/scan  -> trigger re-scan (child process node, mock/live).
+// POST /api/scout/scan  -> trigger re-scan (child process node, live/discovery).
 // Verdict hanya baca informasi; TIDAK menyentuh paperbook/HMAC ledger engine.
 // ---------------------------------------------------------------------------
 
@@ -21,9 +21,9 @@ interface ScoutCheck {
 interface ScoutVerdict {
   score: number;
   scale: number;
-  tier: "ALPHA" | "BUY" | "WATCH" | "SKIP";
+  tier: "ALPHA" | "BUY" | "WATCH" | "SKIP" | "AVOID";
   tierLabel: string;
-  color: "alpha" | "buy" | "watch" | "skip";
+  color: "alpha" | "buy" | "watch" | "skip" | "avoid";
   hardFailed: boolean;
   hardFailReason: string | null;
   checks: ScoutCheck[];
@@ -55,8 +55,14 @@ interface ScoutToken {
   verdict: ScoutVerdict;
 }
 
+interface ScoutFeeds {
+  rpc?: string;
+  rpcStats?: Record<string, { ok: number; fail: number }>;
+  rugcheck?: string;
+}
+
 interface ScoutReport {
-  meta: { mode?: string; generatedAt: string; engine?: string; note?: string };
+  meta: { mode?: string; generatedAt: string; engine?: string; note?: string; feeds?: ScoutFeeds };
   crawlInfo?: { detecting?: string; gapNote?: string };
   summary?: { counts: Record<string, number>; total: number };
   tokens: ScoutToken[];
@@ -67,6 +73,13 @@ const TIER_STYLE: Record<string, { badge: string; bar: string; text: string }> =
   BUY: { badge: "bg-emerald-500 text-zinc-950", bar: "bg-emerald-500", text: "text-emerald-400" },
   WATCH: { badge: "bg-yellow-400 text-zinc-950", bar: "bg-yellow-400", text: "text-yellow-300" },
   SKIP: { badge: "bg-zinc-600 text-zinc-200", bar: "bg-zinc-500", text: "text-zinc-400" },
+  AVOID: { badge: "bg-rose-600 text-zinc-950", bar: "bg-rose-500", text: "text-rose-400" },
+};
+
+const FEED_STYLE: Record<string, string> = {
+  helius: "text-emerald-400 border-emerald-500/40 bg-emerald-500/10",
+  zan: "text-sky-400 border-sky-500/40 bg-sky-500/10",
+  "public-rpc": "text-zinc-400 border-zinc-700 bg-zinc-800/60",
 };
 
 function fmtUsd(v?: number | null): string {
@@ -153,7 +166,7 @@ function TokenCard({ t, expanded, onToggle }: { key?: React.Key; t: ScoutToken; 
 
   return (
     <div className={`rounded-xl border ${v.hardFailed ? "border-rose-900/60 bg-rose-950/10" : "border-zinc-800 bg-zinc-900/60"}`}>
-      <button onClick={onToggle} className="w-full text-left flex items-center gap-3 p-3">
+      <button type="button" onClick={onToggle} className="w-full text-left flex items-center gap-3 p-3">
         <span className={`shrink-0 rounded-md px-2 py-1 text-[10px] font-mono font-bold ${style.badge}`}>{v.tier}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
@@ -184,6 +197,7 @@ function TokenCard({ t, expanded, onToggle }: { key?: React.Key; t: ScoutToken; 
       <div className="flex items-center gap-1.5 px-3 pb-2">
         <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-zinc-500">{t.mint}</span>
         <button
+          type="button"
           onClick={(e) => { e.stopPropagation(); copyMint(); }}
           title="Salin contract address"
           className={`shrink-0 flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[10px] transition disabled:opacity-50 ${
@@ -250,7 +264,7 @@ export const SolanaScoutPanel: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
-  const [scanMode, setScanMode] = useState<"mock" | "live" | "discovery">("mock");
+  const [scanMode, setScanMode] = useState<"live" | "discovery">("discovery");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [tierFilter, setTierFilter] = useState<string | null>(null);
@@ -295,7 +309,11 @@ export const SolanaScoutPanel: React.FC = () => {
     setScanning(true);
     setScanMsg(scanMode === "discovery" ? "Menjalankan discovery DexScreener…" : "Menjalankan scan…");
     try {
-      const res = await authFetch("/api/scout/scan", { method: "POST", body: JSON.stringify({ mode: scanMode }) });
+      const res = await authFetch("/api/scout/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: scanMode }),
+      });
       const payload = await res.json().catch(() => null);
       if (payload && payload.success && Array.isArray(payload.tokens)) {
         setReport(payload);
@@ -320,8 +338,12 @@ export const SolanaScoutPanel: React.FC = () => {
     });
   };
 
-  const counts = report?.summary?.counts || { ALPHA: 0, BUY: 0, WATCH: 0, SKIP: 0 };
+  const counts = report?.summary?.counts || { ALPHA: 0, BUY: 0, WATCH: 0, SKIP: 0, AVOID: 0 };
   const total = report?.summary?.total ?? report?.tokens?.length ?? 0;
+  const feeds = report?.meta?.feeds;
+  const feedName = feeds?.rpc || null;
+  const feedStats = feedName ? feeds?.rpcStats?.[feedName] : undefined;
+  const feedCss = FEED_STYLE[feedName || "public-rpc"] || FEED_STYLE["public-rpc"];
 
   const filtered = (report?.tokens || [])
     .filter((t) => !tierFilter || t.verdict.tier === tierFilter)
@@ -351,26 +373,31 @@ export const SolanaScoutPanel: React.FC = () => {
         <div className="flex items-center gap-2 flex-wrap">
           {report?.meta?.generatedAt && (
             <span className="font-mono text-[10px] text-zinc-500">
-              {report.meta.mode?.toUpperCase() || "MOCK"} ·{" "}
+              {report.meta.mode?.toUpperCase() || "UNKNOWN"} ·{" "}
               {new Date(report.meta.generatedAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}
             </span>
           )}
+          <span className={`rounded-md border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${feedCss}`}>
+            feed {feedName || "n/a"}
+          </span>
           <div className="flex items-center rounded-md border border-zinc-800 overflow-hidden text-[11px] font-mono">
-            {(["mock", "live", "discovery"] as const).map((m) => (
+            {(["discovery", "live"] as const).map((m) => (
               <button
                 key={m}
+                type="button"
                 onClick={() => setScanMode(m)}
                 disabled={scanning}
                 className={`px-2.5 py-1.5 transition disabled:opacity-50 ${
                   scanMode === m ? "bg-amber-500/20 text-amber-300" : "bg-zinc-900/60 text-zinc-500 hover:text-zinc-300"
                 }`}
-                title={m === "discovery" ? "Bottom-up: token-boosts DexScreener" : m === "live" ? "KOL-first (butuh Helius key)" : "Data deterministik demo"}
+                title={m === "discovery" ? "Bottom-up: token-boosts DexScreener (real data)" : "KOL-first on-chain (butuh network/HELIUS key)"}
               >
                 {m}
               </button>
             ))}
           </div>
           <button
+            type="button"
             onClick={runScan}
             disabled={scanning}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-amber-500/10 text-amber-300 border border-amber-500/30 text-xs font-mono font-semibold disabled:opacity-50 hover:bg-amber-500/20 transition"
@@ -388,7 +415,7 @@ export const SolanaScoutPanel: React.FC = () => {
       {conn === "no-report" && (
         <div className="rounded-xl border border-amber-800/60 bg-amber-950/20 p-4 text-sm text-amber-200">
           <div className="flex items-center gap-2 font-semibold"><AlertTriangle className="h-4 w-4" /> Belum ada report scout.</div>
-          <p className="mt-1 text-xs text-amber-300/80">Klik <strong>Scan</strong> untuk menjalankan playbook (mock, deterministik) lalu hasilnya tampil di sini. Live scan butuh <code className="font-mono bg-zinc-900 px-1 rounded">HELIUS_API_KEY</code> di proses server.</p>
+          <p className="mt-1 text-xs text-amber-300/80">Klik <strong>Scan</strong> untuk menjalankan discovery <em>real</em> (bottom-up token-boosts DexScreener) atau mode live KOL-first. Data asli — tidak ada mode mock.</p>
         </div>
       )}
 
@@ -402,8 +429,9 @@ export const SolanaScoutPanel: React.FC = () => {
       {(conn === "ok" || report) && (
         <>
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-            {(["ALPHA", "BUY", "WATCH", "SKIP"] as const).map((k) => (
+            {(["ALPHA", "BUY", "WATCH", "SKIP", "AVOID"] as const).map((k) => (
               <button
+                type="button"
                 key={k}
                 onClick={() => setTierFilter(tierFilter === k ? null : k)}
                 className={`rounded-xl border p-3 text-left transition ${tierFilter === k ? "border-amber-500/40 bg-amber-500/5" : "border-zinc-800 bg-zinc-900/60 hover:border-zinc-700"}`}
@@ -419,13 +447,20 @@ export const SolanaScoutPanel: React.FC = () => {
           </div>
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-[11px] text-zinc-400">
-            <strong className="text-zinc-300">Cara baca:</strong> ALPHA ≥150 ({counts.ALPHA || 0}) · BUY 110–149 ({counts.BUY || 0}) · WATCH 70–109 ({counts.WATCH || 0}) · SKIP &lt;70 / gate gagal ({counts.SKIP || 0}). Hard gate (rug, likuiditas tipis, top holder &gt;40%) langsung SKIP.
+            <strong className="text-zinc-300">Cara baca:</strong> ALPHA ≥150 ({counts.ALPHA || 0}) · BUY 110–149 ({counts.BUY || 0}) · WATCH 70–109 ({counts.WATCH || 0}) · SKIP &lt;70 / gate gagal ({counts.SKIP || 0}) · AVOID exit-liquidity ({counts.AVOID || 0}). Hard gate (rug, likuiditas tipis, top holder &gt;40%, pump h24 +150% dengan volume habis) langsung SKIP/AVOID.
           </div>
 
           {report?.crawlInfo && (
             <div className="rounded-lg border border-dashed border-zinc-800 px-3 py-2 text-[11px] text-zinc-500">
               <strong className="text-zinc-400">Metode:</strong> {report.crawlInfo.detecting || "KOL-first"}.{" "}
               {report.crawlInfo.gapNote ? <><strong className="text-zinc-400">Gap:</strong> {report.crawlInfo.gapNote}</> : null}
+              {feedName && (
+                <>
+                  <br />
+                  <strong className="text-zinc-400">RPC:</strong> feed {feedName}
+                  {feedStats ? ` · ok ${feedStats.ok}${feedStats.fail ? ` · ${feedStats.fail} fail` : ""}` : null}
+                </>
+              )}
             </div>
           )}
 

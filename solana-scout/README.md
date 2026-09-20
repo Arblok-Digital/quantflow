@@ -30,8 +30,10 @@ npm run scan -- --wallets 20 --limit 30          # live KOL-first (default)
 npm run scan -- --discovery --limit 50 --max-mcap 5000000   # discovery bottom-up DexScreener
 
 # 2) Dashboard UI
-npm run serve            # buka http://localhost:4589
+npm run serve            # view sekunder → http://localhost:4589
 ```
+
+> **SOT UI scout ada di aplikasi utama** (`localhost:3000`, tab **Scout** — React `src/components/SolanaScoutPanel.tsx` + API `src/server/routes/scout.ts`). Dashboard `npm run serve` (port 4589) di folder ini hanya view sekunder/standalone; semua perubahan FE mengarah ke panel React di engine, bukan ke `solana-scout/ui`.
 
 `meta.feeds.rpc` pada report mencatat feed yang **benar-benar sukses** pada scan terakhir (`helius` / `zan` / `public-rpc`) — bukan sekadar env key. Kalau key Helius/ZAN invalid atau credit habis, label otomatis `public-rpc`.
 

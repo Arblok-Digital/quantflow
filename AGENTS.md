@@ -25,5 +25,6 @@
 - `src/logic/decisionEngine.ts`, `src/logic/keelAdapter.ts`, `src/logic/keel`: keputusan/fitur.
 - `src/replay/replayEngine.ts`: replay terpisah; jangan samakan dengan strategi live.
 - `src/server/aiDataContext.ts`, `tests/integration/aiPrompt.test.ts`: kebijakan dan test prompt.
+- FE Solana Scout (tab **Scout**) nyatu di aplikasi utama: `localhost:3000` (React → `src/components/SolanaScoutPanel.tsx`, API → `src/server/routes/scout.ts` membaca `solana-scout/output/report.json`). **SOT FE scout ada di sana**, bukan `solana-scout/ui` — dashboard `npm run serve` (port 4589) hanya view sekunder.
 - Stack: TypeScript, Node 24, Express, SQLite node:sqlite, React/Vite, Vitest/Supertest.
 - Perintah: `npm run lint`, `npm test -- --reporter=dot`, `npm run build`. `npm run test:smoke` perlu server terisolasi yang ditargetkan eksplisit; jangan memakai server pengguna tanpa izin.
