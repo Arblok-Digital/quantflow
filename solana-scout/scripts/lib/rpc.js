@@ -5,6 +5,36 @@ export const HELIUS_KEY = process.env.HELIUS_API_KEY || '';
 export const HELIUS_RPC = HELIUS_KEY
   ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`
   : null;
+// ZAN (Ant Group) — credit-based free tier, murah utk history reads
+// (getSignaturesForAddress 40ct, getTransaction 50ct, ~150–300M credit/bln).
+// HTTPS-only di free plan. Urutan prioritas: Helius > ZAN > public.
+export const ZAN_API_KEY = process.env.ZAN_API_KEY || '';
+export const ZAN_RPC = ZAN_API_KEY
+  ? `https://api.zan.top/node/v1/solana/mainnet/${ZAN_API_KEY}`
+  : null;
+
+// Endpoint dibaca LAZY (per-call) supaya tes bisa set env kapan saja tanpa
+// memikirkan urutan import ESM — rpcCall selalu memakai nilai env terbaru.
+export function buildRpcEndpoints() {
+  const endpoints = [];
+  if (process.env.HELIUS_API_KEY) endpoints.push(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`);
+  if (process.env.ZAN_API_KEY) endpoints.push(`https://api.zan.top/node/v1/solana/mainnet/${process.env.ZAN_API_KEY}`);
+  endpoints.push(...PUBLIC_RPCS);
+  return { helius: !!process.env.HELIUS_API_KEY, zan: !!process.env.ZAN_API_KEY, endpoints };
+}
+
+let lastOkUrl = null;
+
+export function feedFromUrl(url) {
+  if (!url) return 'public-rpc';
+  if (url.startsWith('https://mainnet.helius-rpc.com')) return 'helius';
+  if (url.startsWith('https://api.zan.top')) return 'zan';
+  return 'public-rpc';
+}
+
+export function lastFeed() {
+  return feedFromUrl(lastOkUrl);
+}
 // Endpoint publik tanpa key — diverifikasi hidup 2026-09-19.
 export const PUBLIC_RPCS = [
   'https://api.mainnet-beta.solana.com',
@@ -61,9 +91,7 @@ export async function rpcList(requests) {
 
 export async function rpcCall(method, params, opts = {}) {
   const { attempts = 2, timeoutMs = 15000 } = opts;
-  const endpoints = [];
-  if (HELIUS_RPC) endpoints.push(HELIUS_RPC);
-  endpoints.push(...PUBLIC_RPCS);
+  const { endpoints } = buildRpcEndpoints();
 
   let lastErr = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -71,6 +99,7 @@ export async function rpcCall(method, params, opts = {}) {
       try {
         const resp = await rpcRequest(url, method, params, timeoutMs);
         if (resp.error) throw new Error(resp.error.message);
+        lastOkUrl = url;
         return resp.result;
       } catch (e) {
         lastErr = e;
@@ -144,6 +173,15 @@ async function dexMeta(mint, now) {
       name: m.name || m.symbol || mint,
       decimals: null,
       ageHours: m.ageHours,
+      market: {
+        priceUsd: m.priceUsd,
+        priceChangeH24: m.priceChangeH24,
+        volumeH1: m.volumeH1,
+        volumeH24: m.volumeH24,
+        txnsH1: m.txnsH1,
+        txnsH24: m.txnsH24,
+        liquidityUsd: m.liquidityUsd,
+      },
     };
   } catch {
     return null;

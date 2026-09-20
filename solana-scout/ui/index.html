@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Solana Scout — Deteksi KOL Dini</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">◎</span>
+    <span class="brand-name">Solana <strong>Scout</strong></span>
+  </div>
+  <div class="scan-meta">
+    <span id="scanMode" class="badge badge-discovery">—</span>
+    <span id="scanTime" class="meta-time">—</span>
+    <span id="scanFeed" class="badge badge-discovery">—</span>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <h1>KOL beli <em>dulu</em>, kamu lihat setelahnya.</h1>
+    <p class="hero-sub">Sinyal didasarkan pada <strong>wallet KOL akumulasi on-chain</strong>, bukan tweet. Baris ini adalah daftar token yang wallet KOL pegang — diurutkan dari akumulasi paling kuat.</p>
+  </section>
+
+  <section class="summary-grid" id="summary">
+    <div class="stat"><span class="stat-value" id="stTotal">0</span><span class="stat-label">Token dipantau</span></div>
+    <div class="stat stat-alpha"><span class="stat-value" id="stAlpha">0</span><span class="stat-label">ALPHA</span></div>
+    <div class="stat stat-buy"><span class="stat-value" id="stBuy">0</span><span class="stat-label">BUY</span></div>
+    <div class="stat stat-watch"><span class="stat-value" id="stWatch">0</span><span class="stat-label">WATCH</span></div>
+    <div class="stat stat-skip"><span class="stat-value" id="stSkip">0</span><span class="stat-label">SKIP</span></div>
+  </section>
+
+  <section class="legend">
+    <span class="legend-note">Cara baca:</span>
+    <span class="chip chip-alpha">ALPHA — ≥150</span>
+    <span class="chip chip-buy">BUY — 110–149</span>
+    <span class="chip chip-watch">WATCH — 70–109</span>
+    <span class="chip chip-skip">SKIP — &lt;70</span>
+  </section>
+
+  <section class="toolbar">
+    <input id="filter" type="text" placeholder="Cari simbol / nama / mint…" class="filter-input">
+    <div class="filter-chips" id="tierFilter"></div>
+  </section>
+
+  <section id="tokenList" class="token-list"></section>
+
+  <section class="crawl-note" id="crawlNote"></section>
+</main>
+
+<footer>
+  <p><strong>Bukan nasihat keuangan.</strong> Mayoritas token baru mati. Risiko rug &amp; exit-liquidity tinggi. Tunggu fase validasi (RugCheck + likuiditas) sebelum membeli; jangan FOMO ke token 1 KOL.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

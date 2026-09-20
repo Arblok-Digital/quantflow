@@ -7,18 +7,15 @@ import { anomaly } from './anomaly.js';
 import { fetchRugCheck } from './fundamentals.js';
 import { sentimentGap } from './sentiment.js';
 import { scoreCandidates } from './signal.js';
-import { mockMarket } from './mock.js';
-import { resolveMintMeta } from './lib/rpc.js';
+import { resolveMintMeta, lastFeed } from './lib/rpc.js';
 import { discoverBoosted, IGNORE_MINTS } from './lib/dexscreener.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(__dirname, '..', 'output');
 const OUT_FILE = path.join(OUT_DIR, 'report.json');
 
-const MOCK_TOKENS = mockMarket();
-
 function buildReportFromScored(scored, meta, crawlInfo) {
-  const counts = { ALPHA: 0, BUY: 0, WATCH: 0, SKIP: 0 };
+  const counts = { ALPHA: 0, BUY: 0, WATCH: 0, SKIP: 0, AVOID: 0 };
   for (const s of scored) if (counts[s.verdict.tier] != null) counts[s.verdict.tier]++;
 
   return {
@@ -40,6 +37,7 @@ function buildReportFromScored(scored, meta, crawlInfo) {
         holders: s.holders,
       },
       fundamentals: s.fundamentals,
+      market: s.market,
       verdict: s.verdict,
     })),
   };
@@ -57,7 +55,7 @@ function writeReport(report) {
 async function live({ limit, maxWallets }) {
   const db = loadKolDb();
   console.log(`KOL DB: ${db.kols.length} wallet, ${db.verifiedCount} verified`);
-  console.log(`Mode LIVE — Helius: ${process.env.HELIUS_API_KEY ? 'dipakai (env)' : 'fallback public RPC'}`);
+  console.log(`Mode LIVE — RPC: ${process.env.HELIUS_API_KEY ? 'helius' : process.env.ZAN_API_KEY ? 'zan' : 'public fallback'}`);
 
   const { walletResults, tokenToKols } = await kolScan({ limit, maxWallets, onProgress: (p) => {
     process.stdout.write(`\r  [${p.scanned}/${p.total}] wallet OK ${p.ok}`);
@@ -82,6 +80,7 @@ async function live({ limit, maxWallets }) {
     c.name = meta.name;
     c.decimals = meta.decimals;
     c.ageHours = meta.ageHours ?? null;
+    c.market = meta.market || null;
   }
 
   const scored = scoreCandidates(candidates, fundamentalsMap);
@@ -91,19 +90,9 @@ async function live({ limit, maxWallets }) {
     engine: 'kol-first v0.1',
     limit,
     maxWallets,
-    feeds: { rpc: process.env.HELIUS_API_KEY ? 'helius' : 'public-rpc', rugcheck: 'api.rugcheck.xyz' },
+    feeds: { rpc: lastFeed(), rugcheck: 'api.rugcheck.xyz' },
   };
   return buildReportFromScored(scored, header);
-}
-
-async function mock() {
-  const header = {
-    mode: 'mock',
-    generatedAt: new Date(),
-    engine: 'kol-first v0.1',
-    note: 'Data deterministik untuk demo; bukan hasil scan real.',
-  };
-  return buildReportFromScored(MOCK_TOKENS, header);
 }
 
 async function discovery({ limit = 50, maxMcap = 5_000_000, minLiq = 0 }) {
@@ -135,6 +124,15 @@ async function discovery({ limit = 50, maxMcap = 5_000_000, minLiq = 0 }) {
     verifiedCount: 0,
     maxFollowers: 0,
     holders: [],
+    market: {
+      priceUsd: c.priceUsd,
+      priceChangeH24: c.priceChangeH24,
+      volumeH1: c.volumeH1,
+      volumeH24: c.volumeH24,
+      txnsH1: c.txnsH1,
+      txnsH24: c.txnsH24,
+      liquidityUsd: c.liquidityUsd,
+    },
   }));
 
   const scored = scoreCandidates(candidates, fundamentalsMap);
@@ -155,15 +153,21 @@ async function discovery({ limit = 50, maxMcap = 5_000_000, minLiq = 0 }) {
 }
 
 const args = process.argv.slice(2);
-if (args[0] === '--mock') {
-  mock().then(writeReport).catch((e) => { console.error(e); process.exit(1); });
-} else if (args[0] === '--discovery') {
-  const limit = parseInt(args[args.indexOf('--limit') + 1] || '50', 10);
-  const maxMcap = parseInt(args[args.indexOf('--max-mcap') + 1] || '5000000', 10);
-  const minLiq = parseInt(args[args.indexOf('--min-liq') + 1] || '0', 10);
+
+function flag(name, fallback) {
+  const i = args.indexOf(name);
+  if (i < 0 || args[i + 1] == null) return fallback;
+  const n = parseInt(args[i + 1], 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+if (args[0] === '--discovery') {
+  const limit = flag('--limit', 50);
+  const maxMcap = flag('--max-mcap', 5000000);
+  const minLiq = flag('--min-liq', 0);
   discovery({ limit, maxMcap, minLiq }).then(writeReport).catch((e) => { console.error(e); process.exit(1); });
 } else {
-  const limit = parseInt(args[args.indexOf('--limit') + 1] || '30', 10);
-  const maxWallets = parseInt(args[args.indexOf('--wallets') + 1] || '20', 10);
+  const limit = flag('--limit', 30);
+  const maxWallets = flag('--wallets', 20);
   live({ limit, maxWallets }).then(writeReport).catch((e) => { console.error(e); process.exit(1); });
 }
