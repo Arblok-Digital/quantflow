@@ -3,6 +3,7 @@ import { authFetch } from "../hooks/useAuth";
 import type { OnChainMetrics, MacroSummary } from "../types";
 import { makeIntradayDraft, formatDeadlineWib } from "../logic/intradayPlan";
 import { publishIntradayTicket, INTRADAY_HOLD_MS_FE_HINT } from "../logic/intradayTicket";
+import { DecisionPipelineTable } from "./DecisionPipelineTable";
 
 export interface AiAdvisorKeelSummary {
   action: string;
@@ -99,6 +100,14 @@ export interface AiAdvisorResponse {
   } | null;
   backtest?: { symbol: string; context: string };
   dataHealth?: AiAdvisorDataHealth[];
+  /** P1-01: gate ENTRY dari verdict provenance harga (server mengirim ini; null bila lolos). */
+  provenanceGate?: { kind: string; note: string } | null;
+  /** FE-PIPELINE-1 Fase 2: slug model Jev yang MENANG (null bila semua gagal). */
+  modelId?: string | null;
+  /** Fase 2: latensi per-tahap; null = tahap tidak dijalankan (bukan 0 ms). */
+  latencyByStage?: { keel?: number | null; jev?: number | null; llm?: number | null } | null;
+  /** Fase 2: percobaan provider Jev berurutan, termasuk yang gagal. */
+  jevAttempts?: Array<{ provider: string; model?: string | null; ok: boolean; latencyMs?: number | null; error?: string | null }> | null;
   /** Keputusan terstruktur (Jev System One) — source: jev-zen/jev-openrouter/gemini/keel. */
   decision?: {
     action: "BUY" | "SELL" | "HOLD";
@@ -134,6 +143,8 @@ interface AiAdvisorPanelProps {
   /** Health flag dari /api/health — hanya boolean, TIDAK pernah berisi key. */
   jevConfigured?: boolean;
   openrouterConfigured?: boolean;
+  /** Tier keyless (gateway opencode CLI) — tier Jev yang dipakai paling depan. */
+  opencodeGatewayConfigured?: boolean;
   /** Market aktif (SubBar) — SPOT menolak SHORT di draft intraday. */
   marketType?: string;
   /** TF chart aktif — cooldown cache insight diskala per TF (15m < 1h < 4h). */
@@ -194,6 +205,7 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
   geminiActive,
   jevConfigured = false,
   openrouterConfigured = false,
+  opencodeGatewayConfigured = false,
   marketType = "FUTURES",
   timeframe = "15m",
 }) => {
@@ -372,15 +384,23 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                 >
                   {isAi ? "AI ACTIVE" : "KEEL-ONLY"}
                 </span>
-                {(jevConfigured || openrouterConfigured) && (
+                {(opencodeGatewayConfigured || jevConfigured || openrouterConfigured) && (
                   <span
                     className="px-2 py-0.5 rounded border text-[10px] font-mono font-bold bg-violet-500/15 text-violet-300 border-violet-500/30"
                     title={[
+                      opencodeGatewayConfigured ? "JEV GATEWAY (keyless, opencode CLI) — tier dipakai lebih dulu" : null,
                       jevConfigured ? "JEV ZEN terkonfigurasi" : null,
                       openrouterConfigured ? "OPENROUTER terkonfigurasi" : null,
                     ].filter(Boolean).join(" • ")}
                   >
-                    JEV {jevConfigured ? (openrouterConfigured ? "ZEN+OR" : "ZEN") : "OR"}
+                    JEV{" "}
+                    {[
+                      opencodeGatewayConfigured ? "GW" : null,
+                      jevConfigured ? "ZEN" : null,
+                      openrouterConfigured ? "OR" : null,
+                    ]
+                      .filter(Boolean)
+                      .join("+")}
                   </span>
                 )}
               </h2>
@@ -519,6 +539,13 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                 )}
               </div>
             )}
+
+            {/* DECISION PIPELINE (FE-PIPELINE-1) — keel → Jev → LLM → final dalam satu tabel.
+                Semua angka diambil dari payload yang sama; raw vs final dibedakan eksplisit. */}
+            <div className="mb-4">
+              <DecisionPipelineTable snapshot={result} />
+            </div>
+
             {/* STRATEGIC RECOMMENDATION — Headline Arahan */}
             {ai?.suggestedBias && (
               <div className={`mb-4 rounded-2xl border-4 p-5 flex items-center justify-between shadow-[0_0_30px_rgba(0,0,0,0.5)] ${

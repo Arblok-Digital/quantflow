@@ -75,6 +75,7 @@ export default function App() {
   const [geminiActive, setGeminiActive] = useState<boolean>(true);
   const [jevConfigured, setJevConfigured] = useState<boolean>(false);
   const [openrouterConfigured, setOpenrouterConfigured] = useState<boolean>(false);
+  const [opencodeGatewayConfigured, setOpencodeGatewayConfigured] = useState<boolean>(false);
   const [isArchitectureOpen, setIsArchitectureOpen] = useState<boolean>(false);
   const [isAuditLedgerOpen, setIsAuditLedgerOpen] = useState<boolean>(false);
   const [isKeyVaultOpen, setIsKeyVaultOpen] = useState<boolean>(false);
@@ -380,6 +381,11 @@ export default function App() {
         if (data.openrouterConfigured !== undefined) {
           setOpenrouterConfigured(Boolean(data.openrouterConfigured));
         }
+        // Tier keyless gateway (Jev dipakai lebih dulu) — dulu tidak dibaca FE
+        // sehingga badge Jev tidak muncul walau tier ini aktif.
+        if (data.opencodeGatewayConfigured !== undefined) {
+          setOpencodeGatewayConfigured(Boolean(data.opencodeGatewayConfigured));
+        }
       })
       .catch(() => {});
   }, []);
@@ -591,6 +597,7 @@ export default function App() {
             geminiActive={geminiActive}
             jevConfigured={jevConfigured}
             openrouterConfigured={openrouterConfigured}
+            opencodeGatewayConfigured={opencodeGatewayConfigured}
             onSelectTimeframe={handleSelectTimeframe}
             candlesByTimeframe={market.candlesByTimeframe}
             technicalsByTimeframe={market.technicalsByTimeframe}
