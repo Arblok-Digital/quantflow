@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import { evaluateTradingDecision } from "./decisionEngine";
 import type { DecisionEngineInput } from "./decisionEngine";
+import { setAiDecisionCore, resetAiDecisionCore } from "./aiDecisionBridge";
 import type {
   MTFLiquidityAnalysis,
   LiquidityZone,
@@ -457,6 +458,196 @@ describe("evaluateTradingDecision — MODE AI", () => {
     expect(body.provenance.market.source).toBe("REAL");
     expect(body.provenance.macro.source).toBe("STALE");
     expect(body.mtfLiquidity.activeState).toBe("EQUILIBRIUM");
+  });
+});
+
+// --- audit Gemini 3 Pro (2026-09-24) P0-A/P0-C: direct core in-memory ---
+
+describe("evaluateTradingDecision — direct core in-memory (P0-A/P0-C)", () => {
+  beforeEach(() => {
+    runKeelMock.mockReset();
+    riskMock.mockReset();
+    riskMock.mockReturnValue({ passed: true, reasons: [] });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    resetAiDecisionCore();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("core terdaftar → dipanggil LANGSUNG in-memory, authFetch/fetch TIDAK dipakai", async () => {
+    const core = vi.fn().mockResolvedValue({
+      status: 200,
+      json: {
+        action: "SELL",
+        confidence: 74,
+        targetPrice: 100,
+        stopLoss: 100.8,
+        takeProfit: 97.2,
+        positionSizePercent: 8,
+        reasoning: "core direct decision",
+        promptSummary: "jevs=jev-opencode symbol=BTC/USDT",
+      },
+    });
+    setAiDecisionCore(core);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true }));
+
+    expect(core).toHaveBeenCalledTimes(1);
+    // P0-A: dulu authFetch("/api/ai-decision") relative-URL THROW di native
+    // fetch Node → error ditelan → selalu keel. Sekarang fetch tidak disentuh.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(runKeelMock).not.toHaveBeenCalled();
+    expect(d.action).toBe("SELL");
+    expect(d.source).toBe("ai-decision-server");
+    expect(d.reasoning).toBe("core direct decision");
+    // Body yang dulu dikirim via HTTP kini diterima core identik.
+    const body = core.mock.calls[0][0];
+    expect(body.symbol).toBe("BTC/USDT");
+    expect(body.currentPrice).toBe(100);
+    expect(body.riskParams.maxRiskPerTradePercent).toBe(2);
+    expect(body.mtfLiquidity.activeState).toBe("EQUILIBRIUM");
+  });
+
+  it("core status 503 → fallback MODE KEEL, tetap tanpa fetch", async () => {
+    setAiDecisionCore(vi.fn().mockResolvedValue({ status: 503, json: { success: false } }));
+    runKeelMock.mockReturnValue(keelResult());
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(runKeelMock).toHaveBeenCalledTimes(1);
+    expect(d.source).toBe("keel-institutional-quant");
+  });
+
+  it("core 200 + shape invalid → HOLD fail-closed, keel TIDAK dipanggil", async () => {
+    setAiDecisionCore(
+      vi.fn().mockResolvedValue({
+        status: 200,
+        json: { action: "BUY", confidence: 150, targetPrice: 100, stopLoss: 95, takeProfit: 110, positionSizePercent: 8 },
+      })
+    );
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: true }));
+
+    expect(d.action).toBe("HOLD");
+    expect(d.confidence).toBe(0);
+    expect(d.reasoning).toContain("shape invalid");
+    expect(runKeelMock).not.toHaveBeenCalled();
+  });
+
+  it("core 200 BUY + provenance basi → [PROVENANCE GATE] HOLD di jalur AI", async () => {
+    setAiDecisionCore(
+      vi.fn().mockResolvedValue({
+        status: 200,
+        json: { action: "BUY", confidence: 90, targetPrice: 100, stopLoss: 95, takeProfit: 110, positionSizePercent: 8, reasoning: "core buy" },
+      })
+    );
+
+    const d = await evaluateTradingDecision(
+      input({
+        aiEnabled: true,
+        provenance: { market: { source: "REAL", venue: "binance", marketType: "FUTURES", exchangeTs: Date.now() - 60_000 } },
+      })
+    );
+
+    expect(d.action).toBe("HOLD");
+    expect(d.confidence).toBe(0);
+    expect(d.reasoning).toContain("[PROVENANCE GATE]");
+  });
+});
+
+// --- audit Gemini 3 Pro P0-B: provenance gate di jantung (termasuk keel) ---
+
+describe("evaluateTradingDecision — provenance entry gate di fallback Keel (P0-B)", () => {
+  beforeEach(() => {
+    runKeelMock.mockReset();
+    riskMock.mockReset();
+    riskMock.mockReturnValue({ passed: true, reasons: [] });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    resetAiDecisionCore();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("provenance STALE + keel BUY → HOLD [PROVENANCE GATE], risk gate tidak sempat jalan", async () => {
+    runKeelMock.mockReturnValue(keelResult());
+
+    const d = await evaluateTradingDecision(
+      input({
+        aiEnabled: false,
+        provenance: { market: { source: "REAL", venue: "binance", marketType: "FUTURES", exchangeTs: Date.now() - 60_000 } },
+      })
+    );
+
+    expect(d.action).toBe("HOLD");
+    expect(d.confidence).toBe(0);
+    expect(d.positionSizePercent).toBe(0);
+    expect(d.reasoning).toContain("[PROVENANCE GATE]");
+    expect(d.source).toBe("keel-institutional-quant");
+    expect(riskMock).not.toHaveBeenCalled();
+  });
+
+  it("provenance SIMULATED + keel BUY → HOLD", async () => {
+    runKeelMock.mockReturnValue(keelResult());
+
+    const d = await evaluateTradingDecision(
+      input({
+        aiEnabled: false,
+        provenance: { market: { source: "SIMULATED", venue: "binance", marketType: "FUTURES", exchangeTs: Date.now() } },
+      })
+    );
+
+    expect(d.action).toBe("HOLD");
+    expect(d.reasoning).toContain("[PROVENANCE GATE]");
+  });
+
+  it("klaim REAL tanpa venue (UNKNOWN) + keel BUY → HOLD", async () => {
+    runKeelMock.mockReturnValue(keelResult());
+
+    const d = await evaluateTradingDecision(
+      input({
+        aiEnabled: false,
+        provenance: { market: { source: "REAL", marketType: "FUTURES", exchangeTs: Date.now() } },
+      })
+    );
+
+    expect(d.action).toBe("HOLD");
+    expect(d.reasoning).toContain("[PROVENANCE GATE]");
+  });
+
+  it("REAL segar (venue+marketType+exchangeTs) → keel BUY tetap lolos gate", async () => {
+    runKeelMock.mockReturnValue(keelResult());
+
+    const d = await evaluateTradingDecision(
+      input({
+        aiEnabled: false,
+        provenance: { market: { source: "REAL", venue: "binance", marketType: "FUTURES", exchangeTs: Date.now() - 50 } },
+      })
+    );
+
+    expect(d.action).toBe("BUY");
+    expect(d.source).toBe("keel-institutional-quant");
+    expect(d.reasoning).not.toContain("[PROVENANCE GATE]");
+    expect(riskMock).toHaveBeenCalled();
+  });
+
+  it("tanpa provenance (MISSING) → tidak diblokir (perilaku lama)", async () => {
+    runKeelMock.mockReturnValue(keelResult());
+
+    const d = await evaluateTradingDecision(input({ aiEnabled: false }));
+
+    expect(d.action).toBe("BUY");
+    expect(d.reasoning).not.toContain("[PROVENANCE GATE]");
   });
 });
 

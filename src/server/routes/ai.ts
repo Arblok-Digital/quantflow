@@ -26,20 +26,18 @@ import {
 } from "@/src/logic/jevChip";
 import { assembleDecision, type JevDecision } from "@/src/logic/decisionAssembler";
 import {
-  verdictFromProvenance,
   healthRowFromVerdict,
   applyEntryPolicyGate,
+  marketPriceVerdictFromProvenanceTag,
   type ProvenanceVerdict,
 } from "@/src/logic/provenance";
+import { setAiDecisionCore, type AiDecisionCoreResult } from "@/src/logic/aiDecisionBridge";
 
 /** Verdict provenance untuk "market.price" dari body — dipakai kedua route AI
- *  (decision & advisor). MISSING = tidak diblokir (perilaku lama), klaim palsu
- *  (STALE/SIMULATED/UNKNOWN) → dataHealth turun + entry policy gate. */
+ *  (decision & advisor). Delegate ke helper bersama di provenance.ts (satu
+ *  implementasi dipakai juga oleh jantung decisionEngine — audit P0-B). */
 function marketPriceVerdictFromBody(body: any, now: number): ProvenanceVerdict {
-  const p = body?.provenance;
-  const marketProv =
-    p?.market ?? p?.price ?? (p && typeof p === "object" && ("venue" in p || "source" in p || "marketType" in p) ? p : null);
-  return verdictFromProvenance(marketProv, { now }, "market.price");
+  return marketPriceVerdictFromProvenanceTag(body?.provenance, now);
 }
 
 // Shape kontrak output /api/ai-decision (dipakai Gemini DAN hasil Jev setelah
@@ -377,9 +375,14 @@ function buildBacktestContextFor(symbol: string): string {
   }
 }
 
-export function registerAiRoutes(app: Express): void {
-  // 1. LLM Decision Engine Route (MTF Liquidation Hunt, On-Chain Analysis & Macro Calendar Integration)
-  app.post("/api/ai-decision", requireAuth, async (req, res) => {
+/**
+ * Core /api/ai-decision — logika murni endpoint, DIPECAH dari handler HTTP
+ * (audit Gemini 3 Pro §4.1: decouple HTTP dari logic AI). Mengembalikan
+ * { status, json } supaya bisa dipanggil (a) oleh route Express dan
+ * (b) LANGSUNG in-memory oleh evaluateTradingDecision di ranah Node
+ * (audit §4.2 — tanpa relative URL yang throw, tanpa authFetch/localStorage).
+ */
+export async function executeAiDecisionCore(body: any): Promise<AiDecisionCoreResult> {
     const startTime = Date.now();
     const {
       symbol,
@@ -391,16 +394,19 @@ export function registerAiRoutes(app: Express): void {
       activePositions,
       portfolioEquity,
       riskParams,
-    } = req.body;
-const reqOrderBook = (req.body as any)?.orderBook;
-const reqRecentTrades = (req.body as any)?.recentTrades;
-const reqFutures = (req.body as any)?.futures;
+    } = body;
+const reqOrderBook = body?.orderBook;
+const reqRecentTrades = body?.recentTrades;
+const reqFutures = body?.futures;
 // P1-01: verdict provenance harga (klaim client diverifikasi server-side).
-const marketPriceVerdict = marketPriceVerdictFromBody(req.body, startTime);
+const marketPriceVerdict = marketPriceVerdictFromBody(body, startTime);
 
 // ===== JEV CHIP (System One) — chain: jev-zen → jev-openrouter → Gemini → Keel.
 // Jev lebih cepat & terstruktur; kalau semua provider Jev mati, jatuh ke
 // chain Gemini yang sudah ada (tidak throw — pola tetap sama).
+// Payload sukses Jev ditangkap ke jevResponse (bukan res.json langsung) agar
+// fungsi ini bisa dipanggil in-memory tanpa objek Response Express.
+let jevResponse: AiDecisionCoreResult | null = null;
 const jevHandled = await tryJevDecisionChain({
   symbol: String(symbol || "BTC/USDT"),
   currentPrice: Number(currentPrice) || 0,
@@ -412,9 +418,9 @@ const jevHandled = await tryJevDecisionChain({
   onChainMetrics,
   macroCalendar,
   riskParams,
-  provenance: (req.body as any)?.provenance ?? null,
+  provenance: body?.provenance ?? null,
   marketPriceVerdict,
-      onDone: (payload, provider, modelSlug, jev, latencyMs) => {
+      onDone: (payload, provider, modelSlug, jev, latencyMs, jevErrors) => {
         const inferenceLatency = Date.now() - startTime;
         const maxRisk = Number(riskParams?.maxRiskPerTradePercent) || 0;
         const clampedSize =
@@ -436,7 +442,7 @@ const jevHandled = await tryJevDecisionChain({
               model: modelSlug,
               jevConfidence: jev.confidence,
               jevRiskLevel: jev.riskLevel,
-              provenance: (req.body as any)?.provenance ?? null,
+              provenance: body?.provenance ?? null,
             }),
           });
           appendAudit("decision", {
@@ -454,7 +460,9 @@ const jevHandled = await tryJevDecisionChain({
         } catch (e: any) {
           console.warn(`[jev] gagal simpan audit decision: ${e?.message}`);
         }
-        res.json({
+        jevResponse = {
+          status: 200,
+          json: {
           ...payload,
           positionSizePercent: clampedSize,
           reasoning: payload.reasoning,
@@ -464,15 +472,25 @@ const jevHandled = await tryJevDecisionChain({
           jevConfidence: jev.confidence,
           jevRiskLevel: jev.riskLevel,
           inferenceLatencyMs: inferenceLatency,
-          provenance: (req.body as any)?.provenance ?? null,
+          // FE-PIPELINE-1 Fase 2: alasan kegagalan provider Jev yang disanitasi
+          // (tanpa apiKey/token) — menutup klaim P1-02 soal jevErrors.
+          jevErrors,
+          provenance: body?.provenance ?? null,
           promptSummary: `jevs=${provider} symbol=${String(symbol || "BTC/USDT")} price=${currentPrice} conf=${jev.confidence} risk=${jev.riskLevel}`,
-        });
+          },
+        };
       },
     });
     // handled = objek {handled:boolean} — cek PROPERTINYA, bukan objeknya
     // (objek selalu truthy; dulu `if (jevHandled)` membuat semua jalur
     // fallback Gemini/keel pulang tanpa respons → request gantung).
-    if (jevHandled.handled) return;
+    if (jevHandled.handled) {
+      if (jevResponse) return jevResponse;
+      return {
+        status: 503,
+        json: { success: false, source: "unavailable", message: "Jev chain handled tetapi payload kosong." },
+      };
+    }
 
     const client = getGeminiClient();
 
@@ -610,12 +628,15 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
               reason: "raw-llm-output-not-json",
             });
           } catch {}
-          return res.status(502).json({
-            success: false,
-            source: "fallback-validation-failed",
-            reason: "unparseable-llm-json",
-            message: "Output LLM tidak valid JSON. Keputusan ditolak (tidak fallback diam-diam).",
-          });
+          return {
+            status: 502,
+            json: {
+              success: false,
+              source: "fallback-validation-failed",
+              reason: "unparseable-llm-json",
+              message: "Output LLM tidak valid JSON. Keputusan ditolak (tidak fallback diam-diam).",
+            },
+          };
         }
 
         const validation = decisionSchema.safeParse(parsedDecision);
@@ -646,13 +667,16 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
               issues: validation.error.issues,
             });
           } catch {}
-          return res.status(502).json({
-            success: false,
-            source: "fallback-validation-failed",
-            reason: "validation-failed",
-            issues: validation.error.issues,
-            message: "Output LLM gagal validasi. Keputusan ditolak (tidak fallback diam-diam).",
-          });
+          return {
+            status: 502,
+            json: {
+              success: false,
+              source: "fallback-validation-failed",
+              reason: "validation-failed",
+              issues: validation.error.issues,
+              message: "Output LLM gagal validasi. Keputusan ditolak (tidak fallback diam-diam).",
+            },
+          };
         }
 
         const parsedDecision2 = validation.data as z.infer<typeof decisionSchema>;
@@ -704,7 +728,7 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
             };
 
         const inferenceLatency = Date.now() - startTime;
-        const provenance = (req.body && req.body.provenance) || null;
+        const provenance = (body && body.provenance) || null;
 
         try {
           const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -753,21 +777,28 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
             `mtf=${mtfLiquidity?.activeState ?? "?"} state, conf=${mtfLiquidity?.confluenceScore ?? "?"}%`,
             `riskMax=${riskParams?.maxRiskPerTradePercent ?? "?"}% equity=${portfolioEquity ?? "?"}`,
           ].join("\n") + `\nmodel=${usedModel} latency=${inferenceLatency}ms`;
-        return res.json({
-          ...finalDecision,
-          source: usedModel,
-          inferenceLatencyMs: inferenceLatency,
-          provenance,
-          promptSummary,
-        });
+        return {
+          status: 200,
+          json: {
+            ...finalDecision,
+            source: usedModel,
+            inferenceLatencyMs: inferenceLatency,
+            provenance,
+            jevErrors: jevHandled.errors,
+            promptSummary,
+          },
+        };
         }
       } catch (err: any) {
         console.warn("Gemini API call failed:", err?.message);
-        return res.status(503).json({
-          success: false,
-          source: "unavailable",
-          message: "Gemini API call gagal. Fallback keputusan ditangani client-side (logic/decisionEngine).",
-        });
+        return {
+          status: 503,
+          json: {
+            success: false,
+            source: "unavailable",
+            message: "Gemini API call gagal. Fallback keputusan ditangani client-side (logic/decisionEngine).",
+          },
+        };
       }
     }
 
@@ -817,21 +848,42 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         });
       } catch {}
 
-      return res.json({
-        ...keelDecision,
-        source: "keel-institutional-quant",
-        inferenceLatencyMs: latencyMs,
-        promptSummary,
-      });
+      return {
+        status: 200,
+        json: {
+          ...keelDecision,
+          source: "keel-institutional-quant",
+          inferenceLatencyMs: latencyMs,
+          promptSummary,
+          jevErrors: jevHandled.errors,
+        },
+      };
     } catch (err: any) {
       console.warn(`Keel quant engine fallback error: ${err?.message}`);
     }
 
-    return res.status(503).json({
-      success: false,
-      source: "unavailable",
-      message: "Gemini API Key dan Keel Engine fallback gagal.",
-    });
+    return {
+      status: 503,
+      json: {
+        success: false,
+        source: "unavailable",
+        message: "Gemini API Key dan Keel Engine fallback gagal.",
+      },
+    };
+}
+
+export function registerAiRoutes(app: Express): void {
+  // Bridge in-memory: evaluateTradingDecision di ranah Node (pipeline cycle)
+  // memanggil core ini LANGSUNG — tanpa HTTP relative-URL yang throw di
+  // native fetch Node dan tanpa authFetch/localStorage (audit Gemini 3 Pro
+  // P0-A/P0-C). Browser tetap memakai jalur HTTP authFetch seperti biasa.
+  setAiDecisionCore(executeAiDecisionCore);
+
+  // 1. LLM Decision Engine Route (MTF Liquidation Hunt, On-Chain Analysis & Macro Calendar Integration)
+  //    Thin wrapper di atas executeAiDecisionCore (decouple HTTP dari logic AI).
+  app.post("/api/ai-decision", requireAuth, async (req, res) => {
+    const out = await executeAiDecisionCore(req.body);
+    return res.status(out.status).json(out.json);
   });
 
   // Dedicated Keel Institutional Quant Engine Signal Endpoint
@@ -981,6 +1033,13 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
 
   app.post("/api/ai-advisor", requireAuth, async (req, res) => {
     const startTime = Date.now();
+    // FE-PIPELINE-1 Fase 2 — telemetri per-tahap untuk tabel pipeline di FE.
+    // null = tahap TIDAK dijalankan (bukan 0 ms); angka diisi apa adanya, tanpa estimasi.
+    const stageMs: { keel: number | null; jev: number | null; llm: number | null } = { keel: null, jev: null, llm: null };
+    // Percobaan provider Jev berurutan (termasuk yang GAGAL) + error yang sudah
+    // disanitasi (tanpa apiKey/token) supaya FE menampilkan alasan, bukan tebakan.
+    const jevAttempts: Array<{ provider: string; model: string | null; ok: boolean; latencyMs: number | null; error: string | null }> = [];
+    let jevModelSlug: string | null = null;
     const body: AiAdvisorBody = req.body || {};
     const sym = String(body.symbol || "BTC/USDT");
     const price = Number(body.currentPrice) || 64250;
@@ -1175,6 +1234,7 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
 
     let keelDecision: any = null;
     let rawSignal: any = null;
+    const keelT0 = Date.now();
     try {
       const result = runKeelQuantEngine({
         symbol: sym,
@@ -1190,6 +1250,7 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     } catch (e: any) {
       console.warn(`[ai-advisor] keel engine failed: ${e?.message}`);
     }
+    stageMs.keel = Date.now() - keelT0;
 
     const fa: FuturesAnalysis | undefined = keelDecision?.futuresAnalysis;
     const mtf: MTFLiquidityAnalysis | undefined = mtfLiquidity;
@@ -1287,6 +1348,7 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     // onchain policy/backtest). Jev mati → jevDecision null → Gemini decide;
     // semua mati → keelSummary.
     let jevDecision: { action: "BUY" | "SELL" | "HOLD"; confidence: number; riskLevel: "LOW" | "MEDIUM" | "HIGH"; source: string } | null = null;
+    const jevT0 = Date.now();
     {
       const jevState = buildJevState({
         symbol: sym,
@@ -1304,32 +1366,44 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         const provider = entry.id;
         if (entry.kind === "http" && !isProviderConfigured(entry.cfg as ProviderConfig)) {
           console.warn(`[ai-advisor] ${provider} tidak terkonfigurasi — lanjut.`);
+          jevAttempts.push({ provider, model: null, ok: false, latencyMs: null, error: "tidak terkonfigurasi (baseUrl/apiKey/model kosong)" });
           continue;
         }
         const modelSlug = entry.kind === "cli" ? (entry.cfg as OpencodeGatewayConfig).model : (entry.cfg as ProviderConfig).model;
         try {
           const res = await callJevProvider(entry, jevPrompt);
           if (!res.ok) {
-            console.warn(`[ai-advisor] ${provider} gagal (${res.error ?? res.status}) — lanjut.`);
+            const why = sanitizeJevError(res.error || `HTTP ${res.status ?? "?"}`);
+            console.warn(`[ai-advisor] ${provider} gagal (${why}) — lanjut.`);
+            jevAttempts.push({ provider, model: modelSlug ?? null, ok: false, latencyMs: res.latencyMs ?? null, error: why });
             continue;
           }
           const parsed = parseJevResponse(res.data);
           if (!parsed.ok || !parsed.parsed) {
-            console.warn(`[ai-advisor] ${provider} output invalid — lanjut.`);
+            const why = sanitizeJevError(parsed.issues?.map((i) => i.message).join("; ") || "non-JSON");
+            console.warn(`[ai-advisor] ${provider} output invalid (${why}) — lanjut.`);
+            jevAttempts.push({ provider, model: modelSlug ?? null, ok: false, latencyMs: res.latencyMs ?? null, error: `output invalid: ${why}` });
             continue;
           }
           jevDecision = { ...parsed.parsed, source: provider };
+          jevModelSlug = modelSlug ?? null;
+          jevAttempts.push({ provider, model: modelSlug ?? null, ok: true, latencyMs: res.latencyMs ?? null, error: null });
           console.log(`[ai-advisor] Jev decide: ${jevDecision.action} conf=${jevDecision.confidence} risk=${jevDecision.riskLevel} via ${provider} (${modelSlug})`);
           break;
         } catch (err: any) {
-          console.warn(`[ai-advisor] ${provider} unexpected (tanpa throw): ${String(err?.message || err)}`);
+          const why = sanitizeJevError(err?.message || err);
+          console.warn(`[ai-advisor] ${provider} unexpected (tanpa throw): ${why}`);
+          jevAttempts.push({ provider, model: modelSlug ?? null, ok: false, latencyMs: null, error: why });
           continue;
         }
       }
     }
+    stageMs.jev = Date.now() - jevT0;
 
     const client = getGeminiClient();
 
+    // Fase 2: ukur tahap LLM terpisah (hanya terisi bila Gemini benar-benar dipanggil).
+    const llmT0 = Date.now();
     if (client && keelDecision) {
       const backtestCtx = buildBacktestContextFor(sym);
       const failedSources = dataHealth.filter((d) => !d.ok).map((d) => d.source);
@@ -1467,6 +1541,7 @@ Jawab HANYA JSON valid tanpa markdown:
         }
       }
 
+      stageMs.llm = Date.now() - llmT0;
       if (responseText) {
         try {
           const parsed = JSON.parse(responseText);
@@ -1562,6 +1637,11 @@ Jawab HANYA JSON valid tanpa markdown:
                 decisionSource: jevDecision ? jevDecision.source : "keel",
                 jevDecision: jevDecision ?? null,
                 provenanceGate: provBlocks ? { kind: advisorPriceVerdict.kind, note: advisorPriceVerdict.note } : null,
+                // Fase 2 — telemetri jujur: slug model Jev yang MENANG, latensi per tahap
+                // (null = tahap tidak dijalankan), dan daftar percobaan provider.
+                modelId: jevModelSlug,
+                latencyByStage: { keel: stageMs.keel, jev: stageMs.jev, llm: stageMs.llm },
+                jevAttempts,
                 keelSummary,
                 technicals: technicalsEcho,
                 multiTfTechnicals: multiTf,
@@ -1656,6 +1736,10 @@ Jawab HANYA JSON valid tanpa markdown:
       },
       decisionSource: "keel",
       jevDecision: jevDecision ?? null,
+      // Fase 2 — sama seperti jalur AI: null = tahap tidak dijalankan.
+      modelId: jevModelSlug,
+      latencyByStage: { keel: stageMs.keel, jev: stageMs.jev, llm: stageMs.llm },
+      jevAttempts,
       keelSummary,
       technicals: technicalsEcho,
       multiTfTechnicals: multiTf,

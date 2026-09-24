@@ -10,8 +10,9 @@ import {
   OrderBook,
 } from "../types";
 import { z } from "zod";
-import { authFetch } from "../hooks/useAuth";
+import { getAiDecisionCore } from "./aiDecisionBridge";
 import { runKeelQuantEngine, evaluateKeelRisk } from "./keelAdapter";
+import { applyEntryPolicyGate, marketPriceVerdictFromProvenanceTag } from "./provenance";
 import type { RecentTrade, FuturesMetrics } from "../data/marketFetcher";
 
 /**
@@ -86,13 +87,9 @@ export interface DecisionEngineInput {
   recentTrades?: RecentTrade[];
   /** Futures institutional metrics untuk keel (opsional, gagal → undefined). */
   futures?: FuturesMetrics;
-  /** Provenance tag per pilar (4.4) — diteruskan ke server /api/ai-decision. */
-  provenance?: {
-    market?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
-    liquidity?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
-    onChain?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
-    macro?: { source: "REAL" | "SIMULATED" | "STALE"; fetchedAt: number; ageMinutes?: number };
-  };
+  /** Provenance tag per pilar (4.4) — diteruskan ke server /api/ai-decision
+   *  dan ditilai ulang SERVER (verdictFromProvenance) — bukan ditelan mentah. */
+  provenance?: Record<string, any>;
 }
 
 /**
@@ -100,13 +97,18 @@ export interface DecisionEngineInput {
  *
  * Routing bersih (tidak campur aduk):
  *   MODE AI  : process.env.GEMINI_API_KEY ada (atau input.aiEnabled true)
- *              → POST /api/ai-decision (authFetch) → source="ai-decision-server"
- *              → kalau fetch gagal → turun ke MODE KEEL
- *   MODE KEEL: GEMINI kosong ATAU /api/ai-decision gagal
+ *              → Node/server: executeAiDecisionCore LANGSUNG in-memory via
+ *                aiDecisionBridge (audit Gemini 3 Pro P0-A/C — tanpa HTTP
+ *                relative-URL yang throw, tanpa authFetch/localStorage)
+ *              → browser: POST /api/ai-decision (authFetch + Bearer)
+ *              → keduanya → source="ai-decision-server"
+ *              → kalau gagal → turun ke MODE KEEL
+ *   MODE KEEL: GEMINI kosong ATAU inti AI gagal
  *              → runKeelQuantEngine(input) LANGSUNG local → source="keel-institutional-quant"
  *              → TIDAK lewat /api/keel/signal (hindari double round-trip)
  *              → INLINE guard via evaluateKeelRisk (F-01/P0) + price-order
- *                validation (F-05) sebelum return — fail-closed ke HOLD.
+ *                validation (F-05) + provenance entry gate (P0-B) sebelum
+ *                return — fail-closed ke HOLD.
  */
 export async function evaluateTradingDecision(
   input: DecisionEngineInput
@@ -131,14 +133,15 @@ export async function evaluateTradingDecision(
       (!!process.env.OPENROUTER_API_KEY && !!process.env.OPENROUTER_BASE_URL));
   const aiConfigured = input.aiEnabled != null ? input.aiEnabled : envHasGemini || envHasJev;
 
+  // P0-B (audit Gemini 3 Pro): verdict provenance harga dihitung SEKALI di
+  // jantung decisionEngine — dipakai jalur AI (defense-in-depth; route sudah
+  // gate) DAN fallback Keel lokal (dulu gate hanya di route HTTP → pipeline
+  // server yang bypass HTTP lolos dari gatekeeper). MISSING → tidak diblokir.
+  const priceVerdict = marketPriceVerdictFromProvenanceTag(input.provenance, Date.now());
+
   if (aiConfigured) {
     try {
-      // F-04: /api/ai-decision di server sekarang requireAuth → wajib pakai authFetch
-      // supaya Authorization header (Bearer token) ikut terkirim.
-      const res = await authFetch("/api/ai-decision", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const requestPayload = {
           symbol: input.symbol,
           currentPrice: input.currentPrice,
           technicals: input.technicals,
@@ -168,11 +171,42 @@ export async function evaluateTradingDecision(
           orderBook: input.orderBook,
           recentTrades: input.recentTrades,
           futures: input.futures,
-        }),
-      });
+      };
 
-      if (res.ok) {
-        const raw = await res.json();
+      const aiCore = getAiDecisionCore();
+      let raw: any = null;
+      if (aiCore) {
+        // Ranah Node (server pipeline F-07): panggil executeAiDecisionCore
+        // LANGSUNG in-memory — tanpa HTTP. authFetch dengan relative URL
+        // THROW di native fetch Node (TypeError: Invalid URL — P0-A) dan
+        // localStorage tidak ada (P0-C); dulu keduanya membuat AI (Jev &
+        // Gemini) lumpuh total di server dan error ditelan catch → selalu
+        // jatuh ke Keel lokal. F-04/auth tetap berlaku di jalur HTTP bawah.
+        const out = await aiCore(requestPayload);
+        if (out.status >= 200 && out.status < 300) {
+          raw = out.json;
+        } else {
+          console.warn(`AI decision core status ${out.status} — fallback ke MODE KEEL.`);
+        }
+      } else {
+        // Browser (tidak ada core terdaftar): HTTP + Bearer token seperti
+        // biasa. Dynamic import — useAuth (localStorage) bukan dependensi
+        // statis modul ini lagi; jalur Node dengan core terdaftar tidak
+        // pernah memuatnya (P0-C).
+        const { authFetch } = await import("../hooks/useAuth");
+        const res = await authFetch("/api/ai-decision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestPayload),
+        });
+        if (res.ok) {
+          raw = await res.json();
+        } else {
+          console.warn(`/api/ai-decision HTTP ${res.status} — fallback ke MODE KEEL.`);
+        }
+      }
+
+      if (raw != null) {
         // Fail-closed: validasi shape output LLM — tolak keluaran malformed
         // (mis. SL/TP non-finite) walau HTTP 200. F-05.
         const shapeCheck = AIDecisionResponseSchema.safeParse({
@@ -209,6 +243,30 @@ export async function evaluateTradingDecision(
             takeProfit: Number((input.currentPrice * 1.03).toFixed(2)),
             positionSizePercent: 0,
             reasoning: `AI output ditolak (${orderCheck.message})`,
+            source: "ai-decision-server",
+            inferenceLatencyMs: Date.now() - startTime,
+          };
+        }
+        // P0-B: entry gate provenance di jantung (defense-in-depth — route
+        // HTTP sudah gate; ini menutup SEMUA transport termasuk panggilan
+        // in-memory langsung. MISSING/REAL lolos; STALE/SIM/UNKNOWN → HOLD).
+        const aiGated = applyEntryPolicyGate(
+          {
+            action: data.action,
+            positionSizePercent: data.action === "HOLD" ? 0 : data.positionSizePercent,
+            reasoning: raw.reasoning || "Evaluasi MTF Liquidation Hunt, On-Chain, dan Makro selesai.",
+          },
+          priceVerdict
+        );
+        if (aiGated.gated) {
+          return {
+            action: "HOLD",
+            confidence: 0,
+            targetPrice: input.currentPrice,
+            stopLoss: Number((input.currentPrice * 0.985).toFixed(2)),
+            takeProfit: Number((input.currentPrice * 1.03).toFixed(2)),
+            positionSizePercent: 0,
+            reasoning: aiGated.reasoning,
             source: "ai-decision-server",
             inferenceLatencyMs: Date.now() - startTime,
           };
@@ -293,6 +351,31 @@ export async function evaluateTradingDecision(
       takeProfit: Number((input.currentPrice * 1.03).toFixed(2)),
       positionSizePercent: 0,
       reasoning: `Keel output ditolak (${keelOrderCheck.message})`,
+      source: "keel-institutional-quant",
+      inferenceLatencyMs: Date.now() - startTime,
+    };
+  }
+  // P0-B (audit Gemini 3 Pro): entry policy gate DI SINI — fallback Keel
+  // lokal (jalur server pipeline & browser tanpa AI) dulu buta provenance
+  // karena gate hanya menempel di route HTTP /api/ai-decision. EXIT risiko
+  // TIDAK ikut diblokir (domain bracket monitor).
+  const keelGated = applyEntryPolicyGate(
+    {
+      action: keelDecision.action,
+      positionSizePercent: keelDecision.positionSizePercent,
+      reasoning: keelDecision.reasoning,
+    },
+    priceVerdict
+  );
+  if (keelGated.gated) {
+    return {
+      action: "HOLD",
+      confidence: 0,
+      targetPrice: input.currentPrice,
+      stopLoss: Number((input.currentPrice * 0.985).toFixed(2)),
+      takeProfit: Number((input.currentPrice * 1.03).toFixed(2)),
+      positionSizePercent: 0,
+      reasoning: keelGated.reasoning,
       source: "keel-institutional-quant",
       inferenceLatencyMs: Date.now() - startTime,
     };

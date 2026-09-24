@@ -140,6 +140,21 @@ export function healthRowFromVerdict(v: ProvenanceVerdict, label?: string): { so
   };
 }
 
+/**
+ * Ambil sub-tag "market.price" dari blob provenance (shape fleksibel:
+ * { market: {...} } ATAU { price: {...} } ATAU objek venue/source langsung)
+ * lalu bangun verdict. Dipakai route ai.ts DAN jantung decisionEngine —
+ * satu implementasi, bukan duplikasi (audit Gemini 3 Pro P0-B).
+ */
+export function marketPriceVerdictFromProvenanceTag(provenance: unknown, now: number, key = "market.price"): ProvenanceVerdict {
+  const p = provenance as Record<string, unknown> | null | undefined;
+  const marketProv =
+    (p as any)?.market ??
+    (p as any)?.price ??
+    (p && typeof p === "object" && !Array.isArray(p) && ("venue" in p || "source" in p || "marketType" in p) ? p : null);
+  return verdictFromProvenance(marketProv, { now }, key);
+}
+
 export interface EntryPolicyGateInput {
   action: "BUY" | "SELL" | "HOLD";
   positionSizePercent: number;

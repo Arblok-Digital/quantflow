@@ -182,9 +182,11 @@ export function registerPipelineRoutes(app: Express): void {
         marketType: body.marketType,
       }));
 
-      // Decision engine (server-side): AI via /api/ai-decision internal route
-      // tidak dipanggil HTTP — evaluateTradingDecision di server memakai env
-      // GEMINI langsung; fallback Keel + inline risk gate fail-closed.
+      // Decision engine (server-side): executeAiDecisionCore dipanggil
+      // LANGSUNG in-memory lewat aiDecisionBridge ketika core terdaftar —
+      // BUKAN HTTP authFetch (relative URL throw di native fetch Node dan
+      // localStorage tidak ada; audit Gemini 3 Pro P0-A/C). Fallback Keel +
+      // inline risk gate + provenance entry gate (P0-B) fail-closed.
       const inferenceStart = Date.now();
       const decision = await evaluateTradingDecision({
         symbol: body.symbol,
