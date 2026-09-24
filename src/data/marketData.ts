@@ -119,8 +119,18 @@ export async function fetchLiveMarketData(
         };
       }
     }
-  } catch (err) {
-    console.warn("Error calling /api/market-feed, falling back to client-direct or simulated feed:", err);
+  } catch (err: any) {
+    // Timeout 8s (fetchWithTimeout) adalah JALUR DESAIN, bukan crash: upstream
+    // server lambat → abort → fallback. Log ringkas tanpa stack AbortError
+    // supaya console tidak dianggap error oleh operator; error non-timeout
+    // tetap WARN penuh.
+    if (err?.name === "AbortError" || err?.name === "TimeoutError") {
+      console.warn(
+        "[market-feed] timeout 8s — server/upstream lambat; fallback client-direct/synthetic (data tetap berlabel, boot-gate aktif)."
+      );
+    } else {
+      console.warn("Error calling /api/market-feed, falling back to client-direct or simulated feed:", err);
+    }
   }
 
   // Client-side Direct Binance attempt (CORS-friendly public endpoint)
