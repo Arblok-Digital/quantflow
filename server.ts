@@ -11,7 +11,7 @@ import { getBookFilePath, initPaperBook, startBracketMonitor } from "./paperBook
 import { initGuardrails } from "./guardrails";
 import { loadKillSwitchEventsFromDisk } from "./src/logic/keel/risk/kill-switch";
 import { warnIfDefaultAuditSecret } from "./src/db/core";
-import { acquireWriterLease, heartbeatWriterLease } from "./db";
+import { acquireWriterLease, getWriterLease, heartbeatWriterLease } from "./db";
 import { getBootId } from "./src/paperbook/bootId";
 import { registerAuthRoutes } from "./src/server/routes/auth";
 import { registerBrokerRoutes } from "./src/server/routes/broker";
@@ -24,6 +24,76 @@ import { registerScoutRoutes } from "./src/server/routes/scout";
 import { registerWsProxy } from "./src/server/routes/wsProxy";
 
 dotenv.config();
+
+// ---------- Crash guards (SRV-WATCH-1) ----------
+// Node kills the process SILENTLY-ish on uncaughtException / unhandledRejection
+// (a bare stack on stderr, or nothing if stderr is lost) — the dev engine kept
+// "dying" with no trace in server-boot*.log. These handlers guarantee every
+// death leaves a LOUD, greppable line. unhandledRejection keeps the server
+// alive (a single failed fetch/promise must not take down the engine);
+// uncaughtException logs the stack and exits(1) — never a silent death.
+export interface WriterLeaseHolder {
+  pid: number;
+  bootId: string;
+  heartbeat: number;
+  startedAt: number;
+}
+
+export function formatWriterLeaseConflictBanner(err: unknown, holder: WriterLeaseHolder | null): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lines = [
+    "",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!  ANOTHER ENGINE INSTANCE HOLDS THE WRITER LEASE — refusing to start     !!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    `!!  reason: ${msg}`,
+  ];
+  if (holder) {
+    const ageS = Math.max(0, Math.round((Date.now() - holder.heartbeat) / 1000));
+    lines.push(
+      `!!  holder: pid=${holder.pid} boot_id=${holder.bootId}`,
+      `!!          heartbeat ${ageS}s ago (${new Date(holder.heartbeat).toISOString()})`,
+      `!!          started_at ${new Date(holder.startedAt).toISOString()}`,
+      `!!  action: stop pid ${holder.pid} first, OR wait for its lease to go stale (>30s).`,
+    );
+  } else {
+    lines.push("!!  holder: (lease row unreadable — see reason above)");
+  }
+  lines.push(
+    "!!  Two paper servers sharing one trading.db corrupt cash (insiden $123.01).",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "",
+  );
+  return lines.join("\n");
+}
+
+let crashGuardsInstalled = false;
+
+export function installCrashGuards(): void {
+  if (crashGuardsInstalled) return;
+  crashGuardsInstalled = true;
+  process.on("unhandledRejection", (reason: unknown) => {
+    const stack = reason instanceof Error ? reason.stack || reason.message : String(reason);
+    try {
+      logger.error({ err: String(stack) }, "[crash-guard] unhandledRejection — server kept alive");
+    } catch {
+      /* logger failed; stderr below still fires */
+    }
+    console.error("[crash-guard] unhandledRejection (server kept alive):", stack);
+  });
+  process.on("uncaughtException", (err: Error) => {
+    const stack = err?.stack || String(err);
+    try {
+      logger.error({ err: String(stack) }, "[crash-guard] uncaughtException — exiting(1)");
+    } catch {
+      /* noop */
+    }
+    console.error("[crash-guard] uncaughtException — exiting(1):", stack);
+    process.exit(1);
+  });
+}
+
+installCrashGuards();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -170,7 +240,16 @@ if (isMain || isMainESM) {
     const hb = setInterval(() => heartbeatWriterLease(getBootId()), 10_000);
     if (typeof hb.unref === "function") hb.unref();
   } catch (err: any) {
-    console.error("[paperBook] " + ((err as Error)?.message || err));
+    // SRV-WATCH-1: NEVER exit quietly here. A bare "[paperBook] ..." line is
+    // indistinguishable from a crash in the logs — print a LOUD banner with
+    // holder PID + start time so the operator knows exactly whom to kill.
+    const banner = formatWriterLeaseConflictBanner(err, getWriterLease());
+    console.error(banner);
+    try {
+      logger.error({ err: String((err as Error)?.stack || err) }, "[paperBook] writer lease refused");
+    } catch {
+      /* noop */
+    }
     process.exit(1);
   }
 initGuardrails();

@@ -38,3 +38,6 @@ LOGIC_REVIEW*.md
 solana-scout/output/
 solana-scout/logs/
 *.tsbuildinfo
+
+# MQL5 CSV backtest data (user-supplied, jangan di-commit)
+data/mql5/*.csv

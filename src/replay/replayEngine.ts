@@ -13,6 +13,11 @@
 
 import { calculateRSI, calculateEMA, calculateMACD, calculateATR } from "../logic/indicators";
 import { roundTo } from "../lib/round";
+// P1-03: kontrak biaya/margin SATU SUMBER (paperbook/config) — replay & paper
+// tidak boleh drift nilainya. Nilai dari env PAPER_FEE_TAKER_BPS / MMR 0.4%.
+// Import + re-export: binding lokal DIPAKAI di dalam modul ini juga.
+import { TAKER_FEE_RATE, MAKER_FEE_RATE, MAINTENANCE_MARGIN_RATE, MAX_LEVERAGE } from "../paperbook/config";
+export { TAKER_FEE_RATE, MAKER_FEE_RATE, MAINTENANCE_MARGIN_RATE, MAX_LEVERAGE };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,6 +92,9 @@ export interface ReplayPosition {
   feesPaidUSD: number;
   maintenanceMarginRate: number;
   decisionId?: string;
+  /** P1-03b: asal entry — "MANUAL" (klik user) | "AUTOPILOT" | "replay-auto" (RSI-EMA-VOL-ATR). */
+  entrySource?: string;
+  strategy?: string;
 }
 
 export interface ReplayOrder {
@@ -116,6 +124,7 @@ export type ReplayEventType =
   | "POSITION_CLOSED"
   | "LIQUIDATED"
   | "AUTO_SIGNAL"
+  | "REPLAY_AMBIGUITY"
   | "REPLAY_STEP"
   | "REPLAY_START"
   | "REPLAY_DONE"
@@ -148,6 +157,16 @@ export interface ReplayTrade {
   feesPaidUSD: number;
   leverage: number;
   decisionId?: string;
+  /** P1-03b: asal entry (MANUAL/AUTOPILOT/replay-auto) + strategi (RSI-EMA-VOL-ATR dst). */
+  entrySource?: string;
+  strategy?: string;
+  /**
+   * P1-03: true bila dalam SATU candle tersentuh level sisi-laba (TP) DAN
+   * sisi-rugi (SL/liq) sekaligus — urutan aktual tidak diketahui dari OHLC.
+   * Replay memakai urutan worst-case deterministik, dan flag ini TIDAK
+   * mengklaim tahu urutan sebenarnya (jujur terhadap data candle).
+   */
+  ambiguousExit?: boolean;
 }
 
 export type ReplayStatus = "idle" | "running" | "paused" | "done";
@@ -157,6 +176,8 @@ export interface ReplaySession {
   symbol: string;
   timeframe: string;
   candles: ReplayCandle[];
+  /** Sumber candle: "binance" (Binance Vision) | "mql5" (file CSV MT5). */
+  dataSource: string;
   /** Jumlah total candle (FE tidak boleh pakai candles.length — status endpoint
    *  memotong candles ke 10 utk polling ringan). */
   totalCandles?: number;
@@ -199,15 +220,7 @@ const envPositiveInt = (v: string | undefined, def: number): number => {
   const n = parseInt(String(v ?? "").trim(), 10);
   return Number.isFinite(n) && n > 0 ? n : def;
 };
-const envPositiveNum = (v: string | undefined, def: number): number => {
-  const n = parseFloat(String(v ?? "").trim());
-  return Number.isFinite(n) && n > 0 ? n : def;
-};
 
-export const TAKER_FEE_RATE = envPositiveNum(process.env.PAPER_FEE_TAKER_BPS, 4) / 10000;
-export const MAKER_FEE_RATE = envPositiveNum(process.env.PAPER_FEE_MAKER_BPS, 2) / 10000;
-export const MAINTENANCE_MARGIN_RATE = 0.004;
-export const MAX_LEVERAGE = envPositiveInt(process.env.PAPER_LEVERAGE_MAX, 50);
 export const DEFAULT_INITIAL_CASH = envPositiveInt(process.env.PAPER_INITIAL_CASH, 10000);
 export const DEFAULT_SPEED_MS = 100;
 export const MAX_EVENTS = 500;
@@ -239,18 +252,21 @@ function clampLeverage(leverage: number): number {
   return Math.min(leverage, MAX_LEVERAGE);
 }
 
-function liquidationPrice(entry: number, leverage: number, side: ReplaySide): number {
+/** P1-03b: formula likuidasi — di-export agar parity dgn paperbook/fill bisa
+ *  diuji permanen (matriks tests/paperContractConsistency.test.ts). */
+export function liquidationPrice(entry: number, leverage: number, side: ReplaySide): number {
   const lev = clampLeverage(leverage);
   if (side === "LONG") return r6(entry * (1 - 1 / lev + MAINTENANCE_MARGIN_RATE));
   return r6(entry * (1 + 1 / lev - MAINTENANCE_MARGIN_RATE));
 }
 
-function freshSession(symbol: string, timeframe: string, candles: ReplayCandle[], initialCash: number): ReplaySession {
+function freshSession(symbol: string, timeframe: string, candles: ReplayCandle[], initialCash: number, dataSource: string): ReplaySession {
   return {
     id: `replay-${Date.now().toString(36)}`,
     symbol,
     timeframe,
     candles,
+    dataSource,
     currentIndex: -1,
     status: "idle",
     speedMs: DEFAULT_SPEED_MS,
@@ -352,7 +368,7 @@ function equity(): number {
 // ---------------------------------------------------------------------------
 // Candle processing — deterministic bracket + limit fill logic
 // ---------------------------------------------------------------------------
-function closeReplayPosition(pos: ReplayPosition, exitPrice: number, reason: ReplayExitReason, candleIndex: number): void {
+function closeReplayPosition(pos: ReplayPosition, exitPrice: number, reason: ReplayExitReason, candleIndex: number, opts?: CloseReplayOpts): void {
   if (!session) return;
   const now = Date.now();
   pos.status = "CLOSED";
@@ -394,6 +410,9 @@ function closeReplayPosition(pos: ReplayPosition, exitPrice: number, reason: Rep
     feesPaidUSD: r2(pos.feesPaidUSD + exitFee),
     leverage: pos.leverage,
     decisionId: pos.decisionId,
+    entrySource: pos.entrySource,
+    strategy: pos.strategy,
+    ...(opts?.ambiguous ? { ambiguousExit: true } : {}),
   });
   pushEvent(pos.exitReason === "LIQUIDATED" ? "LIQUIDATED" : "POSITION_CLOSED", {
     positionId: pos.id,
@@ -407,7 +426,13 @@ function closeReplayPosition(pos: ReplayPosition, exitPrice: number, reason: Rep
     candleIndex,
     openedCandleIndex: pos.openedCandleIndex,
     decisionId: pos.decisionId,
+    ambiguousExit: opts?.ambiguous ? true : undefined,
   });
+}
+
+interface CloseReplayOpts {
+  /** P1-03: beberapa level exit tersentuh dalam candle yang sama → urutan tidak diketahui. */
+  ambiguous?: boolean;
 }
 
 function processCandle(candle: ReplayCandle): void {
@@ -444,6 +469,10 @@ function processCandle(candle: ReplayCandle): void {
     order.positionId = positionId;
     order.decisionId = order.decisionId ?? (order.meta as any)?.decisionId;
     session.cash = r2(session.cash - feeUSD);
+    const metaObj = order.meta && typeof order.meta === "object" ? (order.meta as Record<string, any>) : {};
+    // P1-03b: provenance entry — sama dengan jalur market (jujur).
+    const entrySource = metaObj?.source ? String(metaObj.source) : order.decisionId != null ? "AUTOPILOT" : "MANUAL";
+    const strategy = metaObj?.strategy ? String(metaObj.strategy) : undefined;
     const position: ReplayPosition = {
       id: positionId,
       symbol: order.symbol,
@@ -458,6 +487,8 @@ function processCandle(candle: ReplayCandle): void {
       liquidationPrice: liquidationPrice(limit, order.leverage, side),
       maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
       decisionId: order.decisionId,
+      entrySource,
+      strategy,
       openedAt: Date.now(),
       openedCandleIndex: idx,
       status: "OPEN",
@@ -465,29 +496,62 @@ function processCandle(candle: ReplayCandle): void {
       feesPaidUSD: feeUSD,
     };
     session.positions.push(position);
-    pushEvent("ORDER_FILLED", { orderId: order.id, positionId, symbol: order.symbol, side: order.side, type: "limit", fillPrice: limit, qty: order.amount, feeUSD, method: "LIMIT_MAKER" });
+    pushEvent("ORDER_FILLED", { orderId: order.id, positionId, symbol: order.symbol, side: order.side, type: "limit", fillPrice: limit, qty: order.amount, feeUSD, method: "LIMIT_MAKER", entrySource, strategy, decisionId: order.decisionId });
   }
 
   // 3. Bracket checks (SL/TP/liq) using candle range
   // Auditor WARN-3 (documented, disengaja): dalam candle yang SAMA terjadi
   // LIQ > STOP_LOSS > TAKE_PROFIT — urutan worst-case (conservative loss-first).
-  // Ini asumsi deterministik replay; di live harga intra-candle tidak diketahui.
+  // P1-03: (a) posisi yang BARU dibuka di candle ini (openedCandleIndex === idx)
+  // TIDAK dicek terhadap range candle yang sama — high/low itu terjadi SEBELUM
+  // entry (belum semua pengamat tahu kapan dalam candle), jadi tidak boleh
+  // mengeksekusi stop dari rentang pre-entry; (b) bila dalam SATU candle
+  // tersentuh level sisi-rugi (liq/SL) DAN sisi-laba (TP) sekaligus, urutan
+  // aktual tidak dapat ditentukan dari OHLC → tandai `ambiguousExit` (jujur),
+  // bukan mengklaim urutan.
   const open = session.positions.filter((p) => p.status === "OPEN");
   for (const pos of open) {
+    if (pos.openedCandleIndex === idx) continue; // P1-03a: jangan pakai high/low pre-entry
     if (pos.side === "LONG") {
-      if (candle.low <= pos.liquidationPrice) {
-        closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
-      } else if (pos.stopLoss > 0 && candle.low <= pos.stopLoss) {
-        closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx);
-      } else if (pos.takeProfit > 0 && candle.high >= pos.takeProfit) {
+      const touchedLiq = candle.low <= pos.liquidationPrice;
+      const touchedSL = pos.stopLoss > 0 && candle.low <= pos.stopLoss;
+      const touchedTP = pos.takeProfit > 0 && candle.high >= pos.takeProfit;
+      if (touchedLiq) {
+        if (touchedTP) {
+          pushEvent("REPLAY_AMBIGUITY", { positionId: pos.id, symbol: pos.symbol, side: pos.side, candleIndex: idx, touched: ["LIQUIDATION", "TAKE_PROFIT"] });
+          closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx, { ambiguous: true });
+        } else {
+          closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
+        }
+      } else if (touchedSL) {
+        if (touchedTP) {
+          pushEvent("REPLAY_AMBIGUITY", { positionId: pos.id, symbol: pos.symbol, side: pos.side, candleIndex: idx, touched: ["STOP_LOSS", "TAKE_PROFIT"] });
+          closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx, { ambiguous: true });
+        } else {
+          closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx);
+        }
+      } else if (touchedTP) {
         closeReplayPosition(pos, pos.takeProfit, "TAKE_PROFIT", idx);
       }
     } else {
-      if (candle.high >= pos.liquidationPrice) {
-        closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
-      } else if (pos.stopLoss > 0 && candle.high >= pos.stopLoss) {
-        closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx);
-      } else if (pos.takeProfit > 0 && candle.low <= pos.takeProfit) {
+      const touchedLiq = candle.high >= pos.liquidationPrice;
+      const touchedSL = pos.stopLoss > 0 && candle.high >= pos.stopLoss;
+      const touchedTP = pos.takeProfit > 0 && candle.low <= pos.takeProfit;
+      if (touchedLiq) {
+        if (touchedTP) {
+          pushEvent("REPLAY_AMBIGUITY", { positionId: pos.id, symbol: pos.symbol, side: pos.side, candleIndex: idx, touched: ["LIQUIDATION", "TAKE_PROFIT"] });
+          closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx, { ambiguous: true });
+        } else {
+          closeReplayPosition(pos, pos.liquidationPrice, "LIQUIDATED", idx);
+        }
+      } else if (touchedSL) {
+        if (touchedTP) {
+          pushEvent("REPLAY_AMBIGUITY", { positionId: pos.id, symbol: pos.symbol, side: pos.side, candleIndex: idx, touched: ["STOP_LOSS", "TAKE_PROFIT"] });
+          closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx, { ambiguous: true });
+        } else {
+          closeReplayPosition(pos, pos.stopLoss, "STOP_LOSS", idx);
+        }
+      } else if (touchedTP) {
         closeReplayPosition(pos, pos.takeProfit, "TAKE_PROFIT", idx);
       }
     }
@@ -542,10 +606,10 @@ export function getReplayStatus(): { active: boolean; session: ReplaySession | n
   };
 }
 
-export function startReplay(symbol: string, timeframe: string, candles: ReplayCandle[], initialCash: number): ReplaySession {
+export function startReplay(symbol: string, timeframe: string, candles: ReplayCandle[], initialCash: number, dataSource = "binance"): ReplaySession {
   stopTimer();
-  session = freshSession(symbol, timeframe, candles, initialCash);
-  pushEvent("REPLAY_START", { symbol, timeframe, candles: candles.length, initialCash });
+  session = freshSession(symbol, timeframe, candles, initialCash, dataSource);
+  pushEvent("REPLAY_START", { symbol, timeframe, candles: candles.length, initialCash, dataSource });
   return { ...session };
 }
 
@@ -585,7 +649,7 @@ export function resetReplay(): ReplaySession {
   stopTimer();
   const prev = session;
   if (prev) {
-    session = freshSession(prev.symbol, prev.timeframe, prev.candles, prev.initialCash);
+    session = freshSession(prev.symbol, prev.timeframe, prev.candles, prev.initialCash, prev.dataSource);
   }
   return session ? { ...session } : null as any;
 }
@@ -731,6 +795,11 @@ export function placeReplayOrder(input: ReplayOrderInput): ReplayOrder {
   }
   const orderId = newId("ord");
   const decisionId = input.decisionId ?? ((input.meta as any)?.decisionId ? String((input.meta as any).decisionId) : undefined);
+  const metaObj = input.meta && typeof input.meta === "object" ? (input.meta as Record<string, any>) : {};
+  // P1-03b: provenance entry — jujur: replay-auto (RSI), AUTOPILOT (decisionId
+  // dari luar), selain itu MANUAL. Bukan dibuat-buat.
+  const entrySource = metaObj?.source ? String(metaObj.source) : decisionId != null ? "AUTOPILOT" : "MANUAL";
+  const strategy = metaObj?.strategy ? String(metaObj.strategy) : undefined;
   const order: ReplayOrder = {
     id: orderId,
     symbol,
@@ -799,12 +868,14 @@ export function placeReplayOrder(input: ReplayOrderInput): ReplayOrder {
       stopLoss,
       takeProfit,
       liquidationPrice: liquidationPrice(fillPrice, leverage, side),
-      maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
+maintenanceMarginRate: MAINTENANCE_MARGIN_RATE,
       decisionId,
+      entrySource,
+      strategy,
       openedAt: Date.now(),
       openedCandleIndex: session.currentIndex,
       status: "OPEN",
-      lastMark: fillPrice,
+      lastMark: candle.close,
       feesPaidUSD: feeUSD,
     });
     pushEvent("ORDER_FILLED", { orderId, positionId, symbol, side: order.side, type: "market", fillPrice, qty, feeUSD, method: "MARKET_TAKER", decisionId });
@@ -873,6 +944,8 @@ export interface ReplayDataset {
   runId: string;
   symbol: string;
   timeframe: string;
+  /** Sumber candle: "binance" | "mql5" — jangan campur dua bucket dalam satu walk-forward. */
+  dataSource: string;
   startTs: number;
   endTs: number;
   totalCandles: number;
@@ -965,6 +1038,7 @@ export function buildReplayTrainingDataset(): ReplayDataset {
     runId: session.id,
     symbol: session.symbol,
     timeframe: session.timeframe,
+    dataSource: String(session.dataSource || "binance"),
     startTs: firstCandle?.timestamp ?? session.startedAt,
     endTs: lastCandle?.timestamp ?? Date.now(),
     totalCandles: session.candles.length,
@@ -983,7 +1057,7 @@ const CSV_HEADER = [
   "entry_price", "entry_candle_index", "entry_candle_ts",
   "exit_price", "exit_candle_index", "exit_candle_ts",
   "exit_reason", "pnl_usd", "pnl_percent", "risk_r", "fees_usd",
-  "hold_candles", "decision_id",
+  "hold_candles", "decision_id", "entry_source", "strategy", "ambiguous_exit", "data_source",
 ].join(",");
 
 function csvEscape(v: unknown): string {
@@ -1014,6 +1088,10 @@ export function buildReplayTrainingCsv(): string {
       csvEscape(t.feesPaidUSD),
       csvEscape(t.holdCandles),
       csvEscape(t.decisionId ?? ""),
+      csvEscape(t.entrySource ?? ""),
+      csvEscape(t.strategy ?? ""),
+      csvEscape(t.ambiguousExit ? "1" : "0"),
+      csvEscape(ds.dataSource),
     ].join(","));
   }
   return lines.join("\n");

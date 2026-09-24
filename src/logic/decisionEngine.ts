@@ -121,7 +121,15 @@ export async function evaluateTradingDecision(
     !!process.env &&
     !!process.env.GEMINI_API_KEY &&
     process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY";
-  const aiConfigured = input.aiEnabled != null ? input.aiEnabled : envHasGemini;
+  // Jev (System One) juga jalur AI: kalau salah satu provider Jev dikonfigurasi,
+  // chain server /api/ai-decision dimulai dari Jev lalu Gemini. Tanpa keduanya
+  // → MODE KEEL (jujur). Flag dari UI (aiEnabled) menimpa apa pun di server.
+  const envHasJev =
+    typeof process !== "undefined" &&
+    !!process.env &&
+    ((!!process.env.JEV_ZEN_API_KEY && !!process.env.JEV_ZEN_BASE_URL) ||
+      (!!process.env.OPENROUTER_API_KEY && !!process.env.OPENROUTER_BASE_URL));
+  const aiConfigured = input.aiEnabled != null ? input.aiEnabled : envHasGemini || envHasJev;
 
   if (aiConfigured) {
     try {

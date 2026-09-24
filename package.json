@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "dev:watch": "node scripts/dev-watch.mjs",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "start:3199": "set NODE_ENV=production&& set HOST=127.0.0.1&& set PORT=3199&& node dist/server.cjs",
@@ -13,7 +14,9 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:smoke": "node scripts/smoke-test.mjs"
+    "test:smoke": "node scripts/smoke-test.mjs",
+    "mql5:verify": "tsx scripts/mql5-import.mts",
+    "jev:probe": "tsx scripts/jev-probe.mts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

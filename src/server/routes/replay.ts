@@ -4,6 +4,7 @@
 //         strategy, order, close, cancel, export, runs, runs/:id)
 // ---------------------------------------------------------------------------
 import type { Express, Request, Response } from "express";
+import path from "node:path";
 import { requireAuth } from "@/auth";
 import {
   fetchHistoricalCandles,
@@ -22,25 +23,100 @@ import {
   setReplayMode,
 } from "@/src/replay/replayEngine";
 import {
+  getMql5DataDir,
+  loadMql5CsvFile,
+  Mql5ImportError,
+} from "@/src/replay/mql5Import";
+import {
   appendAudit,
   saveReplayRunDb,
   listReplayRunsDb,
   getReplayRunDb,
 } from "@/db";
 
+const TIMEFRAME_MS: Record<string, number> = {
+  "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+  "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000,
+  "8h": 28_800_000, "12h": 43_200_000, "1D": 86_400_000, "1W": 604_800_000,
+};
+
+/** Resolve nama file MQL5 → abs path DI DALAM data dir. Null = traversal/tidak valid. */
+function resolveMql5FileSafe(fileName: string, dir: string): string | null {
+  const name = String(fileName || "").trim();
+  if (!/^[A-Z0-9_.-]+\.csv$/i.test(name)) return null;
+  const base = path.resolve(dir);
+  const abs = path.resolve(base, name);
+  if (abs !== base && !abs.startsWith(base + path.sep)) return null;
+  return abs;
+}
+
 
 export function registerReplayRoutes(app: Express): void {
 // REPLAY / FORWARD-TEST endpoints (isolated book, real historical data)
 // ==========================================================================
-// Start replay: fetch real candles dari Binance Vision lalu buat sesi replay.
+// Start replay: source default "binance" (Binance Vision). source="mql5" =
+// baca file CSV ekspor MT5 dari MQL5_DATA_DIR (guard traversal + TF check).
 app.post("/api/paper/replay/start", requireAuth, async (req: Request, res: Response) => {
   try {
     const body = req.body || {};
+    const source = String(body.source || "binance");
     const symbol = String(body.symbol || "BTC/USDT");
     const timeframe = String(body.timeframe || "15m");
+    const initialCash = Number(body.initialCash) > 0 ? Number(body.initialCash) : 10000;
+
+    if (source === "mql5") {
+      const mql5File = String(body.mql5File || "");
+      const utcOffsetMinutes = Number(body.utcOffsetMinutes) || 0;
+      const dir = getMql5DataDir();
+      const abs = resolveMql5FileSafe(mql5File, dir);
+      if (!abs) {
+        return res.status(400).json({
+          success: false,
+          reason: "MQL5_INVALID_FILE",
+          message: "Nama file MQL5 tidak valid (hanya huruf/angka/_.- + ekstensi .csv, tanpa path).",
+        });
+      }
+      try {
+        const timeframeMs = TIMEFRAME_MS[timeframe];
+        const { candles, meta, warnings } = loadMql5CsvFile(abs, { utcOffsetMinutes, timeframeMs });
+        if (timeframeMs && meta.spacingMs && Math.abs(meta.spacingMs - timeframeMs) > timeframeMs * 0.1) {
+          return res.status(400).json({
+            success: false,
+            reason: "MQL5_TIMEFRAME_MISMATCH",
+            message:
+              `Spacing file (${Math.round(meta.spacingMs / 60000)}m) tidak cocok dengan timeframe yang diminta (${timeframe}).`,
+          });
+        }
+        if (candles.length === 0) {
+          return res.status(400).json({ success: false, reason: "MQL5_PARSE_ERROR", message: "File MQL5 tidak berisi candle valid." });
+        }
+        const session = startReplay(symbol, timeframe, candles, initialCash, "mql5");
+        return res.json({
+          success: true,
+          session,
+          warnings: warnings.slice(0, 20),
+          meta: {
+            rowsParsed: meta.rowsParsed,
+            droppedDuplicates: meta.droppedDuplicates,
+            firstTs: meta.firstTs,
+            lastTs: meta.lastTs,
+            spacingMs: meta.spacingMs,
+            spacingOk: meta.spacingOk,
+            gaps: meta.gaps,
+            offsetMinutes: meta.offsetMinutes,
+          },
+        });
+      } catch (err: any) {
+        if (err instanceof Mql5ImportError) {
+          const status = err.code === "MQL5_FILE_NOT_FOUND" ? 404 : 400;
+          return res.status(status).json({ success: false, reason: err.code, message: err.message });
+        }
+        return res.status(400).json({ success: false, reason: "MQL5_PARSE_ERROR", message: err?.message || "Gagal parse file MQL5." });
+      }
+    }
+
     const startMs = Number(body.startMs);
     const endMs = Number(body.endMs);
-    const initialCash = Number(body.initialCash) > 0 ? Number(body.initialCash) : 10000;
     if (!isFinite(startMs) || !isFinite(endMs) || startMs >= endMs) {
       return res.status(400).json({ success: false, reason: "INVALID_RANGE", message: "startMs dan endMs wajib diisi (startMs < endMs)." });
     }
@@ -52,6 +128,52 @@ app.post("/api/paper/replay/start", requireAuth, async (req: Request, res: Respo
     res.json({ success: true, session });
   } catch (err: any) {
     res.status(400).json({ success: false, message: err?.message || "Gagal start replay." });
+  }
+});
+
+// Verify file MQL5 tanpa membuat sesi: parse + summary (untuk tombol Verify di FE).
+app.get("/api/paper/replay/mql5/verify", requireAuth, (req, res) => {
+  try {
+    const mql5File = String((req.query as any).mql5File || "");
+    const timeframe = String((req.query as any).timeframe || "15m");
+    const utcOffsetMinutes = Number((req.query as any).utcOffsetMinutes) || 0;
+    const dir = getMql5DataDir();
+    const abs = resolveMql5FileSafe(mql5File, dir);
+    if (!abs) {
+      return res.status(400).json({ success: false, reason: "MQL5_INVALID_FILE", message: "Nama file MQL5 tidak valid." });
+    }
+    const timeframeMs = TIMEFRAME_MS[timeframe];
+    const { candles, meta, warnings } = loadMql5CsvFile(abs, { utcOffsetMinutes, timeframeMs });
+    const stemRaw = mql5File.replace(/\.csv$/i, "").toUpperCase();
+    const stem = stemRaw.replace(/\d+$/, "").replace(/[^A-Z]/g, "");
+    const symbol = String((req.query as any).symbol || (/^[A-Z]{2,10}$/.test(stem) ? `${stem}/USDT` : "MQL5"));
+    return res.json({
+      success: true,
+      summary: {
+        file: mql5File,
+        symbol,
+        timeframe,
+        utcOffsetMinutes,
+        candles: candles.length,
+        firstTs: meta.firstTs,
+        lastTs: meta.lastTs,
+        spacingMs: meta.spacingMs,
+        spacingOk: meta.spacingOk,
+        gaps: meta.gaps,
+        droppedDuplicates: meta.droppedDuplicates,
+        rowsParsed: meta.rowsParsed,
+        delimiter: meta.delimiter,
+        hasHeader: meta.hasHeader,
+        tfMismatch: !!(timeframeMs && meta.spacingMs && Math.abs(meta.spacingMs - timeframeMs) > timeframeMs * 0.1),
+        warnings: warnings.slice(0, 20),
+      },
+    });
+  } catch (err: any) {
+    if (err instanceof Mql5ImportError) {
+      const status = err.code === "MQL5_FILE_NOT_FOUND" ? 404 : 400;
+      return res.status(status).json({ success: false, reason: err.code, message: err.message });
+    }
+    res.status(400).json({ success: false, reason: "MQL5_PARSE_ERROR", message: err?.message || "Gagal verify file MQL5." });
   }
 });
 
@@ -176,6 +298,7 @@ app.post("/api/paper/replay/export", requireAuth, (req, res) => {
         totalTrades: ds.stats.totalTrades,
         realizedPnl: ds.realizedPnl,
         source: "REAL",
+        feed: String(ds.dataSource || "binance"),
       });
     } catch (err) {
       console.error("[audit] GAGAL tulis audit replay_export: ", (err as Error)?.message);
@@ -212,12 +335,13 @@ app.get("/api/paper/replay/runs/:id", requireAuth, (req, res) => {
         "entry_price", "entry_candle_index", "entry_candle_ts",
         "exit_price", "exit_candle_index", "exit_candle_ts",
         "exit_reason", "pnl_usd", "pnl_percent", "risk_r", "fees_usd",
-        "hold_candles", "decision_id",
+        "hold_candles", "decision_id", "entry_source", "strategy", "ambiguous_exit", "data_source",
       ].join(",");
       const esc = (v: unknown): string => {
         const s = v === null || v === undefined ? "" : String(v);
         return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
       };
+      const dataSource = String(parsed.dataSource || "binance");
       const lines = [header];
       for (const t of parsed.trades || []) {
         lines.push([
@@ -226,6 +350,9 @@ app.get("/api/paper/replay/runs/:id", requireAuth, (req, res) => {
           esc(t.exitPrice), esc(t.closedCandleIndex), esc(t.closedCandleTs ?? ""),
           esc(t.exitReason), esc(t.pnlUSD), esc(t.pnlPercent), esc(t.riskR ?? ""),
           esc(t.feesPaidUSD), esc(t.holdCandles), esc(t.decisionId ?? ""),
+          esc(t.entrySource ?? ""), esc(t.strategy ?? ""),
+          esc(t.ambiguousExit ? "1" : "0"),
+          esc(dataSource),
         ].join(","));
       }
       res.setHeader("Content-Type", "text/csv; charset=utf-8");

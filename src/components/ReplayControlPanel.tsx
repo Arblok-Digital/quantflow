@@ -20,6 +20,15 @@ export const ReplayControlPanel: React.FC = () => {
     setEndMs,
     initialCash,
     setInitialCash,
+    source,
+    setSource,
+    mql5File,
+    setMql5File,
+    utcOffsetMinutes,
+    setUtcOffsetMinutes,
+    verifySummary,
+    verifying,
+    handleMql5Verify,
     busy,
     error,
     orderSide,
@@ -105,7 +114,11 @@ export const ReplayControlPanel: React.FC = () => {
               )}
             </h2>
             <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono">
-              Real historical candles (Binance Vision) · isolated book
+              {session
+                ? session.dataSource === "mql5"
+                  ? "MQL5 CFD backtest data · isolated book"
+                  : "Real historical candles (Binance Vision) · isolated book"
+                : "Real historical candles (Binance Vision) · isolated book"}
             </p>
           </div>
         </div>
@@ -154,6 +167,15 @@ export const ReplayControlPanel: React.FC = () => {
         setEndMs={setEndMs}
         initialCash={initialCash}
         setInitialCash={setInitialCash}
+        source={source}
+        setSource={setSource}
+        mql5File={mql5File}
+        setMql5File={setMql5File}
+        utcOffsetMinutes={utcOffsetMinutes}
+        setUtcOffsetMinutes={setUtcOffsetMinutes}
+        verifySummary={verifySummary}
+        verifying={verifying}
+        handleMql5Verify={handleMql5Verify}
         session={session}
         busy={busy}
         handleStart={handleStart}
@@ -242,7 +264,8 @@ export const ReplayControlPanel: React.FC = () => {
           <Clock className="w-8 h-8 text-zinc-600 mb-2" />
           <p className="text-xs font-mono text-zinc-400">Belum ada sesi replay.</p>
           <p className="text-[10px] font-mono text-zinc-600 mt-1">
-            Isi simbol, timeframe, dan rentang tanggal lalu tekan Start untuk memuat candle real.
+            Pilih sumber: BINANCE (candle real Binance Vision) atau MQL5 (file CSV ekspor backtest broker CFD), isi
+            rentang/parameter lalu tekan Start.
           </p>
         </div>
       )}

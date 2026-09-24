@@ -24,7 +24,61 @@ export interface MarketFeedResult {
  * 1. Server-proxied /api/market-feed (chain Vision → Gate → Bybit → primer → CCXT)
  * 2. Client-direct Binance ticker (harga real, candle tetap sintetis → candlesReal:false)
  * 3. Pure synthetic simulation if offline or network restricted
+ *
+ * Boot-gate (SRV-WATCH-1): penelepon WAJIB menjalankan probeServerHealth
+ * secara konkuren dan menghalangi hasil #3 (synthetic) via classifyBootFeed
+ * sampai N percobaan gagal — jangan pernah render synthetic seolah live.
  */
+
+/** Timeout fetch — cegah boot hang saat backend down/cold-start. */
+export async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Boot gate probe: GET /api/health dengan timeout pendek (~3s).
+ *  true = server terjangkau; false = offline/cold-start (jangan seed sintetis). */
+export async function probeServerHealth(timeoutMs = 3000): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout("/api/health", timeoutMs, { cache: "no-cache" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Backoff boot retry: 2s → 4s → 8s … cap 30s (attempt 0-based). Pure — unit-tested. */
+export function bootBackoffDelay(attempt: number): number {
+  const safe = Math.max(0, Math.floor(attempt));
+  return Math.min(30000, 2000 * 2 ** safe);
+}
+
+/** Setelah N percobaan offline gagal, synthetic BERLABEL boleh tampil
+ *  (itupun tetap lewat flag candlesReal:false → badge SYNTHETIC; retry background lanjut). */
+export const BOOT_SYNTHETIC_AFTER_ATTEMPTS = 3;
+
+export type BootFeedDecision = "APPLY" | "HOLD_RETRY";
+
+/**
+ * Pure gate: probe HANYA menghalangi synthetic fallback — sync sukses
+ * (server ATAU direct-Binance live) selalu menang (APPLY).
+ * consecutiveFailures = jumlah gagal beruntun TERMASUK percobaan saat ini.
+ */
+export function classifyBootFeed(args: {
+  serverReachable: boolean;
+  feedLive: boolean;
+  consecutiveFailures: number;
+  maxAttempts?: number;
+}): BootFeedDecision {
+  if (args.serverReachable || args.feedLive) return "APPLY";
+  const max = args.maxAttempts ?? BOOT_SYNTHETIC_AFTER_ATTEMPTS;
+  return args.consecutiveFailures >= max ? "APPLY" : "HOLD_RETRY";
+}
 export async function fetchLiveMarketData(
   symbol: string = "BTC/USDT",
   fallbackBasePrice: number = 68420
@@ -33,7 +87,9 @@ export async function fetchLiveMarketData(
   const rawSymbol = symbol.replace("/", "").toUpperCase();
 
   try {
-    const res = await fetch(`/api/market-feed?symbol=${encodeURIComponent(rawSymbol)}`);
+    // Timeout 8s: happy path (server sehat) tidak terdampak; saat server
+    // down tidak gantung — probe + gate di hook yang memutuskan.
+    const res = await fetchWithTimeout(`/api/market-feed?symbol=${encodeURIComponent(rawSymbol)}`, 8000);
     if (res.ok) {
       const data = await res.json();
       if (data.success && data.currentPrice && data.candles15m?.length > 0) {
@@ -158,9 +214,12 @@ export async function fetchKlinesForTimeframe(
 ): Promise<KlinesResult> {
   const rawSymbol = symbol.replace("/", "").toUpperCase();
 
-  // Try server proxy /api/klines
+  // Try server proxy /api/klines (timeout 8s — lihat alasan di market-feed)
   try {
-    const res = await fetch(`/api/klines?symbol=${encodeURIComponent(rawSymbol)}&interval=${timeframe}&limit=${limit}`);
+    const res = await fetchWithTimeout(
+      `/api/klines?symbol=${encodeURIComponent(rawSymbol)}&interval=${timeframe}&limit=${limit}`,
+      8000
+    );
     if (res.ok) {
       const data = await res.json();
       if (data.success && Array.isArray(data.candles) && data.candles.length > 0) {

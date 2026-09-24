@@ -21,6 +21,7 @@ type PaperEventType =
   | "ORDER_PARTIAL"
   | "ORDER_REJECTED"
   | "ORDER_CANCELLED"
+  | "EXIT_ENGINE_ACTION"
   | "ERROR";
 
 interface PaperEvent {
@@ -162,6 +163,18 @@ function describeEvent(e: PaperEvent): EventDescription {
       return {
         badge: "bg-violet-500/15 text-violet-400 border-violet-500/30",
         text: `UPDATED ${symbol}: SL ${sl} | TP ${tp}${be}`,
+      };
+    }
+    case "EXIT_ENGINE_ACTION": {
+      const action = p.action ? ` ${String(p.action)}` : "";
+      const pos = p.positionId ? ` [${String(p.positionId)}]` : "";
+      const detail = p.message ? ` — ${String(p.message).slice(0, 120)}` : p.status ? ` (${String(p.status)})` : "";
+      return {
+        badge: p.action === "DEADLINE_RESULT"
+          ? "bg-rose-500/15 text-rose-400 border-rose-500/30"
+          : "bg-amber-500/15 text-amber-400 border-amber-500/30",
+        text: `EXIT ENGINE${action}${pos}${detail}`,
+        title: JSON.stringify(p).slice(0, 240),
       };
     }
     case "ERROR": {

@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../hooks/useAuth";
 import type { OnChainMetrics, MacroSummary } from "../types";
+import { makeIntradayDraft, formatDeadlineWib } from "../logic/intradayPlan";
+import { publishIntradayTicket, INTRADAY_HOLD_MS_FE_HINT } from "../logic/intradayTicket";
 
 export interface AiAdvisorKeelSummary {
   action: string;
@@ -97,6 +99,21 @@ export interface AiAdvisorResponse {
   } | null;
   backtest?: { symbol: string; context: string };
   dataHealth?: AiAdvisorDataHealth[];
+  /** Keputusan terstruktur (Jev System One) — source: jev-zen/jev-openrouter/gemini/keel. */
+  decision?: {
+    action: "BUY" | "SELL" | "HOLD";
+    confidence: number;
+    riskLevel: "LOW" | "MEDIUM" | "HIGH";
+    source: string;
+    probabilities?: unknown;
+  };
+  decisionSource?: string;
+  jevDecision?: {
+    action: "BUY" | "SELL" | "HOLD";
+    confidence: number;
+    riskLevel: "LOW" | "MEDIUM" | "HIGH";
+    source: string;
+  } | null;
   ai: {
     insight: string;
     suggestedBias?: "LONG" | "SHORT" | "NEUTRAL" | "BULLISH" | "BEARISH";
@@ -114,6 +131,11 @@ interface AiAdvisorPanelProps {
   onChainMetrics?: OnChainMetrics | null;
   macroSummary?: MacroSummary | null;
   geminiActive: boolean;
+  /** Health flag dari /api/health — hanya boolean, TIDAK pernah berisi key. */
+  jevConfigured?: boolean;
+  openrouterConfigured?: boolean;
+  /** Market aktif (SubBar) — SPOT menolak SHORT di draft intraday. */
+  marketType?: string;
   /** TF chart aktif — cooldown cache insight diskala per TF (15m < 1h < 4h). */
   timeframe?: string;
 }
@@ -170,6 +192,9 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
   onChainMetrics,
   macroSummary,
   geminiActive,
+  jevConfigured = false,
+  openrouterConfigured = false,
+  marketType = "FUTURES",
   timeframe = "15m",
 }) => {
   const [result, setResult] = useState<AiAdvisorResponse | null>(null);
@@ -269,6 +294,31 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
   const isAi = mode === "ai";
   const keel = result?.keelSummary;
   const ai = result?.ai;
+  // Tiket intraday (ADV-01): draft STRICT dari makeIntradayDraft — hanya
+  // diisi bila bias tegas + keyLevels valid + fresh (TTL 15m). TIDAK pernah
+  // auto-submit; user yang menekan eksekusi di Order Entry.
+  const intradayDraft = (() => {
+    if (!ai?.suggestedBias || !ai?.keyLevels) return null;
+    const ts = Number(result?.timestamp || 0);
+    return makeIntradayDraft(symbol, String(marketType).toUpperCase(), ai.suggestedBias, ai.keyLevels, ts);
+  })();
+  const patchTime = formatDeadlineWib(Date.now() + INTRADAY_HOLD_MS_FE_HINT);
+  const [ticketNote, setTicketNote] = useState<string | null>(null);
+  const fillIntradayTicket = useCallback(() => {
+    if (!intradayDraft) return;
+    publishIntradayTicket({
+      symbol: intradayDraft.symbol,
+      side: intradayDraft.side,
+      entry: intradayDraft.entry,
+      stopLoss: intradayDraft.stopLoss,
+      takeProfit: intradayDraft.takeProfit,
+      createdAt: intradayDraft.createdAt,
+      source: "ai-advisor",
+    });
+    setTicketNote(
+      `Tiket ${intradayDraft.side} ${intradayDraft.symbol} @ $${Number(intradayDraft.entry).toFixed(2)} terisi di panel Order Entry — TANPA auto-submit. Klik LONG/SHORT untuk eksekusi.`
+    );
+  }, [intradayDraft]);
   // Umur insight (menit) dari timestamp server — buat indikator cache/refresh.
   const fetchedAgeMin = result?.timestamp ? Math.max(0, Math.floor((Date.now() - Number(result.timestamp)) / 60000)) : null;
   const cooldownMin = Math.round(cooldownFor(timeframe) / 60000);
@@ -322,6 +372,17 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                 >
                   {isAi ? "AI ACTIVE" : "KEEL-ONLY"}
                 </span>
+                {(jevConfigured || openrouterConfigured) && (
+                  <span
+                    className="px-2 py-0.5 rounded border text-[10px] font-mono font-bold bg-violet-500/15 text-violet-300 border-violet-500/30"
+                    title={[
+                      jevConfigured ? "JEV ZEN terkonfigurasi" : null,
+                      openrouterConfigured ? "OPENROUTER terkonfigurasi" : null,
+                    ].filter(Boolean).join(" • ")}
+                  >
+                    JEV {jevConfigured ? (openrouterConfigured ? "ZEN+OR" : "ZEN") : "OR"}
+                  </span>
+                )}
               </h2>
               <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono">
                 {isAi
@@ -407,6 +468,20 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                       {result.model}
                     </span>
                   )}
+                  {result.decisionSource && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded border text-[9px] font-mono font-bold ${
+                        result.decisionSource === "keel"
+                          ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                          : result.decisionSource === "gemini"
+                            ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-300"
+                            : "border-violet-500/40 bg-violet-500/10 text-violet-300"
+                      }`}
+                      title="Provider keputusan terstruktur"
+                    >
+                      decide: {result.decisionSource}
+                    </span>
+                  )}
                 </div>
                 <div className="grid gap-1">
                   {dataHealth.map((d) => {
@@ -480,6 +555,36 @@ export const AiAdvisorPanel: React.FC<AiAdvisorPanelProps> = ({
                     ))}
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* TIKET INTRADAY (ADV-01) — isi form order, tanpa auto-submit */}
+            {result && (
+              <div className="rounded-xl bg-zinc-950/70 border border-zinc-800 p-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[10px] font-mono text-zinc-500">
+                  <span className="uppercase tracking-wider font-bold text-zinc-400">Tiket Intraday (WIB)</span>
+                  {intradayDraft ? (
+                    <span className="block mt-0.5 text-zinc-400">
+                      {intradayDraft.side} {intradayDraft.symbol} · Entry ${Number(intradayDraft.entry).toFixed(2)} · SL $
+                      {Number(intradayDraft.stopLoss).toFixed(2)} / TP ${Number(intradayDraft.takeProfit).toFixed(2)} · time-stop{" "}
+                      {INTRADAY_HOLD_MS_FE_HINT / 3_600_000}h dari fill ({patchTime}).
+                    </span>
+                  ) : (
+                    <span className="block mt-0.5 text-zinc-600">
+                      Bias NEUTRAL / keyLevels belum lengkap / SPOT-SHORT → tidak ada draft yang valid.
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={!intradayDraft}
+                  onClick={fillIntradayTicket}
+                  className="rounded-lg bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 px-3 py-1.5 text-[11px] font-mono font-bold hover:bg-cyan-500/25 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                  title="Isi form Order Entry dengan level dari insight ini — eksekusi tetap manual (dilarang auto-submit)."
+                >
+                  Isi Tiket Intraday
+                </button>
+                {ticketNote && <p className="w-full text-[10px] font-mono text-emerald-400/90">{ticketNote}</p>}
               </div>
             )}
 

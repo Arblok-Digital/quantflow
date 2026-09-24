@@ -281,6 +281,12 @@ export interface Position {
    * config aktif posisi ini; null/undefined = SL/TP statis murni.
    */
   exitConfig?: Record<string, unknown> | null;
+  /** F3/ADV-01: state exit engine dari server (deadlineAttempt time-stop dst). */
+  exitState?: {
+    deadlineAttempt?: { status: "FAILED" | "PARTIAL" | "CLOSED"; attemptedAt: number; message?: string } | null;
+    breakevenArmed?: boolean;
+    peakMark?: number;
+  } | null;
 }
 
 export interface ClosedTrade {

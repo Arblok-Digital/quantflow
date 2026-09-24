@@ -7,6 +7,8 @@ interface HeaderProps {
   geminiActive: boolean;
   currentPrice: number;
   priceDelta: number;
+  /** SRV-WATCH-1: false = belum ada harga live (server offline, pre-gate) → tampil "—". */
+  priceAvailable?: boolean;
   exchangeStatus?: ExchangeFeedStatus;
   activeTab?: ModuleTab;
   onSelectTab?: (tab: ModuleTab) => void;
@@ -24,6 +26,7 @@ export const Header: React.FC<HeaderProps> = ({
   geminiActive,
   currentPrice,
   priceDelta,
+  priceAvailable = true,
   exchangeStatus,
   activeTab = "dashboard",
   onSelectTab,
@@ -140,8 +143,8 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="text-right shrink-0">
                 <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">BTC</div>
                 <div className="flex items-baseline gap-1 justify-end">
-                  <span className="text-xs font-mono font-bold text-zinc-100">${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  <span className={`text-[10px] font-mono font-medium ${priceDelta >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{priceDelta >= 0 ? "+" : ""}{priceDelta.toFixed(2)}%</span>
+                  <span className="text-xs font-mono font-bold text-zinc-100">{priceAvailable ? `$${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}</span>
+                  <span className={`text-[10px] font-mono font-medium ${!priceAvailable ? "text-rose-400" : priceDelta >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{priceAvailable ? `${priceDelta >= 0 ? "+" : ""}${priceDelta.toFixed(2)}%` : "OFFLINE"}</span>
                 </div>
               </div>
               <div className="h-5 w-px bg-zinc-800 shrink-0" />

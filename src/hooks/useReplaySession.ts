@@ -18,6 +18,11 @@ export function useReplaySession() {
   const [startMs, setStartMs] = useState<number>(defaultStart);
   const [endMs, setEndMs] = useState<number>(defaultEnd);
   const [initialCash, setInitialCash] = useState(10000);
+  const [source, setSource] = useState<"binance" | "mql5">("binance");
+  const [mql5File, setMql5File] = useState("");
+  const [utcOffsetMinutes, setUtcOffsetMinutes] = useState(0);
+  const [verifySummary, setVerifySummary] = useState<Record<string, unknown> | null>(null);
+  const [verifying, setVerifying] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orderSide, setOrderSide] = useState<"buy" | "sell">("buy");
@@ -94,11 +99,13 @@ export function useReplaySession() {
     setError(null);
     try {
       const payload = await post("/api/paper/replay/start", {
+        source,
         symbol,
         timeframe,
         startMs,
         endMs,
         initialCash,
+        ...(source === "mql5" ? { mql5File, utcOffsetMinutes } : {}),
       });
       setSession(payload.session);
       setActive(true);
@@ -107,7 +114,30 @@ export function useReplaySession() {
     } finally {
       setBusy(false);
     }
-  }, [post, symbol, timeframe, startMs, endMs, initialCash]);
+  }, [post, source, symbol, timeframe, startMs, endMs, initialCash, mql5File, utcOffsetMinutes]);
+
+  const handleMql5Verify = useCallback(async () => {
+    setVerifying(true);
+    setError(null);
+    try {
+      const q = new URLSearchParams({
+        mql5File,
+        timeframe,
+        utcOffsetMinutes: String(utcOffsetMinutes),
+      });
+      const res = await authFetch(`/api/paper/replay/mql5/verify?${q.toString()}`);
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) {
+        throw new Error(payload?.message || `HTTP ${res.status}`);
+      }
+      setVerifySummary(payload.summary ?? null);
+    } catch (err) {
+      setVerifySummary(null);
+      setError((err as Error).message);
+    } finally {
+      setVerifying(false);
+    }
+  }, [authFetch, mql5File, timeframe, utcOffsetMinutes]);
 
   const handleStep = useCallback(async () => {
     try {
@@ -361,6 +391,16 @@ export function useReplaySession() {
     setEndMs,
     initialCash,
     setInitialCash,
+    source,
+    setSource,
+    mql5File,
+    setMql5File,
+    utcOffsetMinutes,
+    setUtcOffsetMinutes,
+    verifySummary,
+    setVerifySummary,
+    verifying,
+    handleMql5Verify,
     busy,
     setBusy,
     error,

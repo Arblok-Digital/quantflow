@@ -21,6 +21,16 @@ vi.mock("@/src/data/marketFetcher", () => ({
   fetchOHLCVWithFallback: async () => ({ candles: [], source: "NONE" }),
   deriveMacroRiskIndex: () => 0,
 }));
+// Test prompt-kontrak: tier gateway opencode di-disable (fast-fail) supaya
+// chain langsung ke Gemini tanpa spawn binary nyata (hermetic + cepat).
+vi.mock("@/src/logic/aiProviders", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/logic/aiProviders")>();
+  return {
+    ...actual,
+    callOpencodeCli: async () => ({ ok: false, error: "opencode skip (test)", latencyMs: 0 }),
+    resolveOpencodeBinary: () => "",
+  };
+});
 import { registerAiRoutes } from "../../src/server/routes/ai";
 import { generateOnChainMetrics, generateRealAnchoredOnChainMetrics } from "../../src/logic/onchain";
 

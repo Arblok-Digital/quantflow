@@ -73,6 +73,8 @@ export default function App() {
   const [timeframe, setTimeframe] = useState<Timeframe>("15m");
   const [activeTab, setActiveTab] = useState<ModuleTab>(readPersistedTab);
   const [geminiActive, setGeminiActive] = useState<boolean>(true);
+  const [jevConfigured, setJevConfigured] = useState<boolean>(false);
+  const [openrouterConfigured, setOpenrouterConfigured] = useState<boolean>(false);
   const [isArchitectureOpen, setIsArchitectureOpen] = useState<boolean>(false);
   const [isAuditLedgerOpen, setIsAuditLedgerOpen] = useState<boolean>(false);
   const [isKeyVaultOpen, setIsKeyVaultOpen] = useState<boolean>(false);
@@ -372,6 +374,12 @@ export default function App() {
         if (data.geminiConfigured !== undefined) {
           setGeminiActive(data.geminiConfigured);
         }
+        if (data.jevConfigured !== undefined) {
+          setJevConfigured(Boolean(data.jevConfigured));
+        }
+        if (data.openrouterConfigured !== undefined) {
+          setOpenrouterConfigured(Boolean(data.openrouterConfigured));
+        }
       })
       .catch(() => {});
   }, []);
@@ -492,11 +500,33 @@ export default function App() {
         equity={live.equity}
       />
 
+      {/* SRV-WATCH-1 boot gate: server down/cold-start → banner jujur, non-blocking.
+          Login/shell tetap bisa dipakai; market data TIDAK di-seed sintetis seolah live. */}
+      {market.serverOnline === false && (
+        <div role="alert" className="sticky top-0 z-50 bg-rose-950/95 border-b border-rose-500/40">
+          <div className="max-w-[1920px] mx-auto px-4 py-1.5 flex items-center gap-2 text-xs font-mono font-bold tracking-wide text-rose-200">
+            <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse" />
+            SERVER OFFLINE — retrying… (attempt {market.bootAttempt}, backoff ≤30s)
+            <button
+              type="button"
+              onClick={() => market.syncLiveExchangeData()}
+              className="ml-2 px-2 py-0.5 rounded border border-rose-400/50 text-rose-100 hover:bg-rose-500/20 transition"
+            >
+              Retry now
+            </button>
+            <span className="font-normal text-rose-300/70 hidden sm:inline">
+              data sintetis tidak ditampilkan sebagai live
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Zone 2 + 3 — Brand/Account + Navigation */}
       <Header
         geminiActive={geminiActive}
         currentPrice={market.currentPrice}
         priceDelta={market.priceDelta}
+        priceAvailable={market.hasLivePrice}
         exchangeStatus={market.exchangeStatus}
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
@@ -559,6 +589,8 @@ export default function App() {
             onChainMetrics={onChainMetrics}
             macroSummary={macroSummary}
             geminiActive={geminiActive}
+            jevConfigured={jevConfigured}
+            openrouterConfigured={openrouterConfigured}
             onSelectTimeframe={handleSelectTimeframe}
             candlesByTimeframe={market.candlesByTimeframe}
             technicalsByTimeframe={market.technicalsByTimeframe}

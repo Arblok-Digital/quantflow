@@ -4,6 +4,8 @@ import { useToast } from "./ExecutionToasts";
 import { ConfirmOrderModal } from "./ConfirmOrderModal";
 import { bracketDefaultsForTf } from "../logic/bracketDefaults";
 import { OrderBracketInputs, type BracketDirection, fmtPrice } from "./OrderBracketInputs";
+import { subscribeIntradayTickets, clearIntradayTicket, INTRADAY_HOLD_MS_FE_HINT, type IntradayTicket } from "../logic/intradayTicket";
+import { formatDeadlineWib } from "../logic/intradayPlan";
 
 // ---------------------------------------------------------------------------
 // Helper bracket: % = JARAK dari Entry (bukan arah). Arah ditentukan saat klik
@@ -170,6 +172,37 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
   const [sizePct, setSizePct] = useState("12");
   const [leverage, setLeverage] = useState("10");
   const [paramErr, setParamErr] = useState<string | null>(null);
+
+  // ---------------------------------------------------------------------------
+  // Tiket intraday (ADV-01) — dari Advisor, TANPA auto-submit. Subscribe ke
+  // store; saat ticket masuk → prefill LIMIT @ entry + SL/TP absolut dari
+  // level advisor. User tetap menekan tombol LONG/SHORT untuk eksekusi.
+  // ---------------------------------------------------------------------------
+  const [ticket, setTicket] = useState<IntradayTicket | null>(null);
+  const [ticketNote, setTicketNote] = useState<string | null>(null);
+  useEffect(() => subscribeIntradayTickets((t) => setTicket(t ? { ...t } : null)), []);
+  useEffect(() => {
+    if (!ticket) return;
+    setBracketSide(ticket.side);
+    setOrderType("limit");
+    setLimitPrice(Number(Number(ticket.entry).toFixed(2)));
+    const entry = Number(ticket.entry);
+    if (entry > 0) {
+      const slP = priceToPct(ticket.stopLoss, entry);
+      const tpP = priceToPct(ticket.takeProfit, entry);
+      setSlPct(slP.toFixed(4));
+      setTpPct(tpP.toFixed(4));
+      setSlAbs(ticket.stopLoss.toFixed(2));
+      setTpAbs(ticket.takeProfit.toFixed(2));
+    }
+    setBracketErr(null);
+    setTicketNote(
+      `Tiket ${ticket.side} ${ticket.symbol} dari Advisor terisi (LIMIT @ $${Number(ticket.entry).toFixed(2)}). ` +
+        `Klik ${ticket.side} untuk eksekusi — tidak auto-submit. ` +
+        `Time-stop ${INTRADAY_HOLD_MS_FE_HINT / 3_600_000}h sejak fill (WIB ambang ${formatDeadlineWib(Date.now() + INTRADAY_HOLD_MS_FE_HINT)}).`
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticket]);
 
   // ---------------------------------------------------------------------------
   // Bracket harga absolut (Entry $ / SL $ / TP $) — sinkron dua arah dengan %.
@@ -619,6 +652,22 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
           </div>
           {bracketErr && <p className="text-[10px] font-mono text-rose-400">{bracketErr}</p>}
 
+          {/* Tiket intraday dari Advisor — prefill, bukan eksekusi */}
+          {ticket && (
+            <div className="rounded-xl bg-cyan-950/40 border border-cyan-500/30 px-2.5 py-2 space-y-1">
+              <p className="text-[10px] font-mono text-cyan-200">
+                <strong className="text-cyan-300">{ticket.side}</strong> ticket dari Advisor terisi (LIMIT @ ${Number(ticket.entry).toFixed(2)}) — klik {ticket.side} untuk eksekusi.
+              </p>
+              <button
+                type="button"
+                onClick={() => { clearIntradayTicket(); setTicketNote(null); }}
+                className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono text-[10px] transition"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+
           {/* Place order */}
           <button type="button"
             onClick={() => handleOrderClick(bracketSide)}
@@ -844,6 +893,21 @@ export const OrderEntryPanel: React.FC<OrderEntryPanelProps> = ({
               : "Market: fill instan di harga live."}
           </span>
         </div>
+        {/* Tiket intraday dari Advisor — prefill, bukan eksekusi */}
+        {ticket && (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-cyan-950/40 border border-cyan-500/30 px-3 py-2 relative z-10">
+            <span className="text-[10px] font-mono text-cyan-200">
+              <strong className="text-cyan-300">{ticket.side} {ticket.symbol}</strong> — {ticketNote}
+            </span>
+            <button
+              type="button"
+              onClick={() => { clearIntradayTicket(); setTicketNote(null); }}
+              className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono text-[10px] transition"
+            >
+              X
+            </button>
+          </div>
+        )}
         {/* Parameter matematis entry: SL% / TP% / Size% / Leverage + preview R:R */}
         <div className="flex flex-wrap items-end gap-2 mt-3 pt-3 border-t border-zinc-800/80 relative z-10 font-mono text-xs">
           {[

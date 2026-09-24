@@ -246,12 +246,30 @@ describe("replayEngine", () => {
 
     const csv = buildReplayTrainingCsv();
     const lines = csv.split("\n");
-    // header diawali trade_id & diakhiri decision_id (18 kolom)
+    // header diawali trade_id & diakhiri data_source (22 kolom; entry_source,
+    // strategy, ambiguous_exit sebelum data_source — P1-03 honest metadata)
     expect(lines[0].startsWith("trade_id,symbol,side")).toBe(true);
-    expect(lines[0].endsWith("hold_candles,decision_id")).toBe(true);
+    expect(lines[0].endsWith("hold_candles,decision_id,entry_source,strategy,ambiguous_exit,data_source")).toBe(true);
     expect(lines.length).toBe(3); // header + 2 trades
     expect(lines[1]).toContain("d-win");
     expect(lines[2]).toContain("d-loss");
+    // data_source default binance
+    expect(lines[1].endsWith(",binance")).toBe(true);
+    expect(lines[2].endsWith(",binance")).toBe(true);
+  });
+
+  it("dataSource mql5 propagates ke session/dataset/CSV", () => {
+    const candles = makeCandles(4, 100, 0.5);
+    startReplay("BTC/USDT", "15m", candles, 10000, "mql5");
+    expect(getReplayStatus().session!.dataSource).toBe("mql5");
+    stepReplay();
+    placeReplayOrder({ symbol: "BTC/USDT", side: "buy", type: "market", amount: 1, leverage: 10, stopLoss: 95, takeProfit: 110, decisionId: "d-mql5" });
+    closeReplayPositionManual(getReplayStatus().session!.positions[0].id);
+    const ds = buildReplayTrainingDataset();
+    expect(ds.dataSource).toBe("mql5");
+    const csv = buildReplayTrainingCsv();
+    expect(csv.split("\n")[0].endsWith("data_source")).toBe(true);
+    expect(csv.split("\n")[1]).toContain(",mql5");
   });
 
   it("mode AUTO membuka LONG otomatis saat RSI oversold + volume surge", () => {

@@ -20,6 +20,11 @@ import {
 import { analyzeMTFLiquidity } from "../logic/liquidityHunt";
 import { generateNextMicroTick } from "../logic/microTickStream";
 import { fetchKlinesForTimeframe, fetchLiveMarketData, type CandleSource } from "../data/marketData";
+import {
+  bootBackoffDelay,
+  classifyBootFeed,
+  probeServerHealth,
+} from "../data/marketData";
 import { useMarketStream } from "./useMarketStream";
 
 export interface UseMarketDataOptions {
@@ -113,17 +118,31 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
   const [technicalsByTimeframe, setTechnicalsByTimeframe] = useState<Partial<Record<Timeframe, TechnicalIndicators>>>({});
   // TF aktif untuk indikator (diset via setActiveIndicatorTimeframe dari App).
   const [activeIndicatorTf, setActiveIndicatorTfState] = useState<Timeframe>("15m");
+  // SRV-WATCH-1: status awal JUJUR — "probing", bukan klaim BINANCE_LIVE.
+  // Sebelum sync pertama sukses (atau synthetic berlabel setelah N gagal),
+  // UI memakai feedMode SIMULATED + hasLivePrice=false (harga tampil "—").
   const [exchangeStatus, setExchangeStatus] = useState<ExchangeFeedStatus>({
-    source: "BINANCE_LIVE",
-    latencyMs: 14,
+    source: "SIMULATED",
+    latencyMs: 0,
     lastSyncTimestamp: Date.now(),
-    isLive: true,
-    activeEndpoint: "api.binance.com/v3",
+    isLive: false,
+    activeEndpoint: "boot-probe",
   });
   const [isSyncingFeed, setIsSyncingFeed] = useState<boolean>(false);
+  // Boot gate: null = masih probing; true = server terjangkau; false = offline.
+  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
+  // Jumlah gagal-sync beruntun (untuk label banner "attempt N").
+  const [bootAttempt, setBootAttempt] = useState<number>(0);
+  // True setelah sync sukses pertama ATAU synthetic berlabel (pasca-N-gagal).
+  // Men-gate tampilan harga & seed order-book sintetis di tick loop.
+  const [hasLivePrice, setHasLivePrice] = useState<boolean>(false);
 
   // Anchor harga real terakhir dari exchange (dipakai untuk mean-reversion di tick loop).
   const anchorPriceRef = useRef<number>(64250.0);
+  // Gagal-sync beruntun (ref — pemicu retry; cermin state bootAttempt untuk banner).
+  const bootFailuresRef = useRef<number>(0);
+  // Cermin hasLivePrice untuk tick loop 1s (tanpa re-subscribe interval).
+  const hasLivePriceRef = useRef<boolean>(false);
   // Throttle indikator: timestamp + harga saat technicals terakhir dihitung.
   const lastTechAtRef = useRef<number>(0);
   const lastTechPriceRef = useRef<number>(0);
@@ -203,7 +222,31 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     setIsSyncingFeed(true);
     try {
       const base = getBasePrice(symbolRef.current);
-      const feed = await fetchLiveMarketData(symbolRef.current, base);
+      // Happy path tanpa latensi tambahan: sync + probe jalan KONKUREN.
+      // Sync sukses selalu menang; probe HANYA menghalangi synthetic fallback.
+      const [feed, healthy] = await Promise.all([
+        fetchLiveMarketData(symbolRef.current, base),
+        probeServerHealth(3000),
+      ]);
+      // SRV-WATCH-1 boot gate: server down + feed tak-live = synthetic murni.
+      // Tahan (HOLD_RETRY) sampai N gagal — slot candle/harga tetap kosong,
+      // banner SERVER OFFLINE yang bicara. Lolos gate (APPLY) = data real
+      // ATAU synthetic yang sudah berlabel (candlesReal:false → SYNTHETIC).
+      const failures = bootFailuresRef.current + 1;
+      const decision = classifyBootFeed({
+        serverReachable: healthy,
+        feedLive: feed.status.isLive,
+        consecutiveFailures: failures,
+      });
+      if (decision === "HOLD_RETRY") {
+        bootFailuresRef.current = failures;
+        setBootAttempt(failures);
+        setServerOnline(false);
+        return;
+      }
+      bootFailuresRef.current = 0;
+      setBootAttempt(0);
+      setServerOnline(healthy);
 
       setCurrentPrice(feed.currentPrice);
       anchorPriceRef.current = feed.currentPrice;
@@ -243,6 +286,10 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
       setTechnicals(freshTechnicals);
       lastTechAtRef.current = Date.now();
       lastTechPriceRef.current = feed.currentPrice;
+      // Harga boleh tampil (header) & book boleh di-seed: data real, atau
+      // synthetic yang sudah lewat gate N-gagal + berlabel SYNTHETIC.
+      hasLivePriceRef.current = true;
+      setHasLivePrice(true);
 
       onFeedLiveRef.current?.(feed.currentPrice);
     } catch (err) {
@@ -332,6 +379,18 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     }, 20000);
     return () => clearInterval(reanchorTimer);
   }, [symbol, syncLiveExchangeData]);
+
+  // SRV-WATCH-1 boot retry: selama server offline, jadwalkan ulang sync yang
+  // SAMA (tanpa timer/duplikasi logika baru) dengan backoff 2s→4s→8s…cap 30s.
+  // Reanchor 20s di atas tetap jalan sebagai steady-state healer.
+  useEffect(() => {
+    if (serverOnline !== false) return;
+    const delay = bootBackoffDelay(Math.max(0, bootAttempt - 1));
+    const t = setTimeout(() => {
+      syncLiveExchangeData();
+    }, delay);
+    return () => clearTimeout(t);
+  }, [serverOnline, bootAttempt, symbol, syncLiveExchangeData]);
 
   // --- Real-time 1-Second Micro-Tick Feeder (1000ms sampling) ---
   // Deps hanya [symbol] -> interval stabil, tanpa churn meski state berubah tiap detik.
@@ -431,8 +490,11 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
         }));
       }
 
-      // Order book: real dari SSE saat WS live; synthetic hanya saat interpolating.
-      setOrderBook(hasLivePrice && live.orderBook ? live.orderBook : generateOrderBook(newPrice));
+      // Order book: real dari SSE saat WS live; synthetic hanya saat interpolating
+      // DAN setelah harga-live pertama (gate boot: sebelum itu book tetap
+      // kosong — tidak di-seed sintetis seolah real). Steady-state identik.
+      if (hasLivePrice && live.orderBook) setOrderBook(live.orderBook);
+      else if (hasLivePriceRef.current) setOrderBook(generateOrderBook(newPrice));
 
       // Re-anchor ke harga real tiap tick WS agar interpolasi sempat (WS mati)
       // tetap dekat dengan harga exchange yang benar.
@@ -460,6 +522,11 @@ export function useMarketData({ symbol, timeframe, onChainMetrics, macroSummary,
     messageRate: stream.messageRate,
     isSyncingFeed,
     mtfLiquidity,
+    // SRV-WATCH-1 boot gate: null = probing, false = server offline (banner),
+    // hasLivePrice = harga boleh tampil di header (false → "—", bukan $64.250).
+    serverOnline,
+    bootAttempt,
+    hasLivePrice,
     syncLiveExchangeData,
     loadTimeframe,
     setActiveIndicatorTimeframe,

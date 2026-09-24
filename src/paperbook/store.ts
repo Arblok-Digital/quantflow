@@ -41,6 +41,12 @@ export let state: PaperBookState = {
 };
 export let bookInitialized = false;
 
+/** Test-only: izinkan initPaperBook dipanggil ulang (simulasi restart) dalam
+ *  registri modul yang sama — dipakai integration test ADV-01 deadline restart. */
+export function resetPaperBookInitializedForTests(): void {
+  bookInitialized = false;
+}
+
 export function freshState(): PaperBookState {
   return {
     positions: [],
@@ -291,7 +297,10 @@ export function initPaperBook(): void {
         ...(exitPlan ? { exitPlan } : {}),
         sourceOrderId: String(r.id),
         lastMark: entryPrice,
-        lastMarkUpdatedAt: Date.now(),
+        // P1-03c: jangan klaim mark SEGAR setelah restart — entryPrice hanyalah
+        // harga terbaik yang diketahui, BUKAN data live. 0 = basi sampai monitor
+        // pass berikutnya fetch mark sungguhan.
+        lastMarkUpdatedAt: 0,
         feesPaidUSD: r.fees_usd != null ? Number(r.fees_usd) : r4(entryPrice * qty * TAKER_FEE_RATE),
         // P0-05: openQty = qty asal; feesTotalUSD = fee kumulatif hidup posisi
         // (fallback jujur untuk baris lama: qty/fees saat ini, bukan backfill asal).

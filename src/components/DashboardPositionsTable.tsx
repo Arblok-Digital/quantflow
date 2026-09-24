@@ -12,6 +12,7 @@ import { estimatePositionEta } from "../logic/positionEta";
 import { authFetch } from "../hooks/useAuth";
 import { useToast } from "./ExecutionToasts";
 import { normalizeSide } from "../lib/sideNormalize";
+import { formatDeadlineWib } from "../logic/intradayPlan";
 
 // ---------------------------------------------------------------------------
 // DashboardPositionsTable — satu-satunya tabel posisi di dashboard exchange.
@@ -23,6 +24,30 @@ import { normalizeSide } from "../lib/sideNormalize";
 type CloseResult =
   | { ok: boolean; reason?: string; message?: string; realizedPnlUSD?: number }
   | void;
+
+// ---------------------------------------------------------------------------
+// ADV-01 — deadline intraday (time-stop) & hasil attempt, dari exit engine.
+// ---------------------------------------------------------------------------
+interface DeadlineView {
+  deadlineAt: number;
+  remainingMs: number;
+  overdue: boolean;
+}
+
+function deadlineInfo(pos: Position): DeadlineView | null {
+  const maxHoldMs = (pos.exitConfig as { maxHoldMs?: number } | null | undefined)?.maxHoldMs;
+  const hold = Number(maxHoldMs);
+  const opened = Number(pos.openedAt);
+  if (!(Number.isFinite(hold) && hold > 0 && Number.isFinite(opened) && opened > 0)) return null;
+  const deadlineAt = opened + hold;
+  const remainingMs = deadlineAt - Date.now();
+  return { deadlineAt, remainingMs, overdue: remainingMs <= 0 };
+}
+
+const fmtDurShort = (ms: number): string => {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}j ${m % 60}m`;
+};
 
 interface DashboardPositionsTableProps {
   positions: Position[];
@@ -572,6 +597,40 @@ const PositionExpandRow: React.FC<ExpandRowProps> = ({
         <span className="text-[10px] text-zinc-600 ml-auto">
           Open: {pos.openedAt ? new Date(pos.openedAt).toLocaleString("en-GB", { hour12: false }) : "—"}
         </span>
+        {(() => {
+          const ddl = deadlineInfo(pos);
+          const att = pos.exitState?.deadlineAttempt;
+          if (!ddl && !att) return null;
+          return (
+            <span className="ml-auto flex items-center gap-1.5 flex-wrap justify-end">
+              {ddl &&
+                (ddl.overdue ? (
+                  <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-mono" title={`Deadline WIB: ${formatDeadlineWib(ddl.deadlineAt)}`}>
+                    ⏰ time-stop lewat — close retry
+                  </span>
+                ) : (
+                  <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono" title={`Deadline WIB: ${formatDeadlineWib(ddl.deadlineAt)}`}>
+                    ⏳ time-stop sisa {fmtDurShort(ddl.remainingMs)} (WIB)
+                  </span>
+                ))}
+              {att && (
+                <span
+                  className={`text-[9.5px] font-bold px-1.5 py-0.5 rounded border font-mono ${
+                    att.status === "FAILED"
+                      ? "bg-rose-500/25 text-rose-300 border-rose-500/50"
+                      : att.status === "PARTIAL"
+                        ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                        : "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                  }`}
+                  title={att.message || `Attempted ${new Date(att.attemptedAt).toLocaleString("en-GB", { hour12: false })}`}
+                >
+                  deadline: {att.status}
+                  {att.status === "FAILED" ? " — retry pass berikutnya" : att.message ? ` — ${att.message.slice(0, 90)}` : ""}
+                </span>
+              )}
+            </span>
+          );
+        })()}
       </div>
 
       {/* Stats grid: entry / live / qty / notional (+ liq FUTURES) */}

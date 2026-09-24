@@ -85,6 +85,8 @@ function mapServerPosition(p: any): Position {
     liquidationPrice: p.liquidationPrice != null ? Number(p.liquidationPrice) : p.liq_price != null ? Number(p.liq_price) : undefined,
     // F3: exit plan otomatis dari server (posisi lama = null = statis murni).
     exitConfig: (p.exitPlan?.config ?? null) as Record<string, unknown> | null,
+    // ADV-01: state exit engine (deadlineAttempt time-stop) untuk badge FE.
+    exitState: (p.exitPlan?.state ?? null) as unknown as NonNullable<Position["exitState"]>,
   };
 }
 

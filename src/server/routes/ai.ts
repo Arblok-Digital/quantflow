@@ -10,6 +10,65 @@ import { analyzeMTFLiquidity } from "@/src/logic/liquidityHunt";
 import { fetchMarketData, fetchRecentTrades, fetchFuturesMetrics, fetchMacroReal, deriveMacroRiskIndex, type RecentTrade, type FuturesMetrics } from "@/src/data/marketFetcher";
 import { calculateRSI, calculateEMA, calculateMACD } from "@/src/logic/indicators";
 import type { Candle, OrderBook, MTFLiquidityAnalysis, OnChainMetrics, MacroSummary } from "@/src/types";
+import { callChatJson, callOpencodeCli } from "@/src/logic/aiProviders";
+import {
+  buildJevState,
+  jevStateToPrompt,
+  parseJevResponse,
+  sanitizeJevError,
+  jevZenConfig,
+  openRouterConfig,
+  opencodeGatewayConfig,
+  isProviderConfigured,
+  isOpencodeGatewayConfigured,
+  type ProviderConfig,
+  type OpencodeGatewayConfig,
+} from "@/src/logic/jevChip";
+import { assembleDecision, type JevDecision } from "@/src/logic/decisionAssembler";
+import {
+  verdictFromProvenance,
+  healthRowFromVerdict,
+  applyEntryPolicyGate,
+  type ProvenanceVerdict,
+} from "@/src/logic/provenance";
+
+/** Verdict provenance untuk "market.price" dari body — dipakai kedua route AI
+ *  (decision & advisor). MISSING = tidak diblokir (perilaku lama), klaim palsu
+ *  (STALE/SIMULATED/UNKNOWN) → dataHealth turun + entry policy gate. */
+function marketPriceVerdictFromBody(body: any, now: number): ProvenanceVerdict {
+  const p = body?.provenance;
+  const marketProv =
+    p?.market ?? p?.price ?? (p && typeof p === "object" && ("venue" in p || "source" in p || "marketType" in p) ? p : null);
+  return verdictFromProvenance(marketProv, { now }, "market.price");
+}
+
+// Shape kontrak output /api/ai-decision (dipakai Gemini DAN hasil Jev setelah
+// assembleDecision — dipertahankan identik supaya client decisionEngine tidak
+// berubah). HOLD perlu positionSizePercent>=1 di wire (client zero-kan sendiri).
+const DECISION_RESPONSE_SCHEMA = z.object({
+  action: z.enum(["BUY", "SELL", "HOLD"]),
+  confidence: z.number().int().min(1).max(100).finite(),
+  targetPrice: z.number().finite().positive(),
+  stopLoss: z.number().finite().positive(),
+  takeProfit: z.number().finite().positive(),
+  positionSizePercent: z.number().min(1).max(100),
+  reasoning: z.string().optional(),
+  onChainContext: z
+    .object({
+      smartMoneyBias: z.string().optional(),
+      netflowStatus: z.string().optional(),
+      mvrvZScore: z.number().optional(),
+      whaleSignal: z.string().optional(),
+    })
+    .optional(),
+  macroContext: z
+    .object({
+      nearestEventName: z.string().optional(),
+      volatilityRisk: z.string().optional(),
+      fedStance: z.string().optional(),
+    })
+    .optional(),
+});
 
 // Lazy Gemini client (singleton). Key model baru format AQ.xxxxx
 // (key lama AIza... sudah dicabut Google — semua model jawab 404).
@@ -33,6 +92,291 @@ function getGeminiClient(): GoogleGenAI | null {
   return genAI;
 }
 
+/**
+ * Keel summary untuk state Jev di /api/ai-decision — dari data yang SAMA
+ * dengan yang dikirim FE (technicals/mtf/orderBook/recentTrades/futures).
+ * Bentuknya identik dengan keelSummary advisor supaya Gemini & Jev menalar
+ * dari fakta yang sama. Null (fail-closed) kalau keel engine error.
+ */
+function buildDecisionKeelSummary(opts: {
+  symbol: string;
+  currentPrice: number;
+  technicals: any;
+  mtfLiquidity: any;
+  orderBook?: any;
+  recentTrades?: any;
+  futures?: any;
+}): Record<string, unknown> | null {
+  try {
+    const result = runKeelQuantEngine({
+      symbol: opts.symbol,
+      currentPrice: opts.currentPrice,
+      technicals: opts.technicals,
+      mtfLiquidity: opts.mtfLiquidity,
+      orderBook: opts.orderBook || undefined,
+      recentTrades: opts.recentTrades,
+      futures: opts.futures,
+    });
+    const decision = result.decision as any;
+    const raw = result.rawSignalResult as any;
+    const fa = decision?.futuresAnalysis;
+    const mtf = opts.mtfLiquidity;
+    return {
+      action: String(decision?.action ?? "HOLD"),
+      confidence: Number(decision?.confidence ?? 50),
+      flow: String(raw?.smartMoneyFlow ?? "NEUTRAL"),
+      futuresBias: fa?.bias ?? "NEUTRAL",
+      fundingBps: fa?.fundingBps ?? null,
+      openInterestUsd: fa?.openInterestUsd ?? null,
+      lsrTaker: fa?.lsrTaker ?? null,
+      confluenceScore: raw?.confluence?.score ?? decision?.liquidityHuntAnalysis?.confluenceScore ?? null,
+      liquidityDepthUsd: typeof raw?.liquidityDepthUsd === "number" ? raw.liquidityDepthUsd : null,
+      reasoning: String(decision?.reasoning ?? "Tidak ada reasoning dari keel."),
+      discardedReason: raw?.discardedReason ?? null,
+      mtfState: mtf
+        ? {
+            activeState: mtf.activeState,
+            nearestBSL: mtf.nearestBSL ? { midPrice: mtf.nearestBSL.midPrice, estimatedVolumeUSD: mtf.nearestBSL.estimatedVolumeUSD } : null,
+            nearestSSL: mtf.nearestSSL ? { midPrice: mtf.nearestSSL.midPrice, estimatedVolumeUSD: mtf.nearestSSL.estimatedVolumeUSD } : null,
+            recentSweep: mtf.recentSweep
+              ? { type: mtf.recentSweep.type, wickRejectionPercent: mtf.recentSweep.wickRejectionPercent, invalidationPrice: mtf.recentSweep.invalidationPrice }
+              : null,
+          }
+        : null,
+    };
+  } catch (e: any) {
+    console.warn(`[jev] keel summary builder gagal: ${e?.message}`);
+    return null;
+  }
+}
+
+/**
+ * Daftar provider Jev + dispatcher. Tier keyless "jev-opencode" (gateway CLI
+ * opencode) dimasukkan PALING DEPAN — tanpa API key, model `opencode/*`
+ * diproksi gateway opencode. Berikutnya zen (HTTP), lalu OpenRouter (HTTP).
+ */
+type JevProviderEntry = {
+  id: string;
+  kind: "cli" | "http";
+  cfg: OpencodeGatewayConfig | ProviderConfig;
+};
+
+function jevProviderEntries(): JevProviderEntry[] {
+  const oc = opencodeGatewayConfig();
+  const entries: JevProviderEntry[] = [];
+  if (isOpencodeGatewayConfigured(oc)) entries.push({ id: "jev-opencode", kind: "cli", cfg: oc });
+  for (const [id, cfg] of [
+    ["jev-zen", jevZenConfig()],
+    ["jev-openrouter", openRouterConfig()],
+  ] as Array<[string, ProviderConfig]>) {
+    if (isProviderConfigured(cfg)) entries.push({ id, kind: "http", cfg });
+  }
+  return entries;
+}
+
+async function callJevProvider(entry: JevProviderEntry, prompt: string): Promise<import("@/src/logic/aiProviders").ChatJsonResult> {
+  if (entry.kind === "cli") {
+    const c = entry.cfg as OpencodeGatewayConfig;
+    return callOpencodeCli({ model: c.model, prompt, bin: c.bin || undefined, workDir: c.workDir || undefined, timeoutMs: 30_000 });
+  }
+  const c = entry.cfg as ProviderConfig;
+  return callChatJson({ baseUrl: c.baseUrl, apiKey: c.apiKey, model: c.model, prompt, maxTokens: 300, temperature: 0.1, timeoutMs: 20_000 });
+}
+
+/**
+* Chain Jev: zen → openrouter. Setiap provider: buildJevState → chat JSON →
+  * parseJevResponse → assembleDecision → zod lama → guard harga → audit.
+  * Gagal/err/invalid = console.warn + continue (TIDAK throw ke Express 4).
+  * Return { handled, errors } — errors = alasan gagal per provider (sudah
+  * di-sanitasi) untuk konsol & UI.
+  */
+async function tryJevDecisionChain(opts: {
+  symbol: string;
+  currentPrice: number;
+  technicals: any;
+  mtfLiquidity: any;
+  reqOrderBook?: any;
+  reqRecentTrades?: any;
+  reqFutures?: any;
+  onChainMetrics?: OnChainMetrics;
+  macroCalendar?: MacroSummary;
+  riskParams: any;
+  provenance?: any;
+  /** P1-01: verdict provenance harga — MISSING tidak block; STALE/SIM/UNKNOWN block entry. */
+  marketPriceVerdict: ProvenanceVerdict;
+  onDone: (payload: Record<string, unknown>, provider: string, modelSlug: string, jev: JevDecision, latencyMs: number, jevErrors: string[]) => void;
+}): Promise<{ handled: boolean; errors: string[] }> {
+  const symbol = String(opts.symbol || "BTC/USDT");
+  const price = Number(opts.currentPrice) || 0;
+  const errors: string[] = [];
+  const keelSummary = buildDecisionKeelSummary({
+    symbol,
+    currentPrice: price,
+    technicals: opts.technicals,
+    mtfLiquidity: opts.mtfLiquidity,
+    orderBook: opts.reqOrderBook,
+    recentTrades: opts.reqRecentTrades,
+    futures: opts.reqFutures,
+  });
+  let futuresDetail: Record<string, unknown> | null = null;
+  if (opts.reqFutures && opts.reqFutures.success) {
+    const f = opts.reqFutures as FuturesMetrics & Record<string, any>;
+    futuresDetail = {
+      fundingBps: f.fundingBps ?? null,
+      markPrice: f.markPrice ?? null,
+      openInterestUsd: f.openInterestUsd ?? null,
+      lsrTaker: f.lsrTaker ?? null,
+      longLiqUsd: f.longLiqUsd ?? null,
+      shortLiqUsd: f.shortLiqUsd ?? null,
+      volume24hUsd: f.volume24hUsd ?? null,
+      source: f.source ?? null,
+    };
+  }
+  let backtestCtx = "Tidak ada konteks backtest.";
+  try {
+    backtestCtx = buildBacktestContextFor(symbol);
+  } catch (e: any) {
+    console.warn(`[jev] backtest context gagal: ${e?.message}`);
+  }
+  const state = buildJevState({
+    symbol,
+    currentPrice: price,
+    keelSummary,
+    dataHealth: [
+      { source: "keel", ok: !!keelSummary, detail: keelSummary ? "keel engine tersedia" : "GAGAL — state Jev tanpa arah keel" },
+      { source: "futures", ok: !!futuresDetail, detail: futuresDetail ? "futures metrics tersedia" : "GAGAL / tidak dikirim" },
+      { source: "backtest", ok: true, detail: "DB replay_runs (bisa kosong)" },
+      // P1-01: verdict provenance harga dari server — klaim client tidak ditelan
+      // mentah; STALE/SIMULATED/UNKNOWN ikut "failed sources" di prompt.
+      healthRowFromVerdict(opts.marketPriceVerdict, "provenance:market.price"),
+    ],
+    multiTf: {},
+    futuresDetail,
+    macroEcho: opts.macroCalendar ? { ...opts.macroCalendar } : null,
+    onChainPolicy: onChainDecisionContext(opts.onChainMetrics),
+    backtestCtx,
+  });
+  const prompt = jevStateToPrompt(state);
+
+  for (const entry of jevProviderEntries()) {
+    const provider = entry.id;
+    const cfg = entry.cfg;
+    if (entry.kind === "http" && !isProviderConfigured(cfg as ProviderConfig)) {
+      console.warn(`[jev] ${provider} tidak terkonfigurasi (baseUrl/apiKey/model kosong) — lanjut.`);
+      continue;
+    }
+    const modelSlug = entry.kind === "cli" ? (cfg as OpencodeGatewayConfig).model : (cfg as ProviderConfig).model;
+    try {
+      const res = await callJevProvider(entry, prompt);
+      if (!res.ok) {
+        const why = sanitizeJevError(res.error || `HTTP ${res.status ?? "?"}`);
+        console.warn(`[jev] ${provider} gagal (${why}) — coba provider berikutnya.`);
+        errors.push(`${provider}: ${why}`);
+        continue;
+      }
+      const parsed = parseJevResponse(res.data);
+      if (!parsed.ok || !parsed.parsed) {
+        const why = sanitizeJevError(parsed.issues?.map((i) => i.message).join("; ") || "non-JSON");
+        console.warn(`[jev] ${provider} output invalid (${why}) — coba berikutnya.`);
+        errors.push(`${provider}: output invalid (${why})`);
+        continue;
+      }
+      const decision = assembleDecision(parsed.parsed, {
+        symbol,
+        currentPrice: price,
+        keelSummary,
+        technicals: opts.technicals,
+        riskConfig: {
+          maxRiskPerTradePercent: Number(opts.riskParams?.maxRiskPerTradePercent) || 10,
+          minConfidenceThreshold: Number(opts.riskParams?.minConfidenceThreshold) || 50,
+        },
+      });
+      // P1-01: ENTRY policy — harga dinyatakan palsu/basi/simulasi → HOLD
+      // (EXIT risiko tidak diblokir; itu domain bracket monitor).
+      const gated = applyEntryPolicyGate(
+        { action: decision.action, positionSizePercent: decision.positionSizePercent, reasoning: decision.reasoning },
+        opts.marketPriceVerdict
+      );
+      const finalDecision = gated.gated ? { ...decision, action: gated.action as "BUY" | "SELL" | "HOLD", positionSizePercent: gated.positionSizePercent, reasoning: gated.reasoning } : decision;
+      const payloadForSchema = {
+        action: finalDecision.action,
+        confidence: finalDecision.confidence,
+        targetPrice: finalDecision.targetPrice,
+        stopLoss: finalDecision.stopLoss,
+        takeProfit: finalDecision.takeProfit,
+        positionSizePercent: finalDecision.action === "HOLD" ? 1 : finalDecision.positionSizePercent,
+      };
+      const shape = DECISION_RESPONSE_SCHEMA.safeParse(payloadForSchema);
+      if (!shape.success) {
+        const why = sanitizeJevError(shape.error.issues.map((i) => i.message).join("; "));
+        console.warn(`[jev] ${provider}: hasil assembleDecision gagal shape lama (${why}) — coba berikutnya.`);
+        errors.push(`${provider}: shape lama gagal (${why})`);
+        continue;
+      }
+      const priceOk =
+        finalDecision.action === "BUY"
+          ? finalDecision.stopLoss < price && price < finalDecision.takeProfit
+          : finalDecision.action === "SELL"
+            ? finalDecision.takeProfit < price && price < finalDecision.stopLoss
+            : true;
+      if (!priceOk) {
+        console.warn(`[jev] ${provider}: guard harga gagal — coba berikutnya.`);
+        errors.push(`${provider}: guard harga gagal`);
+        continue;
+      }
+      opts.onDone(
+        {
+          ...payloadForSchema,
+          reasoning: finalDecision.reasoning,
+        },
+        provider,
+        modelSlug,
+        parsed.parsed,
+        Date.now(),
+        errors
+      );
+      return { handled: true, errors };
+    } catch (err: any) {
+      console.warn(`[jev] ${provider} unexpected (tanpa throw ke Express): ${sanitizeJevError(err?.message || err)}`);
+      errors.push(`${provider}: ${sanitizeJevError(err?.message || err)}`);
+      continue;
+    }
+  }
+  return { handled: false, errors };
+}
+
+/** Konteks backtest (replay runs tersimpan per simbol) — dipakai prompt Gemini
+ *  maupun state Jev. Dideklarasikan di module scope supaya bisa dipakai kedua
+ *  route + chain Jev tanpa duplikasi. */
+function buildBacktestContextFor(symbol: string): string {
+  try {
+    const symUpper = String(symbol || "").toUpperCase().replace(" ", "");
+    const runs = (listReplayRunsDb(50) || []).filter(
+      (r) => r.symbol.toUpperCase().replace(" ", "") === symUpper || `${r.symbol}USDT`.toUpperCase().replace(" ", "") === symUpper
+    );
+    if (runs.length === 0) {
+      return "Tidak ada run replay/backtest tersimpan untuk simbol ini. (Jalankan Replay di tab Paper lalu klik Export untuk menghasilkan).";
+    }
+    const rows = runs.slice(0, 3).map((r) => {
+      const date = new Date(r.createdAt).toISOString().slice(0, 10);
+      return (
+        `- ${date} · ${r.symbol} ${r.timeframe} · ${r.totalCandles} candle · ` +
+        `${r.totalTrades} trade (${r.winRate}% win) · PF ${r.profitFactor} · avgR ${r.avgR} · ` +
+        `MaxDD ${r.maxDrawdownPct}% · PnL ${r.realizedPnl >= 0 ? "+" : ""}$${r.realizedPnl.toFixed(2)} (modal $${r.initialCash.toFixed(0)})`
+      );
+    });
+    return (
+      "Run replay/backtest historis terbaru pada simbol ini (sumber candle REAL Binance Vision):\n" +
+      rows.join("\n") +
+      "\nCatatan penting: ini HASIL MASA LALU (backtest) — bukan prediksi & bukan jaminan. " +
+      "Gunakan sebagai KALIBRASI keyakinan: jika backtest strategi menunjukkan win rate rendah / MaxDD besar / PF < 1, " +
+      "turunkan tingkat keyakinan dan hindari bias optimistik."
+    );
+  } catch (e: any) {
+    return `Gagal memuat konteks backtest: ${e?.message || "unknown"}`;
+  }
+}
+
 export function registerAiRoutes(app: Express): void {
   // 1. LLM Decision Engine Route (MTF Liquidation Hunt, On-Chain Analysis & Macro Calendar Integration)
   app.post("/api/ai-decision", requireAuth, async (req, res) => {
@@ -48,9 +392,87 @@ export function registerAiRoutes(app: Express): void {
       portfolioEquity,
       riskParams,
     } = req.body;
-    const reqOrderBook = (req.body as any)?.orderBook;
-    const reqRecentTrades = (req.body as any)?.recentTrades;
-    const reqFutures = (req.body as any)?.futures;
+const reqOrderBook = (req.body as any)?.orderBook;
+const reqRecentTrades = (req.body as any)?.recentTrades;
+const reqFutures = (req.body as any)?.futures;
+// P1-01: verdict provenance harga (klaim client diverifikasi server-side).
+const marketPriceVerdict = marketPriceVerdictFromBody(req.body, startTime);
+
+// ===== JEV CHIP (System One) — chain: jev-zen → jev-openrouter → Gemini → Keel.
+// Jev lebih cepat & terstruktur; kalau semua provider Jev mati, jatuh ke
+// chain Gemini yang sudah ada (tidak throw — pola tetap sama).
+const jevHandled = await tryJevDecisionChain({
+  symbol: String(symbol || "BTC/USDT"),
+  currentPrice: Number(currentPrice) || 0,
+  technicals,
+  mtfLiquidity,
+  reqOrderBook,
+  reqRecentTrades,
+  reqFutures,
+  onChainMetrics,
+  macroCalendar,
+  riskParams,
+  provenance: (req.body as any)?.provenance ?? null,
+  marketPriceVerdict,
+      onDone: (payload, provider, modelSlug, jev, latencyMs) => {
+        const inferenceLatency = Date.now() - startTime;
+        const maxRisk = Number(riskParams?.maxRiskPerTradePercent) || 0;
+        const clampedSize =
+          maxRisk > 0 && Number(payload.positionSizePercent) > maxRisk ? maxRisk : Number(payload.positionSizePercent);
+        try {
+          const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          saveAgentDecisionDb({
+            id: decisionId,
+            created_at: Date.now(),
+            symbol: String(symbol || "BTC/USDT"),
+            action: String(payload.action),
+            confidence: Number(payload.confidence),
+            model_id: modelSlug,
+            latency_ms: inferenceLatency,
+            prompt: `jev-state symbol=${String(symbol || "BTC/USDT")} provider=${provider} ${latencyMs}`,
+            response: JSON.stringify(payload).slice(0, 2000),
+            source_tags: JSON.stringify({
+              provider,
+              model: modelSlug,
+              jevConfidence: jev.confidence,
+              jevRiskLevel: jev.riskLevel,
+              provenance: (req.body as any)?.provenance ?? null,
+            }),
+          });
+          appendAudit("decision", {
+            decisionId,
+            symbol: String(symbol || "BTC/USDT"),
+            action: String(payload.action),
+            confidence: Number(payload.confidence),
+            latencyMs: inferenceLatency,
+            modelId: modelSlug,
+            provider,
+            jevConfidence: jev.confidence,
+            jevRiskLevel: jev.riskLevel,
+            clampedPositionSize: clampedSize !== Number(payload.positionSizePercent),
+          });
+        } catch (e: any) {
+          console.warn(`[jev] gagal simpan audit decision: ${e?.message}`);
+        }
+        res.json({
+          ...payload,
+          positionSizePercent: clampedSize,
+          reasoning: payload.reasoning,
+          source: provider,
+          modelId: modelSlug,
+          decisionSource: provider,
+          jevConfidence: jev.confidence,
+          jevRiskLevel: jev.riskLevel,
+          inferenceLatencyMs: inferenceLatency,
+          provenance: (req.body as any)?.provenance ?? null,
+          promptSummary: `jevs=${provider} symbol=${String(symbol || "BTC/USDT")} price=${currentPrice} conf=${jev.confidence} risk=${jev.riskLevel}`,
+        });
+      },
+    });
+    // handled = objek {handled:boolean} — cek PROPERTINYA, bukan objeknya
+    // (objek selalu truthy; dulu `if (jevHandled)` membuat semua jalur
+    // fallback Gemini/keel pulang tanpa respons → request gantung).
+    if (jevHandled.handled) return;
 
     const client = getGeminiClient();
 
@@ -98,6 +520,7 @@ TUGAS ANDA:
 3. Jika ada sweep BSL (short stop swept) atau Whale Inflow besar menjelang high-impact macro -> Bearish Reversal / Distribution.
 4. Tentukan aksi (BUY, SELL, atau HOLD) dan Confidence (1-100%).
 5. Tentukan Stop Loss presisi di luar invalidation wick sweep dan Take Profit menuju Liquidity Pool lawan.
+   (CATATAN PIPELINE: level SL/TP/target/size FINAL dihitung ulang SERVER secara deterministik dari BSL/SSL/ATR — angka Anda dipakai sebagai kalibrasi arah & keyakinan, bukan level eksekusi.)
 6. Berikan reasoning ringkas (2-3 kalimat) yang menjelaskan integrasi Liquidity + On-chain + Makro.
 7. KALIBRASI dengan BACKTEST CONTEXT: jika strategi historis simbol ini menunjukkan PF < 1 atau MaxDD tinggi -> JANGAN overconfident; turunkan confidence / kecilkan positionSizePercent secara wajar.
 
@@ -123,30 +546,7 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
   }
 }`;
 
-        const decisionSchema = z.object({
-          action: z.enum(["BUY", "SELL", "HOLD"]),
-          confidence: z.number().int().min(1).max(100).finite(),
-          targetPrice: z.number().finite().positive(),
-          stopLoss: z.number().finite().positive(),
-          takeProfit: z.number().finite().positive(),
-          positionSizePercent: z.number().min(1).max(100),
-          reasoning: z.string().optional(),
-          onChainContext: z
-            .object({
-              smartMoneyBias: z.string().optional(),
-              netflowStatus: z.string().optional(),
-              mvrvZScore: z.number().optional(),
-              whaleSignal: z.string().optional(),
-            })
-            .optional(),
-          macroContext: z
-            .object({
-              nearestEventName: z.string().optional(),
-              volatilityRisk: z.string().optional(),
-              fedStance: z.string().optional(),
-            })
-            .optional(),
-        });
+        const decisionSchema = DECISION_RESPONSE_SCHEMA;
 
       const candidateModels = ["gemini-3.8-flash", "gemini-3.7-flash"];
         let responseText: string = "{}";
@@ -189,12 +589,13 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         if (!responseText || /^\s*\{?\s*\}$/.test(responseText.trim())) {
           responseText = "{}";
           if (lastErr) {
-            // Semua model gagal (termasuk transien): jangan throw — biarkan
-            // jatuh ke fallback keel di bawah (503 JSON informatif).
+            // Semua model gagal (termasuk transien): jangan 502 validation —
+            // itu untuk output yang ADA tapi rusak. Jatuh ke fallback keel.
             console.warn(`Gemini decision semua model gagal: ${String(lastErr?.message || lastErr).slice(0, 160)}`);
           }
         }
-
+        const allGeminiFailed = !!lastErr && /^\s*\{?\s*\}$/.test(responseText.trim());
+        if (!allGeminiFailed) {
         let parsedDecision: unknown;
         try {
           parsedDecision = JSON.parse(responseText);
@@ -255,44 +656,52 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         }
 
         const parsedDecision2 = validation.data as z.infer<typeof decisionSchema>;
-        const currentP = Number(currentPrice) || 0;
-        const isBadOrder =
-          (parsedDecision2.action === "BUY" &&
-            !(parsedDecision2.stopLoss < currentP && currentP < parsedDecision2.takeProfit)) ||
-          (parsedDecision2.action === "SELL" &&
-            !(parsedDecision2.takeProfit < currentP && currentP < parsedDecision2.stopLoss));
-        if (parsedDecision2.action !== "HOLD" && isBadOrder) {
-          const inferenceLatency = Date.now() - startTime;
-          try {
-            appendAudit("decision", {
-              symbol: String(symbol || "BTC/USDT"),
-              action: parsedDecision2.action,
-              latencyMs: inferenceLatency,
-              modelId: usedModel,
-              reason: "invalid-price-order",
-              details: {
-                currentPrice: currentP,
-                stopLoss: parsedDecision2.stopLoss,
-                takeProfit: parsedDecision2.takeProfit,
-              },
-            });
-          } catch {}
-          return res.status(502).json({
-            success: false,
-            source: "fallback-validation-failed",
-            reason: "invalid-price-order",
-            message:
-              parsedDecision2.action === "BUY"
-                ? "Order BUY tidak valid: harus stopLoss < harga sekarang < takeProfit."
-                : "Order SELL tidak valid: harus takeProfit < harga sekarang < stopLoss.",
-          });
-        }
 
-        const maxRisk = Number(riskParams?.maxRiskPerTradePercent) || 0;
-        const positionSizePercent =
-          maxRisk > 0 && parsedDecision2.positionSizePercent > maxRisk
-            ? maxRisk
-            : parsedDecision2.positionSizePercent;
+        // ---------------------------------------------------------------------
+        // FIX-B (audit 2026-09-21): level SL/TP/target/size TIDAK lagi diambil
+        // dari angka LLM (dulu: schema + price-order check 502 + clamp manual).
+        // LLM hanya menyetor arah + confidence; level dihitung DETERMINISTIK
+        // dari data real server (BSL/SSL → ATR → band default) via
+        // assembleDecision — cermin persis jalur Jev (ctx sama: keelSummary
+        // dari buildDecisionKeelSummary). Angka LLM yang tidak konsisten
+        // dengan struktur likuiditas tidak bisa lagi masuk pipeline order.
+        // ---------------------------------------------------------------------
+        const assembledGemini = assembleDecision(
+          { action: parsedDecision2.action, confidence: parsedDecision2.confidence, riskLevel: "MEDIUM" },
+          {
+            symbol: String(symbol || "BTC/USDT"),
+            currentPrice: Number(currentPrice) || 0,
+            keelSummary: buildDecisionKeelSummary({
+              symbol: String(symbol || "BTC/USDT"),
+              currentPrice: Number(currentPrice) || 0,
+              technicals,
+              mtfLiquidity,
+              orderBook: reqOrderBook,
+              recentTrades: reqRecentTrades,
+              futures: reqFutures,
+            }),
+            technicals,
+            riskConfig: {
+              maxRiskPerTradePercent: Number(riskParams?.maxRiskPerTradePercent) || 10,
+              minConfidenceThreshold: Number(riskParams?.minConfidenceThreshold) || 50,
+            },
+          }
+        );
+
+        // P1-01: ENTRY policy — harga dinyatakan palsu/basi/simulasi → HOLD
+        // (jalur Gemini juga kena gate; EXIT risiko tidak ikut diblokir).
+        const gated = applyEntryPolicyGate(
+          { action: assembledGemini.action, positionSizePercent: assembledGemini.positionSizePercent, reasoning: assembledGemini.reasoning },
+          marketPriceVerdict
+        );
+        const finalDecision = gated.gated
+          ? { ...assembledGemini, action: gated.action as "BUY" | "SELL" | "HOLD", positionSizePercent: 1, reasoning: gated.reasoning }
+          : {
+              ...assembledGemini,
+              // Kontrak wire sama dengan jalur Jev (payloadForSchema): HOLD
+              // perlu positionSizePercent>=1 di wire — client zero-kan sendiri.
+              positionSizePercent: assembledGemini.action === "HOLD" ? 1 : assembledGemini.positionSizePercent,
+            };
 
         const inferenceLatency = Date.now() - startTime;
         const provenance = (req.body && req.body.provenance) || null;
@@ -300,19 +709,23 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         try {
           const decisionId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const promptSummary = prompt.slice(0, 800);
-          const responseStr = JSON.stringify(parsedDecision2).slice(0, 2000);
+          // FIX-B: audit menyimpan DUA sisi — output mentah LLM (kalibrasi) +
+          // level hasil assembleDecision (yang benar-benar dikirim ke pipeline).
+          const responseStr = JSON.stringify({ llmRaw: parsedDecision2, assembled: finalDecision }).slice(0, 2000);
           const sourceTags =
             JSON.stringify({
               model: usedModel,
               provenance,
-              clampedPositionSize: positionSizePercent !== parsedDecision2.positionSizePercent,
+              levelsMethod: (finalDecision.reasoning.match(/levels dari ([A-Za-z/-]+)/) || [])[1] ?? "unknown",
+              llmRawSize: parsedDecision2.positionSizePercent,
+              finalSize: finalDecision.positionSizePercent,
             }) || null;
           saveAgentDecisionDb({
             id: decisionId,
             created_at: Date.now(),
             symbol: String(symbol || "BTC/USDT"),
-            action: parsedDecision2.action,
-            confidence: parsedDecision2.confidence,
+            action: finalDecision.action,
+            confidence: finalDecision.confidence,
             model_id: usedModel,
             latency_ms: inferenceLatency,
             prompt: promptSummary,
@@ -322,8 +735,8 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
           appendAudit("decision", {
             decisionId,
             symbol: String(symbol || "BTC/USDT"),
-            action: parsedDecision2.action,
-            confidence: parsedDecision2.confidence,
+            action: finalDecision.action,
+            confidence: finalDecision.confidence,
             latencyMs: inferenceLatency,
             modelId: usedModel,
             prompt: promptSummary.slice(0, 200),
@@ -341,13 +754,13 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
             `riskMax=${riskParams?.maxRiskPerTradePercent ?? "?"}% equity=${portfolioEquity ?? "?"}`,
           ].join("\n") + `\nmodel=${usedModel} latency=${inferenceLatency}ms`;
         return res.json({
-          ...parsedDecision2,
-          positionSizePercent,
+          ...finalDecision,
           source: usedModel,
           inferenceLatencyMs: inferenceLatency,
           provenance,
           promptSummary,
         });
+        }
       } catch (err: any) {
         console.warn("Gemini API call failed:", err?.message);
         return res.status(503).json({
@@ -512,35 +925,6 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
     macroCalendar?: MacroSummary | null;
     technicals?: unknown;
     mtfLiquidity?: MTFLiquidityAnalysis | null;
-  }
-
-  function buildBacktestContextFor(symbol: string): string {
-    try {
-      const symUpper = String(symbol || "").toUpperCase().replace(" ", "");
-      const runs = (listReplayRunsDb(50) || []).filter(
-        (r) => r.symbol.toUpperCase().replace(" ", "") === symUpper || `${r.symbol}USDT`.toUpperCase().replace(" ", "") === symUpper
-      );
-      if (runs.length === 0) {
-        return "Tidak ada run replay/backtest tersimpan untuk simbol ini. (Jalankan Replay di tab Paper lalu klik Export untuk menghasilkan).";
-      }
-      const rows = runs.slice(0, 3).map((r) => {
-        const date = new Date(r.createdAt).toISOString().slice(0, 10);
-        return (
-          `- ${date} · ${r.symbol} ${r.timeframe} · ${r.totalCandles} candle · ` +
-          `${r.totalTrades} trade (${r.winRate}% win) · PF ${r.profitFactor} · avgR ${r.avgR} · ` +
-          `MaxDD ${r.maxDrawdownPct}% · PnL ${r.realizedPnl >= 0 ? "+" : ""}$${r.realizedPnl.toFixed(2)} (modal $${r.initialCash.toFixed(0)})`
-        );
-      });
-      return (
-        "Run replay/backtest historis terbaru pada simbol ini (sumber candle REAL Binance Vision):\n" +
-        rows.join("\n") +
-        "\nCatatan penting: ini HASIL MASA LALU (backtest) — bukan prediksi & bukan jaminan. " +
-        "Gunakan sebagai KALIBRASI keyakinan: jika backtest strategi menunjukkan win rate rendah / MaxDD besar / PF < 1, " +
-        "turunkan tingkat keyakinan dan hindari bias optimistik."
-      );
-    } catch (e: any) {
-      return `Gagal memuat konteks backtest: ${e?.message || "unknown"}`;
-    }
   }
 
   function deriveTechnicals(
@@ -756,7 +1140,7 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
       !!mtfLiquidity,
       mtfLiquidity ? `state=${(mtfLiquidity as any).activeState ?? "?"}` : "GAGAL — struktur likuiditas tak tersedia"
     );
-    // Network anchors do not validate synthetic directional analytics.
+// Network anchors do not validate synthetic directional analytics.
     pushHealth("onchain", false, onChainDecisionContext(body.onChainMetrics));
     pushHealth(
       "macro",
@@ -765,13 +1149,29 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         ? Number((body.macroCalendar as any).macroRiskIndex) > 0
           ? "client-sent (ada event/risiko)"
           : "client-sent tapi no-data/fail-closed"
-        : "GAGAL/tidak dikirim — jangan anggap pasar aman"
+        : "GAGAL — macro tidak dikirim"
     );
+    // P1-01: provenance harga diverifikasi server — klaim client (venus/ts
+    // source) tidak ditelan; STALE/SIMULATED/UNKNOWN → row not-ok (wajib
+    // diakui prompt) + entry gate di enforcement.
+    // (Tambahan setelah pushHealth macro — lokasi tepat diverifikasi di lint.)
     pushHealth(
       "backtest",
       true,
       "DB replay_runs (bisa kosong — LLM wajib sebut bila tidak ada run)"
     );
+    // P1-01: provenance harga diverifikasi SERVER — klaim client tidak ditelan
+    // mentah; STALE/SIMULATED/UNKNOWN → row not-ok (wajib diakui prompt) + gate.
+    const advisorPriceVerdict = marketPriceVerdictFromBody(req.body, startTime);
+    const provBlocks =
+      advisorPriceVerdict.kind === "STALE" ||
+      advisorPriceVerdict.kind === "SIMULATED" ||
+      advisorPriceVerdict.kind === "SYNTHETIC" ||
+      advisorPriceVerdict.kind === "UNKNOWN";
+    {
+      const provRow = healthRowFromVerdict(advisorPriceVerdict, "provenance:market.price");
+      pushHealth(provRow.source, provRow.ok, provRow.detail);
+    }
 
     let keelDecision: any = null;
     let rawSignal: any = null;
@@ -882,6 +1282,52 @@ Jawab HANYA dalam format JSON valid tanpa markdown wrapper:
         : null,
     };
 
+    // ===== TAHAP 1 — Jev chip: keputusan terstruktur dari state yang SAMA
+    // dengan prompt Gemini (keelSummary/dataHealth/multiTf/futures/macro/
+    // onchain policy/backtest). Jev mati → jevDecision null → Gemini decide;
+    // semua mati → keelSummary.
+    let jevDecision: { action: "BUY" | "SELL" | "HOLD"; confidence: number; riskLevel: "LOW" | "MEDIUM" | "HIGH"; source: string } | null = null;
+    {
+      const jevState = buildJevState({
+        symbol: sym,
+        currentPrice: livePrice,
+        keelSummary,
+        dataHealth,
+        multiTf,
+        futuresDetail,
+        macroEcho: macroRealEcho ?? macroEcho ?? null,
+        onChainPolicy: onChainDecisionContext(body.onChainMetrics),
+        backtestCtx: buildBacktestContextFor(sym),
+      });
+      const jevPrompt = jevStateToPrompt(jevState);
+      for (const entry of jevProviderEntries()) {
+        const provider = entry.id;
+        if (entry.kind === "http" && !isProviderConfigured(entry.cfg as ProviderConfig)) {
+          console.warn(`[ai-advisor] ${provider} tidak terkonfigurasi — lanjut.`);
+          continue;
+        }
+        const modelSlug = entry.kind === "cli" ? (entry.cfg as OpencodeGatewayConfig).model : (entry.cfg as ProviderConfig).model;
+        try {
+          const res = await callJevProvider(entry, jevPrompt);
+          if (!res.ok) {
+            console.warn(`[ai-advisor] ${provider} gagal (${res.error ?? res.status}) — lanjut.`);
+            continue;
+          }
+          const parsed = parseJevResponse(res.data);
+          if (!parsed.ok || !parsed.parsed) {
+            console.warn(`[ai-advisor] ${provider} output invalid — lanjut.`);
+            continue;
+          }
+          jevDecision = { ...parsed.parsed, source: provider };
+          console.log(`[ai-advisor] Jev decide: ${jevDecision.action} conf=${jevDecision.confidence} risk=${jevDecision.riskLevel} via ${provider} (${modelSlug})`);
+          break;
+        } catch (err: any) {
+          console.warn(`[ai-advisor] ${provider} unexpected (tanpa throw): ${String(err?.message || err)}`);
+          continue;
+        }
+      }
+    }
+
     const client = getGeminiClient();
 
     if (client && keelDecision) {
@@ -941,6 +1387,12 @@ ${macroRealEcho?.upcoming?.map((e) => `  • ${e.title} @ ${e.dateUtc} (forecast
 
 [BACKTEST CONTEXT (HASIL REPLAY HISTORIS — kalibrasi keyakinan)]:
 ${backtestCtx}
+
+${jevDecision
+  ? `[JEV DECISION (System One — keputusan terstruktur; WAJIB jadi dasar arah)]:
+- Arah: ${jevDecision.action} | Confidence: ${jevDecision.confidence}% | riskLevel: ${jevDecision.riskLevel} (source: ${jevDecision.source})
+- ATURAN: insight HARUS konsisten dengan arah Jev. JANGAN membalik arah Jev kecuali ada konflik data yang sangat jelas — jika ada konflik, sebutkan eksplisit di insight/caveat tetapi tetap IKUTI arah Jev.`
+  : `[JEV DECISION]: tidak tersedia (provider Jev mati/tidak dikonfigurasi) — arah decision FINAL diambil dari keel engine (deterministik); suggestedBias Anda dipakai sebagai INSIGHT NARATIF, bukan penentu arah.`}
 
 TUGAS ANDA:
 1. Analisis SINTESIS: Hubungkan data mikro (Keel) dengan konteks besar (Makro/On-chain). Mengapa harga bergerak seperti ini?
@@ -1037,12 +1489,79 @@ Jawab HANYA JSON valid tanpa markdown:
                 `[ai-advisor] LLM output ditolak: tidak konfirmasi data GAGAL [${failedSources.join(", ")}] di insight/dataGaps.`
               );
             } else {
+              // Enforcement arah: Jev decide → Gemini insight wajib tidak
+              // membalik arah. Konflik eksplisit tetap dicatat di caveat.
+              let suggestedBias = ai.suggestedBias;
+              let caveat = ai.caveat || "";
+              if (jevDecision && jevDecision.action !== "HOLD") {
+                const want = jevDecision.action === "BUY" ? ["LONG", "BULLISH"] : ["SHORT", "BEARISH"];
+                const aligned = suggestedBias != null && want.includes(String(suggestedBias).toUpperCase());
+                if (!aligned) {
+                  const before = suggestedBias ?? "?";
+                  suggestedBias = jevDecision.action === "BUY" ? "LONG" : "SHORT";
+                  caveat = `${caveat} [JEV override] Gemini bias "${before}" berbeda dari Jev ${jevDecision.action} — arah mengikuti Jev (risk gate).`.trim();
+                }
+              }
+              // P1-01: ENTRY policy — harga dinyatakan palsu/basi/simulasi →
+              // suspend arah apa pun (gate menang atas override Jev). EXIT tidak diblokir.
+              if (provBlocks) {
+                suggestedBias = "NEUTRAL";
+                caveat = `${caveat} [PROVENANCE GATE] harga dinyatakan ${advisorPriceVerdict.kind} — ENTRY ditahan, EXIT risiko tidak diblokir.`.trim();
+              }
+              // FIX-A (audit 2026-09-21): Jev mati → arah decision dari KEEL
+              // (data mateng, deterministik), BUKAN dari suggestedBias naratif
+              // Gemini. Confidence & riskLevel ikut keel; riskLevel diturunkan
+              // deterministik dari confidence keel (>=75 LOW, >=50 MEDIUM,
+              // selainnya HIGH). Bias Gemini tetap tampil sebagai insight
+              // (ai.suggestedBias); kalau berlawanan dengan arah keel →
+              // dicatat di caveat, bukan dipakai sebagai arah.
+              const keelConfidence = Number(keelSummary.confidence ?? 0);
+              const keelRawAction = String(keelSummary.action || "HOLD");
+              const keelFallbackDecision = {
+                action:
+                  keelRawAction === "BUY" || keelRawAction === "LONG"
+                    ? ("BUY" as const)
+                    : keelRawAction === "SELL" || keelRawAction === "SHORT"
+                      ? ("SELL" as const)
+                      : ("HOLD" as const),
+                confidence: keelConfidence,
+                riskLevel: (keelConfidence >= 75 ? "LOW" : keelConfidence >= 50 ? "MEDIUM" : "HIGH") as "LOW" | "MEDIUM" | "HIGH",
+                source: "keel",
+              };
+              if (!jevDecision) {
+                const biasDir =
+                  suggestedBias === "LONG" || suggestedBias === "BULLISH"
+                    ? "BUY"
+                    : suggestedBias === "SHORT" || suggestedBias === "BEARISH"
+                      ? "SELL"
+                      : "HOLD";
+                const conflict = biasDir !== "HOLD" && biasDir !== keelFallbackDecision.action;
+                caveat = `${caveat} [KEEL FALLBACK] Jev tidak tersedia — arah decision dari keel (${keelFallbackDecision.action}); suggestedBias Gemini hanya insight naratif${conflict ? ` (konflik: bias ${biasDir} vs keel ${keelFallbackDecision.action})` : ""}.`.trim();
+              }
+              // P1-01: rekomendasi TERAKHIR di-gate — saat harga dinyatakan
+              // palsu/basi, decision.action = HOLD (jevDecision row tetap
+              // mencatat output mentah untuk analisis; rekomendasi = HOLD).
+              const rawDecision = jevDecision
+                ? { action: jevDecision.action, confidence: jevDecision.confidence, riskLevel: jevDecision.riskLevel, source: jevDecision.source }
+                : keelFallbackDecision;
+              const finalDecisionBlock = provBlocks
+                ? {
+                    action: "HOLD" as const,
+                    confidence: rawDecision.confidence,
+                    riskLevel: rawDecision.riskLevel,
+                    source: rawDecision.source,
+                  }
+                : rawDecision;
               return res.json({
                 success: true,
                 mode: "ai",
                 geminiConfigured: true,
                 model: usedModel,
                 timestamp: Date.now(),
+                decision: finalDecisionBlock,
+                decisionSource: jevDecision ? jevDecision.source : "keel",
+                jevDecision: jevDecision ?? null,
+                provenanceGate: provBlocks ? { kind: advisorPriceVerdict.kind, note: advisorPriceVerdict.note } : null,
                 keelSummary,
                 technicals: technicalsEcho,
                 multiTfTechnicals: multiTf,
@@ -1054,10 +1573,10 @@ Jawab HANYA JSON valid tanpa markdown:
                 backtest: { symbol: sym, context: backtestCtx },
                 ai: {
                   insight: ai.insight,
-                  suggestedBias: ai.suggestedBias,
+                  suggestedBias,
                   keyLevels: ai.keyLevels,
                   risks: ai.risks || [],
-                  caveat: ai.caveat || "",
+                  caveat,
                   dataGaps: ai.dataGaps || [],
                 },
                 latencyMs: Date.now() - startTime,
@@ -1111,7 +1630,10 @@ Jawab HANYA JSON valid tanpa markdown:
       (techBits.length > 0 ? ` Teknikal: ${techBits.join(", ")}.` : "") +
       (futBits.length > 0 ? ` Futures: ${futBits.join("; ")}.` : "") +
       " On-chain: analitik belum terverifikasi (termasuk proyeksi real-anchored) — diabaikan." +
-      ` ${mcNote} Eksekusi TETAP keputusan Anda — periksa level SL/TP sebelum bertindak.`;
+      ` ${mcNote} Eksekusi TETAP keputusan Anda — periksa level SL/TP sebelum bertindak.` +
+      (provBlocks
+        ? ` [PROVENANCE GATE] harga dinyatakan ${advisorPriceVerdict.kind} — ENTRY ditahan, EXIT risiko tidak diblokir.`
+        : "");
 
     return res.json({
       success: true,
@@ -1124,6 +1646,16 @@ Jawab HANYA JSON valid tanpa markdown:
             ? "KEY_LEGACY_REVOKED"
             : "AI_CALL_FAILED",
       timestamp: Date.now(),
+      decision: {
+        action: provBlocks ? "HOLD" : keelSummary.action === "BUY" ? "BUY" : keelSummary.action === "SELL" ? "SELL" : "HOLD",
+        confidence: Number(keelSummary.confidence ?? 50),
+        // FIX-A: riskLevel diturunkan deterministik dari confidence keel
+        // (>=75 LOW, >=50 MEDIUM, selainnya HIGH) — bukan hardcode MEDIUM.
+        riskLevel: (Number(keelSummary.confidence ?? 50) >= 75 ? "LOW" : Number(keelSummary.confidence ?? 50) >= 50 ? "MEDIUM" : "HIGH") as "LOW" | "MEDIUM" | "HIGH",
+        source: "keel",
+      },
+      decisionSource: "keel",
+      jevDecision: jevDecision ?? null,
       keelSummary,
       technicals: technicalsEcho,
       multiTfTechnicals: multiTf,

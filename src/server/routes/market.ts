@@ -5,6 +5,8 @@ import { scanGateMicrocapPumps } from "@/src/logic/pumpScanner";
 import { analyzeMTFLiquidity } from "@/src/logic/liquidityHunt";
 import type { Candle, OrderBook } from "@/src/types";
 import { parseMarketSymbol, fetchWithTimeout } from "./_utils";
+import { jevZenConfig, openRouterConfig, isProviderConfigured, opencodeGatewayConfig, isOpencodeGatewayConfigured } from "@/src/logic/jevChip";
+import { resolveOpencodeBinary } from "@/src/logic/aiProviders";
 
 interface BitcoinOnChainSnapshot {
   source: string;
@@ -50,6 +52,11 @@ export function registerMarketRoutes(app: Express, heartbeatState: { lastWsTick:
       db: "ok",
       uptimeSec,
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"),
+      jevConfigured: isProviderConfigured(jevZenConfig()),
+      openrouterConfigured: isProviderConfigured(openRouterConfig()),
+      // Gateway keyless opencode: true bila model default/eksplisit di-set DAN
+      // binary CLI ter-resolve (cached 60s). Nilai bool saja — bukan key.
+      opencodeGatewayConfigured: isOpencodeGatewayConfigured(opencodeGatewayConfig()) && resolveOpencodeBinary() !== "",
     });
   });
 
