@@ -10,14 +10,23 @@ interface ErrorBoundaryState {
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  private child: ReactNode;
+  // REGRESI (bug "klik MTF / ganti TF di dashboard tidak mengubah chart"):
+  // dulu ada `private child` yang di-snap di constructor dan dikembalikan
+  // render() — React menerima element reference yang SAMA setiap render →
+  // seluruh subtree di dalam boundary dibekukan pada props mount-time dan
+  // tidak pernah menerima update dari App (state berubah, UI tab tidak).
+  // render() WAJIB memakai props.children TERKINI (React sinkronkan
+  // instance.props tiap render); error case tetap ditangani
+  // getDerivedStateFromError → fallback di bawah.
+  // Catatan: repo tanpa @types/react (Component = any) — props & constructor
+  // harus dideklarasikan eksplisit supaya tervalidasi tsc.
+  props: ErrorBoundaryProps;
+  state: ErrorBoundaryState = { error: null };
 
   constructor(props: ErrorBoundaryProps) {
     super(props);
-    this.child = props.children;
+    this.props = props;
   }
-
-  state: ErrorBoundaryState = { error: null };
 
   static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
     return { error };
@@ -53,6 +62,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         </div>
       );
     }
-    return this.child;
+    return this.props.children;
   }
 }
